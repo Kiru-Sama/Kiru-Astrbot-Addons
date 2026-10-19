@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：工具菜单（ncd_tools）只暴露一个入口，点开才解锁其余工具。
 
 为什么做这个：6 个工具的 schema 每轮都要塞进提示词，4B 这类小模型在多个工具里
@@ -64,8 +64,8 @@ def make_event(umo: str):
 ALL = list(plugin_main.TOOL_NAMES)
 DRAW = list(plugin_main.DRAW_TOOLS)
 REAL = [n for n in ALL if n != plugin_main.MENU_TOOL]
-# 点开 ncd_tools、但还没点 draw_tools 时，应该是这些（ncd_tools 自己还在）
-OPENED_NO_DRAW = [n for n in ALL if n not in DRAW]
+# ★ 2026-10-19：画图工具已改成常驻（不再有"二级目录藏起来"），
+#   所以点开 ncd_tools 之后就应该是全部工具，没有中间态了。
 
 # =====================================================================
 #  用例 1：注册与命名一致
@@ -102,16 +102,10 @@ check("用例2", ts.names() == [plugin_main.MENU_TOOL, "astrbot_builtin_tool"],
 inst._revealed[ev.unified_msg_origin] = 1.0
 ts2 = FakeToolSet(ALL)
 inst._apply_tool_menu(types.SimpleNamespace(func_tool=ts2), ev)
-print(f"  已点开（未点画图目录）: {ts2.names()}")
-check("用例2", sorted(ts2.names()) == sorted(OPENED_NO_DRAW),
-      f"点开 ncd_tools 后画图工具应仍收起，实际 {ts2.names()}")
+print(f"  已点开 ncd_tools: {ts2.names()}")
+check("用例2", sorted(ts2.names()) == sorted(ALL),
+      f"点开 ncd_tools 后应全部可见（含画图工具），实际 {ts2.names()}")
 
-# 再点开画图目录 → 画图工具出现
-inst._draw_revealed[ev.unified_msg_origin] = 1.0
-ts3 = FakeToolSet(ALL)
-inst._apply_tool_menu(types.SimpleNamespace(func_tool=ts3), ev)
-print(f"  已点开画图目录: {ts3.names()}")
-check("用例2", sorted(ts3.names()) == sorted(ALL), f"画图目录点开后应全在，实际 {ts3.names()}")
 
 # =====================================================================
 #  用例 3：按会话隔离
@@ -162,23 +156,16 @@ check("用例4", req_on.func_tool.names() == [plugin_main.MENU_TOOL],
 inst_off, req_off = asyncio.run(run_tune({"tool_menu": False}))
 # ★ 2026-10-18 改：菜单关掉时 ncd_tools 也要摘掉 —— 否则模型（尤其 DeepSeek）
 #   会先点它拿清单、再调真正的工具，白花一次往返和几百 token。
-# ★ 同日再改：画图工具走【二级目录】，和 tool_menu 无关 —— 菜单关着也只留 draw_tools。
-expected_off = sorted(n for n in REAL if n not in DRAW)
-print(f"  tool_menu=False → {len(req_off.func_tool.names())} 个（应 {len(expected_off)}，"
-      f"不含 ncd_tools 和画图工具）")
+# ★ 2026-10-19 再改：画图工具常驻（不再藏），所以关菜单时它们也照常在。
+expected_off = sorted(n for n in REAL)
+print(f"  tool_menu=False → {len(req_off.func_tool.names())} 个（应 {len(expected_off)}，只去掉 ncd_tools）")
 check("用例4", sorted(req_off.func_tool.names()) == expected_off,
-      f"关菜单应保留真实工具但不含 ncd_tools / generate_image / switch_model，"
+      f"关菜单应保留全部真实工具（含画图工具）、只去掉 ncd_tools，"
       f"实际 {req_off.func_tool.names()}")
-check("用例4", "draw_tools" in req_off.func_tool.names(), "关菜单时 draw_tools 也得留着当入口")
+check("用例4", set(plugin_main.DRAW_TOOLS) <= set(req_off.func_tool.names()),
+      "★ 画图工具应该常驻，关菜单时也在")
 
-# 点开画图目录之后，这两个工具要出现（仍是 tool_menu=False 的会话）
-inst_off._draw_revealed["x:FriendMessage:1"] = 1.0
-req_off2 = make_req()
-asyncio.run(inst_off._tune_request(make_event("x:FriendMessage:1"), req_off2))
-print(f"  关菜单 + 点开画图目录 → {sorted(req_off2.func_tool.names())}")
-check("用例4", "generate_image" in req_off2.func_tool.names()
-      and "switch_model" in req_off2.func_tool.names(),
-      "★ 点开 draw_tools 之后画图工具还是没放出来")
+
 
 # =====================================================================
 #  用例 5：能力提示注入
@@ -227,3 +214,5 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 命名一致 / 收窄与解锁 / 会话隔离 / 开关回滚 / 提示注入 全部正确")
+
+

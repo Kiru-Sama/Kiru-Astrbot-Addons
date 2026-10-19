@@ -320,21 +320,13 @@ TOOL_NAMES = (
   `测试-工具注册.py` 会用源码里的装饰器名和这个元组做双向比对，漏一个就红。
 """
 
-# 第二个工具名：画图子菜单（二级目录）。
-# ★ 为什么要有它：画图这一坨（prompt 四条硬规则 + 可选画风清单 + 可选底模清单）
-#   每轮都塞进工具描述，光 generate_image 的描述就上千 token；普通聊天根本用不上。
-#   收进二级菜单后，不画图的轮次只多一行"有个画图工具目录"。
+# 画图相关的两个工具（顺序也是"先画图、再换底模"的顺序）。
+# ★ 2026-10-19 定案：它们**常驻**工具列表，不再藏进二级目录。
+#   藏起来的那版实测会让模型从历史里记得名字、直接调用 → runner 只回
+#   「未找到指定的工具，将跳过」→ 每次画图空转 1~2 轮。
+#   现在 `draw_tools` 只是【可选的说明书】：长规范（提示词四条硬规则 + 画风/底模清单）
+#   放在它返回的内容里，不画图的轮次不用读；想画图的人也可以完全不调它。
 DRAW_TOOLS = ("generate_image", "switch_model")
-
-# 画图工具还没展开时，每轮往系统提示词里补的这一句。
-# ★ 标记和正文分开：`DRAW_GATE_MARK` 用来判"已经注入过"，正文可以随时改。
-DRAW_GATE_MARK = "【画图工具是二级目录】"
-DRAW_GATE_HINT = (
-    DRAW_GATE_MARK
-    + "generate_image 和 switch_model 现在不在你的工具列表里。要画图或换底模，"
-    "必须先调用 draw_tools 展开它们（它会同时给你提示词规则和可选的画风、底模）；"
-    "直接调用这两个名字会被跳过，等于白做。"
-)
 
 # 每个工具给一行"说人话"的说明，给 ncd_tools 的清单用。
 # ★ 必须覆盖 TOOL_NAMES 里的每一个（MENU_TOOL 除外）；测试会核对。
@@ -350,8 +342,8 @@ TOOL_SUMMARY: dict[str, str] = {
     "并直接发出来（size 可写 832x1216，或 竖/横/方，留空=配置默认）",
     "switch_model": "switch_model(model) —— 换画图用的底模（不带参数=看有哪些可选）；"
     "换完之后的出图都用新模型，要重新加载约十几秒",
-    "draw_tools": "draw_tools() —— 画图工具目录（二级）：调用后展开 generate_image / "
-    "switch_model，并给出提示词规则、可选画风、可选底模和当前出图参数",
+    "draw_tools": "draw_tools() —— 画图说明书（可选）：给出提示词规则、可选画风、"
+    "可选底模和当前出图参数。不调它也能直接调 generate_image",
     "view_avatar": "view_avatar(who) —— 看头像，也能看【你自己】的形象（who 填 me）；"
     "不给 who 就是当前说话的人；图只给你自己看，不会发给用户",
     "recall_history": "recall_history(count) —— 回溯最近 30/50/70/90 条历史重看"
@@ -370,8 +362,8 @@ DEFAULT_MENU_HINT = (
     "画图（含参考图生图）、换画图底模、以及看某个人的头像（图只给你自己看，不会发给用户）。\n"
     "要查东西 / 想发表情包 / 想画图之前，先调用工具： ncd_tools "
     "拿到当轮可用的工具清单，再按清单里的名字去调用具体工具。不要凭印象编工具名。\n"
-    "画图是二级目录：先 ncd_tools，再调 draw_tools 展开 generate_image / switch_model，"
-    "它会顺带给你提示词规则和可选的画风、底模清单。\n"
+    "画图直接调 generate_image（参考图用 reference、画幅用 size）；"
+    "想先看提示词规则和可选画风/底模清单，可以调 draw_tools（可选，不是前置步骤）。\n"
     "调用方式：这是「工具调用」，不是聊天 —— 要真的把工具调起来、"
     "参数按工具定义里的字段填，不要只用文字说「我去搜一下」。\n"
     "一次只调一个，等结果回来再决定下一步；ncd_tools 返回的清单里写了每个工具要哪些参数，照着填。\n"
@@ -544,7 +536,7 @@ class NcdToolboxPlugin(star.Star):
         # 工具菜单：哪些会话已经点开过菜单（umo -> 时间戳）。
         # 只有点开过的会话才看得到 ncd_tools 以外的工具，见 _apply_tool_menu。
         self._revealed: dict[str, float] = {}
-        # 二级目录（画图）：点了 draw_tools 才展开 generate_image / switch_model
+        # 画图说明书被调过的会话（只用于"别重复要同一份长文案"）
         self._draw_revealed: dict[str, float] = {}
         # 出图串行锁：同一时刻只允许一条管线在跑（见 _render_image）
         self._render_lock = asyncio.Lock()
@@ -784,15 +776,13 @@ class NcdToolboxPlugin(star.Star):
             #   于是先点它一下、再调真正的工具 —— 白花一次往返和几百 token，
             #   而且它列出来的清单里还有它自己，看着更乱。
             self._hide_menu_tool(req)
-            # ★ 画图工具不管菜单开没开都走二级目录：它们的描述最长，
-            #   而不画图的轮次占绝大多数。
-            self._apply_draw_gate(req, event)
-        # ★ 2026-10-19 实测踩坑：会话里曾经用过 generate_image，重载插件后
-        #   `_draw_revealed` 被清空、工具被收起来，模型照旧直接调它 ——
-        #   AstrBot 的 runner 只回一句「未找到指定的工具: generate_image，将跳过」，
-        #   模型拿不到任何可操作的信息，会连着试好几次。
-        #   所以两种菜单模式下都明说一句"要先展开"，把失败变成一次明确的下一步。
-        self._inject_draw_gate_hint(req, event)
+        # ★ 2026-10-19 定案：画图工具【不再藏】。
+        #   之前把 generate_image / switch_model 收进二级目录，结果是：模型从历史里
+        #   记得这两个名字，直接调 → runner 只回一句「未找到指定的工具，将跳过」，
+        #   模型拿不到可操作反馈，每次画图都要空转 1~2 轮（实测连续复现）。
+        #   现在两个工具常驻，draw_tools 退化成【可选的说明书】：
+        #   想先看提示词规则/画风清单就调它，不想看就直接调 generate_image。
+        #   省 token 的目的仍达到 —— 长规范只在 draw_tools 里，不画图的轮次不用读。
         self._attach_pending_images(req, event)
         # 本地模型不给绘图工具（小模型提示词质量差）
         self._hide_image_tool_for_local(req, event)
@@ -869,62 +859,13 @@ class NcdToolboxPlugin(star.Star):
                 return
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             opened = umo in self._revealed
-            draw_opened = umo in getattr(self, "_draw_revealed", {})
             for name in [t.name for t in req.func_tool.tools]:
                 if name not in TOOL_NAMES or name == MENU_TOOL:
                     continue
                 if not opened:
                     req.func_tool.remove_tool(name)
-                elif name in DRAW_TOOLS and not draw_opened:
-                    # ★ 二级目录：点了 ncd_tools 才看得到 draw_tools，
-                    #   再点 draw_tools 才看得到 generate_image / switch_model。
-                    req.func_tool.remove_tool(name)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[toolbox] 应用工具菜单失败（不影响本轮）: {exc}")
-
-    def _inject_draw_gate_hint(self, req: Any, event: AstrMessageEvent) -> None:
-        """画图工具还没展开时，明确告诉模型"先调 draw_tools"。
-
-        ★ 为什么需要：二级目录把 generate_image / switch_model 从工具集里摘掉了，
-          但模型可能从历史里"记得"它们，直接照旧调用 —— AstrBot 的 runner 只会
-          静默跳过并记一条 warning，模型看不到任何可操作反馈，于是一路空转到结束。
-        ★ 幂等：这段带固定标记，同一轮处理两次也只拼一遍。
-        """
-        try:
-            umo = str(getattr(event, "unified_msg_origin", "") or "")
-            if umo in getattr(self, "_draw_revealed", {}):
-                return
-            # ★ 画图根本没配（没有底模）就别在这儿念了：那说明用户压根不用画图，
-            #   每轮多这几句纯属占额度。
-            if not str(self._conf_str("sd_checkpoint") or "").strip():
-                return
-            sp_text = getattr(req, "system_prompt", None) or ""
-            if DRAW_GATE_MARK in sp_text:
-                return
-            req.system_prompt = _collapse_blank_lines(
-                sp_text.rstrip() + "\n\n" + DRAW_GATE_HINT
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"[toolbox] 注入画图目录提示失败（不影响本轮）: {exc}")
-
-    def _apply_draw_gate(self, req: Any, event: AstrMessageEvent) -> None:
-        """没点过 draw_tools 就不给 generate_image / switch_model。
-
-        ★ 为什么和 tool_menu 分开：菜单关着的时候也要生效。画图两个工具的描述
-          （四条提示词硬规则 + 画风清单 + 底模清单）是每轮提示词里最长的一段，
-          而绝大多数对话根本不画图 —— 想画的时候多调一次 draw_tools 很划算。
-        ★ 全包 try：这是改别人的请求，出错绝不能挡对话。
-        """
-        try:
-            if not req.func_tool:
-                return
-            umo = str(getattr(event, "unified_msg_origin", "") or "")
-            if umo in getattr(self, "_draw_revealed", {}):
-                return
-            for name in DRAW_TOOLS:
-                req.func_tool.remove_tool(name)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"[toolbox] 收起画图工具失败（不影响本轮）: {exc}")
 
     # ---- 缓存辅助（搜索 / 抓取 / 总结共用）----
     def _cache_ttl(self) -> float:
@@ -2446,7 +2387,7 @@ class NcdToolboxPlugin(star.Star):
         #   菜单模式下模型就完全不知道有"看头像"这个工具。
         lines = ["已解锁。接下来可以直接调用下面的工具（括号里是参数）："]
         for name in TOOL_NAMES:
-            if name == MENU_TOOL or name in DRAW_TOOLS:
+            if name == MENU_TOOL:
                 continue
             lines.append("· " + TOOL_SUMMARY.get(name, f"{name}（新增工具，参数见工具定义）"))
         lines += [
@@ -2458,10 +2399,10 @@ class NcdToolboxPlugin(star.Star):
 
     @filter.llm_tool(name="draw_tools")
     async def draw_tools(self, event: AstrMessageEvent) -> str:
-        """画图工具目录：展开画图相关工具，并给出画图规范（提示词规则 / 画风 / 底模）。
+        """画图说明书（可选）：给出提示词规则、可选画风/底模清单、当前出图参数。
 
-        想画图、想改图、想换画图模型时先调用这个，再按返回里的名字去调用。
-        普通聊天不用调。
+        ★ 不是前置步骤：generate_image / switch_model 一直都在工具列表里，
+          想直接画就直接调；不确定提示词怎么写、或想挑画风/底模时再来调这个。
         """
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if not hasattr(self, "_draw_revealed"):
@@ -2471,13 +2412,13 @@ class NcdToolboxPlugin(star.Star):
         if len(self._draw_revealed) > 200:
             keep = sorted(self._draw_revealed.items(), key=lambda kv: kv[1])[-100:]
             self._draw_revealed = dict(keep)
-        logger.info(f"[toolbox] 画图工具目录被点开：{umo or '（未知会话）'}")
+        logger.info(f"[toolbox] 画图说明书被调用：{umo or '（未知会话）'}")
 
         if already:
             return (
-                "画图工具已经展开过了，别重复调用 draw_tools。\n"
-                "直接调用：generate_image(prompt, style, reference, size) 画图；"
-                "switch_model(model) 换底模。"
+                "这份画图规范已经给过你了，不用重复要。\n"
+                "现在可以直接调 generate_image(prompt, style, reference, size) 画图，"
+                "或用 switch_model(model) 换底模。"
             )
 
         model = os.path.basename(self._current_model()) or "（未配置）"
@@ -2487,7 +2428,7 @@ class NcdToolboxPlugin(star.Star):
         h = self._conf_int("sd_height", 1024) or 1024
         cap, px, mp, warn = self._size_limits()
         lines = [
-            "画图工具已展开。可用的就两个：",
+            "画图工具的用法（直接调即可，调本工具不是前置步骤）：",
             "· generate_image(prompt, style, reference, size) —— 画一张图并发出去",
             "· switch_model(model) —— 换底模（不带参数=只列可选项）",
             "",
@@ -3267,3 +3208,5 @@ def _text_result(text: str) -> mcp.types.CallToolResult:
     return mcp.types.CallToolResult(
         content=[mcp.types.TextContent(type="text", text=text)]
     )
+
+

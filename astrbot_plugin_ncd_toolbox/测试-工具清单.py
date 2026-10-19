@@ -87,14 +87,16 @@ print("\n===== ⑤ 各模式都能看到 view_avatar（过滤都走 TOOL_NAMES�
 for marker, why in (
     ("if name not in TOOL_NAMES:", "沉浸模式过滤"),
     ("if name not in TOOL_NAMES or name == MENU_TOOL:", "菜单收窄"),
-    ("elif name in DRAW_TOOLS and not draw_opened:", "画图二级目录收窄"),
 ):
     ok = marker in src
     print(f"  {why}: {ok}")
-    check("⑤", ok, f"{why} 没有按 TOOL_NAMES / DRAW_TOOLS 过滤（新工具可能被漏掉）")
+    check("⑤", ok, f"{why} 没有按 TOOL_NAMES 过滤（新工具可能被漏掉）")
 
 check("⑤", "view_avatar" in plugin_main.TOOL_NAMES, "TOOL_NAMES 里没有 view_avatar")
 check("⑤", "view_avatar" in text, "菜单清单里没有 view_avatar")
+# ★ 2026-10-19：画图工具已改回常驻，源码里不应该再有"按 DRAW_TOOLS 收起来"的代码
+check("⑤", "_apply_draw_gate" not in src and "draw_opened" not in src,
+      "★ 又把画图工具藏起来了（会重现「未找到指定的工具」）")
 
 # =====================================================================
 print("\n===== ⑥ 清单指向画图二级目录（规则不再塞进 ncd_tools）=====")

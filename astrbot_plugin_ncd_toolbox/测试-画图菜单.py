@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：画图二级目录（draw_tools）+ AI 自选画幅。
 
 为什么要有这个文件：
@@ -152,17 +152,17 @@ print("\n===== ② 重复调用只回一句提醒 =====")
 again = asyncio.run(inst.draw_tools(make_event()))
 print(f"  第二次：{again[:80]}…")
 check("②", len(again) < len(out), "第二次不该再给一遍长清单")
-check("②", "已经展开" in again, "第二次没提示「已经展开」")
+check("②", "已经给过你了" in again, "第二次没提示「已经给过你了」")
 check("②", "cunnyfunky" not in again, "第二次仍在塞画风清单")
 
 # =====================================================================
-print("\n===== ③ 只解锁本会话 =====")
+print("\n===== ③ 说明书按会话记（只影响「要不要重复给长文案」）=====")
 inst2, _ = make_plugin()
 asyncio.run(inst2.draw_tools(make_event("A:GroupMessage:1")))
 check("③", "A:GroupMessage:1" in inst2._draw_revealed, "A 会话没记下")
-check("③", "B:GroupMessage:2" not in inst2._draw_revealed, "★ B 会话被一起放开了")
+check("③", "B:GroupMessage:2" not in inst2._draw_revealed, "★ B 会话被一起记下了")
 
-
+# ★ 2026-10-19 改：画图工具【常驻】，不再被藏起来 —— 这里钉住"谁都不会被摘掉"
 class FakeToolSet:
     def __init__(self, names):
         self.tools = [types.SimpleNamespace(name=n) for n in names]
@@ -174,15 +174,15 @@ class FakeToolSet:
         return [t.name for t in self.tools]
 
 
-ts_a = FakeToolSet(list(plugin_main.TOOL_NAMES))
-ts_b = FakeToolSet(list(plugin_main.TOOL_NAMES))
-inst2._apply_draw_gate(types.SimpleNamespace(func_tool=ts_a), make_event("A:GroupMessage:1"))
-inst2._apply_draw_gate(types.SimpleNamespace(func_tool=ts_b), make_event("B:GroupMessage:2"))
-print(f"  A 看得到：{sorted(set(ts_a.names()) & set(plugin_main.DRAW_TOOLS))}")
-print(f"  B 看得到：{sorted(set(ts_b.names()) & set(plugin_main.DRAW_TOOLS))}")
-check("③", set(plugin_main.DRAW_TOOLS) <= set(ts_a.names()), "A 会话应该能看到画图工具")
-check("③", not (set(plugin_main.DRAW_TOOLS) & set(ts_b.names())),
-      "★ B 会话不该看到画图工具")
+req_a = FakeToolSet(list(plugin_main.TOOL_NAMES))
+inst2._apply_tool_menu(types.SimpleNamespace(func_tool=req_a), make_event("A:GroupMessage:1"))
+print(f"  菜单模式下点开过 ncd_tools 的会话：{sorted(req_a.names())}")
+check("③", set(plugin_main.DRAW_TOOLS) <= set(plugin_main.TOOL_NAMES), "画图工具不在 TOOL_NAMES 里")
+req_b = FakeToolSet(list(plugin_main.TOOL_NAMES))
+inst2._hide_menu_tool(types.SimpleNamespace(func_tool=req_b))
+print(f"  菜单关闭时的工具：{sorted(req_b.names())}")
+check("③", set(plugin_main.DRAW_TOOLS) <= set(req_b.names()),
+      "★ 画图工具应该常驻（菜单关了也在），不能再被藏起来")
 
 # =====================================================================
 print("\n===== ④ 画幅真的进了 payload =====")
@@ -289,36 +289,14 @@ check("⑤", plugin_main.DRAW_TOOLS == ("generate_image", "switch_model"),
 check("⑤", "draw_tools" in plugin_main.TOOL_SUMMARY, "TOOL_SUMMARY 漏了 draw_tools")
 
 # =====================================================================
-print("\n===== ⑥ 没展开时要在提示词里点明「先调 draw_tools」 =====")
-# 事故（2026-10-19）：重载插件后 _draw_revealed 清空，模型照旧直接调
-# generate_image，runner 只记一条「未找到指定的工具」，模型无从纠正、连续空转。
-inst6, _ = make_plugin()
-
-
-class FakeReq:
-    def __init__(self):
-        self.system_prompt = "你是丝瓜。"
-
-
-req6 = FakeReq()
-inst6._inject_draw_gate_hint(req6, make_event(PRIVATE))
-print(f"  注入后尾部：{req6.system_prompt[-70:]}")
-check("⑥", plugin_main.DRAW_GATE_MARK in req6.system_prompt,
-      "★ 没告诉模型要先调 draw_tools")
-check("⑥", "draw_tools" in req6.system_prompt, "提示里没提 draw_tools")
-check("⑥", req6.system_prompt.startswith("你是丝瓜。"), "不该破坏原系统提示词")
-
-before = len(req6.system_prompt)
-inst6._inject_draw_gate_hint(req6, make_event(PRIVATE))
-print(f"  再注入一次：长度 {before} → {len(req6.system_prompt)}")
-check("⑥", len(req6.system_prompt) == before, "★ 不幂等（每轮都会变长）")
-
-inst6._draw_revealed[PRIVATE] = 1.0
-req6b = FakeReq()
-inst6._inject_draw_gate_hint(req6b, make_event(PRIVATE))
-print(f"  已展开的会话：{req6b.system_prompt!r}")
-check("⑥", plugin_main.DRAW_GATE_MARK not in req6b.system_prompt,
-      "已展开的会话不该再注入这段")
+print("\n===== ⑥ 不再往提示词里塞「先调 draw_tools」（工具已常驻）=====")
+# 事故复盘：曾经把两个画图工具藏进二级目录，模型从历史里记得名字直接调，
+# runner 只回一句「未找到指定的工具，将跳过」，每次画图空转 1~2 轮。
+# 现在改成常驻 + 说明书可选，所以那段注入也删了 —— 这里用源码断言钉住"别再加回来"。
+src = (PLUGIN / "main.py").read_text(encoding="utf-8")
+check("⑥", "_inject_draw_gate_hint" not in src, "★ 又把「隐藏 + 提示注入」加回来了")
+check("⑥", "_apply_draw_gate" not in src, "★ 又把画图工具藏起来了")
+check("⑥", "remove_tool(name)" in src, "菜单收窄本身失效了（ncd_tools 也该能收）")
 
 print("\n===== 判定 =====")
 if failures:
@@ -326,4 +304,6 @@ if failures:
     for item in failures:
         print(f"  ✗ {item}")
     sys.exit(1)
-print("PASS: 二级目录内容齐全 / 重复调用省上下文 / 按会话隔离 / 画幅进 payload / 越界报错")
+print("PASS: 说明书内容齐全 / 重复调用省上下文 / 按会话记 / 画图工具常驻 / 画幅进 payload / 越界报错")
+
+
