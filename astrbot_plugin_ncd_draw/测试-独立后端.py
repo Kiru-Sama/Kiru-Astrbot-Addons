@@ -367,3 +367,4 @@ if failures:
 print("PASS: worker 协议（health / txt2img / X-Seed / 空 prompt 报错 / 404）/ "
       "端口被占明确报错 / 配置不全明确报错 / 拉起桩 worker 并复用同一进程 全部正确")
 
+

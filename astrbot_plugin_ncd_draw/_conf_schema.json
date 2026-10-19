@@ -1,0 +1,212 @@
+{
+  "sd_python": {
+    "type": "string",
+    "description": "独立后端用的 Python（必须装了 torch+diffusers）",
+    "hint": "只在 image_backend=standalone 时有用。填一个【装了 torch 和 diffusers 的 python.exe 完整路径】。\n\n★ 为什么要单独一个：torch 带 CUDA 就有 2~3 GB，装进 AstrBot 的环境会把主环境搞得很重。建议单独建一个 venv，里面只装 torch / diffusers / transformers / accelerate / safetensors / pillow。\n★ 建议把它放在**不依赖 ComfyUI 的目录**——否则删了 ComfyUI 这条也跟着断（这正是 image_backend 想解决的问题）。\n★ 填错 / 没装 torch 时，错误信息会带上 worker 日志尾部，能直接看出缺什么。",
+    "default": ""
+  },
+  "sd_checkpoint": {
+    "type": "string",
+    "description": "默认底模（SDXL .safetensors 完整路径）",
+    "hint": "只支持 SDXL 单文件底模（Illustrious / NoobAI / WAI 这类）。\n\n★ 这是【默认】底模：AI 调 switch_model、或生图页下拉框换过之后，以换过的那个为准，直到重载插件。\n★ 底模列表是从这一项所在目录扫出来的（见 sd_model_dir）——换机器只要改这两项。\n★ 别指向 ComfyUI 目录里的文件：ComfyUI 删了/升级了这条链路就断，复制一份到自己的目录更稳。",
+    "default": ""
+  },
+  "sd_model_dir": {
+    "type": "string",
+    "description": "底模目录（留空 = sd_checkpoint 所在目录）",
+    "hint": "生图页下拉框和 AI 的 switch_model 都从这个目录里列底模。\n★ 扫 .safetensors / .ckpt，并且只收 ≥ sd_model_min_gb 的文件 —— 所以 LoRA 和底模混放在一个目录里也没关系，不会把 LoRA 当底模。\n★ 留空 = sd_checkpoint 的上级目录（推荐：换底模目录只要改 sd_checkpoint 一处）。\n★ 加/删模型文件后不用重载插件，刷新页面或让 AI 再调一次 switch_model 就能看到。",
+    "default": ""
+  },
+  "sd_model_min_gb": {
+    "type": "float",
+    "description": "底模的最小体积（GB）：小于它的文件不列进底模清单",
+    "hint": "默认 3.0。SDXL 融合底模一般 6~7 GB，LoRA 只有几十~几百 MB，3 GB 足够把两者分开。\n★ 如果你有裁剪/量化过的小底模（2 GB 左右）也想出现在列表里，把这个值调小。\n★ 调它只影响【列表】，不影响 sd_checkpoint 能不能加载。",
+    "default": 3.0
+  },
+  "sd_width": {
+    "type": "int",
+    "description": "出图宽度。★ SDXL 的原生分辨率是 1024 级别；实测 720x1024 竖版很稳。",
+    "hint": "出图宽度（像素，会自动对齐到 8 的倍数）。\n★ 当前底模是 SDXL，原生训练分辨率在 1024 级别：竖版推荐 720~832 宽 × 1024~1216 高。\n★ 比 512 小很多会糊、比 1400 大会浪费显存（本机 12 GB，且要和 LM Studio 共存）。",
+    "default": 512
+  },
+  "sd_height": {
+    "type": "int",
+    "description": "出图高度。★ SDXL 的原生分辨率是 1024 级别；720x1024 是竖版、704x1024 更窄。",
+    "hint": "出图高度（像素，会自动对齐到 8 的倍数）。\n★ 竖版常用 1024（配合 720~832 的宽）；方图用 1024x1024。\n★ 显存吃紧时优先降高度，别降太多 —— SDXL 在 1024 附近质量最好。",
+    "default": 512
+  },
+  "sd_steps": {
+    "type": "int",
+    "description": "独立后端的采样步数",
+    "hint": "默认 25（和你工作流里一致）。降低到 15~20 会快一些；再低质量明显掉。",
+    "default": 25
+  },
+  "sd_cfg": {
+    "type": "float",
+    "description": "独立后端的 CFG（提示词贴合度）",
+    "hint": "默认 7.0（和你工作流里一致）。太高会过饱和/发硬，太低会不听话。",
+    "default": 7.0
+  },
+  "sd_sampler": {
+    "type": "string",
+    "description": "采样器/调度器：euler（欧拉+普通，默认）或 dpmpp2m_karras",
+    "hint": "填 euler 或 dpmpp2m_karras（也认 欧拉 / dpmpp_2m 这类写法，认不出按 euler 处理）。\n\n★ euler + 普通（默认）：线性 timestep、不预放大不锐化，细节交给底模和提示词，SDXL 上更“老实”。\n★ dpmpp2m_karras：之前用的那套，会系统性地偏锐一点。\n★ 换采样器本身不用重新加载模型（毫秒级），但【已经在跑的 worker 不吃新配置】—— 等它空闲退出、或重载插件后再出图才生效。\n★ 只换算法，不改底模自带的 beta 曲线（scaled_linear），所以色调不会偏。",
+    "default": "euler"
+  },
+  "sd_max_side": {
+    "type": "int",
+    "description": "画幅单边上限（像素）：超过直接拒绝",
+    "hint": "默认 1920（配合 sd_max_mp=2.76，最大画布约 1920×1440）。\n\n★ 这个值是按【12 GB 显卡】实测定的：1920×1920（3.69 MP）就会把显存逼到临界。\n★ 换张 24 GB 的卡可以调大（例如 2560），同时把 sd_max_mp 一起调大。\n★ 单边超过上限的 3/4（默认 1440）时，AI 会先返回警告并问用户，私聊里用户同意后才画；群聊里一律禁止。\n★ 改完要重载插件；已经跑着的 worker 会把新值带在下次拉起时生效。",
+    "default": 1920
+  },
+  "sd_max_mp": {
+    "type": "float",
+    "description": "画幅面积上限（百万像素 MP）：超过直接拒绝",
+    "hint": "默认 2.7648 MP（= 1920×1440，正好够 1920×1440 这一档）。\n\n★ 为什么要按面积另卡一道：单边都在范围内，但 1920×1920 的面积是 1920×1440 的 1.33 倍，12 GB 卡实测就会爆。\n★ 换算：1024×1024 = 1.0486 MP，832×1216 = 1.0116 MP，1920×1440 = 2.7648 MP，1920×1920 = 3.6864 MP。\n★ 显存越大可以调越大；调大之后 sd_max_side 也要跟着放宽，否则会被单边限制挡住。",
+    "default": 2.7648
+  },
+  "sd_arch": {
+    "type": "string",
+    "default": "auto",
+    "description": "底模架构：auto / sd15 / sdxl",
+    "hint": "留 auto 就行 —— 按文件大小自动判断（SDXL 融合模型 6~7 GB，SD1.5 约 2 GB）。\n★ 什么时候要手动填：模型被裁剪/量化过、大小不在这个范围时。\n★ 填错了表现是加载就报错（不会静默出怪图），报错信息里会带真实架构名。"
+  },
+  "sd_device": {
+    "type": "string",
+    "default": "cuda",
+    "description": "出图用哪个设备：cuda（显卡）或 cpu（纯 CPU）",
+    "hint": "填 cuda 或 cpu。\n\n★ 填 cpu：完全不吃显存，LM Studio 那边就不会被挤爆；代价是慢一个数量级（实测数据见 README 的「CPU 出图」一节）。\n★ 填 cuda：快，但会和 LM Studio / 视频编码等抢显存。显存紧张时建议换 cpu。\n★ 选 cpu 时插件会自动把出图超时放宽到至少 300 秒（CPU 真得很慢，70 秒不够），其余逻辑不变。\n★ 改完要重载插件；而且 worker 是空闲才退出，所以等它退一次（或把 sd_idle_timeout 调小）才会用新设备重启。"
+  },
+  "sd_offload": {
+    "type": "string",
+    "default": "auto",
+    "description": "CPU offload：auto / on / off（省显存，但更慢）",
+    "hint": "auto：SDXL 开、SD1.5 关。\n★ 开 offload 后，模型各模块留在内存、用到哪个搬哪个进显存 —— SDXL 显存峰值从约 7 GB 降到约 3 GB，代价是慢一些。\n★ 这台机器只有 12.8 GB 显存，LM Studio 一个模型就占 7 GB，所以和 LM Studio 同时跑时必须开。\n★ 显存很富裕（比如 LM Studio 关掉了）可以填 off 换速度。"
+  },
+  "sd_port": {
+    "type": "int",
+    "description": "独立后端 worker 的本地端口",
+    "hint": "默认 8199。只监听 127.0.0.1。如果这个端口被别的程序占了，换一个（会明确报「端口被别的服务占着」而不是乱发请求）。",
+    "default": 8199
+  },
+  "sd_idle_timeout": {
+    "type": "int",
+    "description": "独立后端空闲多久自己退出（秒）",
+    "hint": "默认 300（5 分钟）。worker 是插件按需拉起的子进程：连续画图时复用同一个（省掉模型加载的 2~10 秒），空闲超过这个秒数就自己退出，把显存还给别的程序（比如 LM Studio）。\n★ 调太小会频繁重载模型；调太大等于常驻占显存。",
+    "default": 300
+  },
+  "image_timeout": {
+    "type": "int",
+    "description": "一次出图的总超时（秒），超过就中止",
+    "hint": "默认 70。两个后端都吃这个上限；计时从「开始出图」算起，**包含 worker 冷启动**（首次要加载 2~3 GB 模型）。\n\n★ 为什么不是更小：实测冷启动到过 31.9 秒，再加 5~6 秒推理就 38 秒，40 秒很容易把正常请求误杀。70 秒对「冷启动 + 一张图」是够的（实测 18~20 秒）。\n★ 超时会明确报「出图超时：超过 N 秒还没画完」，不会无限挂着占住并发槽。\n★ 显存小、模型大、或者之前有任务在排队时再往上调。",
+    "default": 70
+  },
+  "sd_negative": {
+    "type": "string",
+    "default": "",
+    "description": "负面提示词（留空 = 用内置的那套常规负面词）",
+    "hint": "留空就用内置默认：lowres, blurry, out of focus, jpeg artifacts, deformed, bad anatomy, extra limbs, mutated, watermark, text, logo, signature\n\n★ 什么时候要自己填：\n· 想要「黑白/线稿」风格 → 加上 `color, colored, monochrome` 的反面（即把它们放进负面）\n· 画面偏灰、饱和度上不去 → 检查这里是不是被谁塞了 `color`（会压掉颜色）\n· 某模型特别爱画坏手 → 加 `bad hands, extra fingers`\n★ 2026-10-18 修：内置默认原来开头是 `color, colored`（那是给黑白 LoRA 配的），挂在全局默认里会让所有出图系统性偏灰。现在挪到配置里，默认不再压颜色。"
+  },
+  "sd_lora": {
+    "type": "string",
+    "default": "",
+    "description": "LoRA 文件路径（留空 = 不用 LoRA）",
+    "hint": "LoRA 文件路径（留空 = 不挂 LoRA）。\n\n★ 必须是 SDXL 的 LoRA（SD1.5 的 LoRA 结构不兼容，挂上去会报错）。\n★ 建议把 LoRA 放在独立环境自己的目录（例如 SD-standalone\\models\\loras\\）。\n★ 只在 worker 启动时加载一次；改强度不用重启（推理时按 sd_lora_scale 缩放）。\n★ 想临时关掉：把 sd_lora_scale 设成 0，或者把这里清空。"
+  },
+  "sd_lora_dir": {
+    "type": "string",
+    "default": "",
+    "description": "画风 LoRA 目录（留空 = 底模同级的 loras\\）",
+    "hint": "扫描规则：文件名必须是 `<SFW|NSFW>_<画风名>.safetensors`。\n· 前缀决定评价，会写进工具说明，模型据此判断该不该用\n· 往目录里丢新文件就自动可用（重载插件后生效），不用改配置\n\n★ 会自动跳过不能用的：LoKr（LyCORIS）格式 diffusers 不支持、\n  以及 SD1.5 的 LoRA（结构对不上，加载会 shape mismatch）。\n  跳过原因写在日志里，别以为是文件丢了。\n★ 留空时用「底模所在目录\\loras」，换机器通常不用改。"
+  },
+  "sd_lora_scale": {
+    "type": "float",
+    "default": 0.8,
+    "description": "LoRA 强度（0~1）",
+    "hint": "默认 0.8。越大风格越强、越容易盖掉底模和提示词；越小越接近原底模。\n· 0.4~0.6 轻微染色，还能保留底模画风\n· 0.7~0.9 风格明显（推荐区间）\n· 1.0 满强度，可能过拟合（脸崩、构图僵）\n★ 实测（style_GZC，同一 seed 同一提示词）：无 LoRA ↔ 0.8 平均像素差 18.08，无 LoRA ↔ 1.0 是 19.54，0.8 ↔ 1.0 是 7.40 —— 强度确实线性生效。\n★ 这个值只在推理时缩放，改完重载插件即可生效（不用等 worker 退出）。"
+  },
+  "sd_allow_nsfw_lora": {
+    "type": "bool",
+    "default": true,
+    "description": "允许模型使用 NSFW 画风",
+    "hint": "默认允许。关掉后，NSFW_ 开头的画风不会出现在清单里，模型也选不到。\n★ 评价前缀（SFW/NSFW）来自文件名，你自己在命名时决定。"
+  },
+  "sd_lora_status": {
+    "type": "string",
+    "default": "",
+    "description": "（自动生成，别手改）当前可用的画风",
+    "hint": "这个字段由插件自己维护：每次加载/重扫画风目录时重新写一遍。\n你在这里能看到：有哪些画风可用、各自评价（SFW/NSFW）和大小、\n以及哪些文件被跳过了、为什么跳过。\n\n★ 不用手改 —— 改了也会被下次扫描覆盖。\n★ 想看最新结果：往目录里加减文件后重载插件即可。"
+  },
+  "kb_enabled": {
+    "type": "bool",
+    "default": true,
+    "description": "启用提示词知识库（draw_kb_search）",
+    "hint": "关掉后 draw_kb_search 只回一句「已关闭」，不再检索。\n★ 知识库是按需检索的：不调用就完全不读盘、不注入任何内容。"
+  },
+  "kb_default_scope": {
+    "type": "string",
+    "default": "core",
+    "description": "默认查哪套库：core（核心）/ full（全量）",
+    "hint": "核心库约 3.4 MB（动作/表情/身体/服饰/物件/场景/风格/常用），日常够用；\n全量库 16 MB，多了角色/作品/画师/长尾，首次检索要多花一两秒。\n★ 无论这里填什么，模型都能在单次调用里用 scope=\"full\" 指定全量。"
+  },
+  "kb_allow_full": {
+    "type": "bool",
+    "default": true,
+    "description": "允许模型查全量库（scope=full）",
+    "hint": "关掉后模型只能查核心库，适合「绝不希望它翻全量」的场景。"
+  },
+  "kb_default_limit": {
+    "type": "int",
+    "default": 3,
+    "description": "一次检索默认返回几段（1~5）",
+    "hint": "段数越多越费上下文；每段最多 kb_max_chars 字。推荐 2~3。"
+  },
+  "kb_max_chars": {
+    "type": "int",
+    "default": 600,
+    "description": "每段最多返回多少字（200~2000）",
+    "hint": "知识库共 8.6 万字，整段给会被截；600 字通常够看清一个表格或一段说明。"
+  },
+  "kb_catalog_limit": {
+    "type": "int",
+    "default": 40,
+    "description": "空 query 时最多列多少个文件（5~60）",
+    "hint": "文件清单本身也占上下文；36 个文件全列约 3.7k 字。"
+  },
+  "img2img_strength": {
+    "type": "float",
+    "default": 0.6,
+    "description": "参考图生图的强度（0.1~1.0）",
+    "hint": "只在模型调 generate_image 时填了 reference 才有用。\n数值越大越偏离原图、越听话；越小越保留原图构图。\n\n· 0.3~0.45：几乎只换画风/上色\n· 0.5~0.65：保构图换风格（推荐）\n· 0.7~0.85：只借个大概，细节全重画\n★ SDXL 的 img2img 比 SD1.5 稳得多，0.6 是个不错的起点。"
+  },
+  "sd_progress_in_chat": {
+    "type": "bool",
+    "default": true,
+    "description": "AI 出图时在聊天里报进度（步数）",
+    "hint": "默认开启。开启后，机器人自己调 generate_image 时，会每隔几秒往会话里发一句「🎨 出图中… 12/20 步」，模型没加载好时会先发「📦 读取权重… 10%」。\n\n★ QQ 没有可编辑消息、也没有进度条，所以只能发新消息来报进度。\n★ 【出图最多 2 条 + 加载最多 2 条】——再多就成刷屏了。GPU 出图 5~6 秒通常一条都不发（还没到间隔就画完了）。\n★ 嫌吵就关掉；网页生图页那边一直是真进度条，不受这个开关影响。"
+  },
+  "sd_progress_interval": {
+    "type": "int",
+    "default": 8,
+    "description": "聊天里报进度的间隔（秒）",
+    "hint": "默认 8 秒，最小 3 秒。只在 sd_progress_in_chat 开启时生效。\n★ 有进度之后每 8 秒报一条（出图最多 2 条 + 加载最多 2 条）。\n★ 调小 → 报得更勤，但更容易刷屏；调大 → 基本只在很慢的时候才报。"
+  },
+  "sd_load_grace": {
+    "type": "int",
+    "default": 10,
+    "description": "模型加载进度：先等这么久再报（秒）",
+    "hint": "默认 10 秒。worker 刚拉起来的那几秒，进度一定是「启动中 0%」（python 和 torch 还在 import），这时候报出来只有一串 0%，看着像卡死。\n★ 所以加载阶段先静默这么久，之后只报【百分比真的动了】的进度（10% / 55% / 70%…），同一档不重复。\n★ 填 0 = 一有加载进度就报（会先冒一条 0%）；调大 = 更安静，加载快的话一条都不报。\n★ 只影响聊天里的进度消息，网页进度条一直是实时的。"
+  },
+  "disable_image_on_local": {
+    "type": "bool",
+    "default": true,
+    "description": "用本地模型时禁用绘图",
+    "hint": "默认开启。当前对话模型是本地模型（LM Studio / Ollama 之类）时，\n插件会把 generate_image 从本轮工具里移除 —— 本地小模型写 SDXL 提示词\n质量明显差（标签少、爱写无效质量词、照抄上一次），画出来是浪费显存。\n\n★ 换回云端模型（DeepSeek 等）会自动恢复，不用改这里。\n★ 关掉它 → 本地模型也能画。"
+  },
+  "local_model_keywords": {
+    "type": "string",
+    "default": "lmstudio,ollama",
+    "description": "怎么判定「本地模型」（逗号分隔，匹配 provider id）",
+    "hint": "默认 lmstudio,ollama。判据是 provider 的 id 里是否含这些词，\n例如 `lmstudio/qwen3.8-4b-distill-...` 命中 lmstudio。\n\n★ 你换了别的本地服务（比如 llama.cpp、vLLM）就往这里加词。"
+  }
+}

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：画风 LoRA 目录 + 格式探测。
 
 命名约定：<SFW|NSFW>_<画风>.safetensors
@@ -165,3 +165,4 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 前缀过滤 / 格式探测 / 底模过滤 / 原因可查 / 清单 / 解析 / 真实目录")
+

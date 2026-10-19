@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：换底模（人和 AI 都能换）。
 
 为什么要有这个文件：
@@ -87,9 +87,11 @@ class FakeClient:
 
 
 def make_plugin(client=None, conf=None):
-    inst = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
+    inst = plugin_main.NcdDrawPlugin.__new__(plugin_main.NcdDrawPlugin)
     inst._conf = dict(CONF, **(conf or {}))
     inst._revealed = {}
+    # 画图入口已开（避免每次调用都撞闸门；闸门本身另有测试）
+    inst._draw_revealed = {u: 1.0 for u in ('t:GroupMessage:1', 't:FriendMessage:1', 'A:GroupMessage:1')}
     inst._pending_images = {}
     inst._render_lock = asyncio.Lock()
     inst._last_image = None
@@ -253,11 +255,12 @@ check("⑤", sum(1 for m in status["models"] if m["current"]) == 1,
 print("\n===== ⑥ generate_image 参数没被塞第 4 个（清单工具是独立的） =====")
 import inspect  # noqa: E402
 
-params = list(inspect.signature(plugin_main.NcdToolboxPlugin.generate_image).parameters)
+params = list(inspect.signature(plugin_main.NcdDrawPlugin.generate_image).parameters)
 print(f"  generate_image{tuple(params)}")
-check("⑥", params == ["self", "event", "prompt", "style", "reference", "size", "force"],
+check("⑥", params == ["self", "event", "prompt", "style", "reference", "size", "force",
+                        "negative", "model", "sampler", "steps", "cfg", "width", "height", "seed", "strength"],
       f"generate_image 参数变了：{params}")
-sw_params = list(inspect.signature(plugin_main.NcdToolboxPlugin.switch_model).parameters)
+sw_params = list(inspect.signature(plugin_main.NcdDrawPlugin.switch_model).parameters)
 check("⑥", sw_params == ["self", "event", "model"], f"switch_model 参数不对：{sw_params}")
 check("⑥", "switch_model" in plugin_main.TOOL_NAMES, "switch_model 不在 TOOL_NAMES 里")
 check("⑥", "switch_model" in plugin_main.TOOL_SUMMARY, "TOOL_SUMMARY 漏了 switch_model")
@@ -271,3 +274,6 @@ if failures:
     sys.exit(1)
 print("PASS: 列表按体积过滤 / 名字解析与歧义 / 换成功改状态 / 换失败不改状态 / "
       "payload 带 checkpoint / 页面能选并同步当前底模")
+
+
+

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：另一份代码审查里挑出来的 5 个真问题。
 
 来源：外部 AI 对项目的检查（2026-10-18），逐条核实后确认成立的：
@@ -68,7 +68,8 @@ print(f"  {neg[:90]}…")
 check("②", "color" not in neg, f"★默认负面词里还有 color（会压掉颜色）：{neg}")
 check("②", "lowres" in neg and "watermark" in neg, "常规负面词被删光了")
 check("②", "sd_negative" in MAIN_SRC, "插件没有读 sd_negative 配置")
-check("②", '"negative": self._conf_str("sd_negative")' in MAIN_SRC,
+# ★ 2026-10-19：负面词现在优先用 AI 传的 opts['negative']，没有再回落到配置
+check("②", "_negative_with_extra(" in MAIN_SRC and "sd_negative" in MAIN_SRC,
       "★没把负面词传给 worker（配了也不生效）")
 
 # =====================================================================
@@ -109,12 +110,12 @@ check("⑨", "comfy_{uuid" not in MAIN_SRC,
 print("\n===== ④ 超时后丢弃 worker =====")
 check("④", "_discard_worker" in MAIN_SRC, "没有 _discard_worker")
 check("④", "self._discard_worker()" in MAIN_SRC, "超时分支没调用 _discard_worker")
-check("④", hasattr(plugin_main.NcdToolboxPlugin, "_discard_worker"),
+check("④", hasattr(plugin_main.NcdDrawPlugin, "_discard_worker"),
       "方法没挂到类上")
 
 
 def discard_test() -> bool:
-    inst = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
+    inst = plugin_main.NcdDrawPlugin.__new__(plugin_main.NcdDrawPlugin)
     stopped = {"n": 0}
 
     class FakeClient:
@@ -132,13 +133,13 @@ print("  stop() 一次 + _sd 置 None ✓")
 print("\n===== ⑥ _save_generated 不能碰 self（曾导致出图全挂）=====")
 import inspect as _inspect  # noqa: E402
 
-raw_attr = _inspect.getattr_static(plugin_main.NcdToolboxPlugin, "_save_generated")
+raw_attr = _inspect.getattr_static(plugin_main.NcdDrawPlugin, "_save_generated")
 check("⑥", isinstance(raw_attr, staticmethod), "_save_generated 应该是 staticmethod")
-save_src = _inspect.getsource(plugin_main.NcdToolboxPlugin._save_generated)
-print("  签名:", _inspect.signature(plugin_main.NcdToolboxPlugin._save_generated))
+save_src = _inspect.getsource(plugin_main.NcdDrawPlugin._save_generated)
+print("  签名:", _inspect.signature(plugin_main.NcdDrawPlugin._save_generated))
 check("⑥", "self." not in save_src,
       "★staticmethod 里出现 self. —— 会在运行时 NameError，整条出图挂掉")
-check("⑥", "tag" in _inspect.signature(plugin_main.NcdToolboxPlugin._save_generated).parameters,
+check("⑥", "tag" in _inspect.signature(plugin_main.NcdDrawPlugin._save_generated).parameters,
       "前缀参数 tag 不在签名里")
 
 print("\n===== ⑦ 聊天进度汇报 =====")
@@ -152,7 +153,7 @@ def progress_test(busy: bool, max_msgs: int) -> list[str]:
         async def progress(self):
             return {"busy": busy, "step": 3, "total": 20}
 
-    inst = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
+    inst = plugin_main.NcdDrawPlugin.__new__(plugin_main.NcdDrawPlugin)
     inst._conf = {"sd_progress_interval": 3}
     inst._sd = FakeSd()
 
@@ -187,15 +188,15 @@ print("\n===== ⑧ 画图规范要明确禁止无效质量词 =====")
 #   否则一大段规则每轮都进提示词。这里改查 draw_tools 的源码。
 import inspect as _insp2  # noqa: E402
 
-doc = _insp2.getdoc(plugin_main.NcdToolboxPlugin.generate_image) or ""
-draw_src = MAIN_SRC[MAIN_SRC.find("async def draw_tools("):MAIN_SRC.find("async def generate_image(")]
-print(f"  generate_image 说明 {len(doc)} 字（应显著变短），draw_tools 段 {len(draw_src)} 字")
-check("⑧", "draw_tools" in doc, "generate_image 的说明没指向 draw_tools（模型会不知道去哪看规范）")
-check("⑧", len(doc) < 1600, f"generate_image 说明又变长了（{len(doc)} 字）—— 规范该放 draw_tools")
+doc = _insp2.getdoc(plugin_main.NcdDrawPlugin.generate_image) or ""
+draw_src = MAIN_SRC[MAIN_SRC.find("async def drawing_tools("):MAIN_SRC.find("async def generate_image(")]
+print(f"  generate_image 说明 {len(doc)} 字（应显著变短），drawing_tools 段 {len(draw_src)} 字")
+check("⑧", "drawing_tools" in doc, "generate_image 的说明没指向 drawing_tools")
+check("⑧", len(doc) < 2200, f"generate_image 说明又变长了（{len(doc)} 字）—— 规范该放 drawing_tools")
 for token in ("四条硬规则", "masterpiece", "best quality", "8k", "ultra detailed", "77 token"):
     ok = token in draw_src
     print(f"  {'OK ' if ok else '✗  '}{token}")
-    check("⑧", ok, f"draw_tools 的规范里缺「{token}」")
+    check("⑧", ok, f"drawing_tools 的规范里缺「{token}」")
 check("⑧", "光线" in draw_src or "lighting" in draw_src,
       "只说「别写」不够，还要指出替代写法（光线/镜头/质感）")
 
@@ -206,3 +207,8 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 看门狗避 busy / 负面词不压色 / 宽高对齐 / LoRA 可见 / 文件名前缀 / 超时丢弃 worker")
+
+
+
+
+

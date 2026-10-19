@@ -1,6 +1,6 @@
 ﻿name: astrbot_plugin_ncd_toolbox
 display_name: 链路工具箱
-desc: 自建网页检索与正文抓取（走本机 Edge 真浏览器，不依赖第三方搜索 API）、把 QQ 账号自己的收藏表情发到会话里，以及生图（可脱离 ComfyUI 独立运行，并自带一个人直接用的生图页面）。
+desc: 自建网页检索与正文抓取（走本机 Edge 真浏览器，不依赖第三方搜索 API）、把 QQ 账号自己的收藏表情发到会话里、看头像、回溯历史；绘图已拆到独立插件 astrbot_plugin_ncd_draw。
 author: 本地自用
-version: 2.12.6
+version: 2.14.1
 repo: ""

@@ -12,7 +12,7 @@
 
 用法：
     <AstrBot>\\.venv\\Scripts\\python.exe 生成源码补丁.py [输出目录]
-    默认输出到：<本脚本目录>\\patches\\
+    默认输出到：..\\astrbot_plugin_ncd_patch\\patches\\（2026-10-19 补丁拆成独立插件）
 """
 import difflib
 import hashlib
@@ -205,7 +205,7 @@ def write_notes(out_dir: str, metas: list[dict]) -> str:
 
 
 def main() -> int:
-    out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "patches")
+    out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "astrbot_plugin_ncd_patch", "patches")
     os.makedirs(out_dir, exist_ok=True)
 
     if not os.path.isdir(ASTRBOT_PKG):

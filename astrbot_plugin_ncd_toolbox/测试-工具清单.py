@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：工具清单必须是「自动生成」的，不能手写死。
 
 事故（2026-10-18）：
@@ -99,12 +99,12 @@ check("⑤", "_apply_draw_gate" not in src and "draw_opened" not in src,
       "★ 又把画图工具藏起来了（会重现「未找到指定的工具」）")
 
 # =====================================================================
-print("\n===== ⑥ 清单指向画图二级目录（规则不再塞进 ncd_tools）=====")
-check("⑥", "draw_tools" in text, "ncd_tools 的清单里没提 draw_tools（模型不会想到去展开）")
+print("\n===== ⑥ 清单指向画图入口（规则不再塞进 ncd_tools）=====")
+check("⑥", "drawing_tools" in text, "ncd_tools 的清单里没提 drawing_tools（模型不会想到先调它）")
 for kw in ("masterpiece, best quality, highres", "77 token", "四条硬规则"):
     ok = kw not in text
     print(f"  ncd_tools 里不含「{kw}」: {ok}")
-    check("⑥", ok, f"★「{kw}」又回到 ncd_tools 清单里了（应该只在 draw_tools 里）")
+    check("⑥", ok, f"★「{kw}」又回到 ncd_tools 清单里了（应该只在 drawing_tools 里）")
 
 print("\n===== 判定 =====")
 if failures:
@@ -113,3 +113,4 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 清单自动生成 / 覆盖全部工具 / 无多余名字 / 说明齐全 / 各模式可见")
+

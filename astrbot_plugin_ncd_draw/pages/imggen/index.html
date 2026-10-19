@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
@@ -144,6 +144,14 @@
       例：<code>1girl, silver hair, blue eyes, black dress, forest, backlight</code>
     </div>
 
+    <label for="negative" style="margin-top:14px">额外负面提示词（可选 · 英文）</label>
+    <textarea id="negative" placeholder="留空 = 只用配置里的默认负面词；填了会【追加】在后面，不会覆盖"
+      style="min-height:64px"></textarea>
+    <div class="hint" style="margin-top:6px">
+      默认那套已经包含 lowres / bad anatomy / bad hands / watermark 等 40 多个词，
+      这里只补你这次特别不想要的东西，比如 <code>extra arms, helmet</code>。
+    </div>
+
     <div class="row ref">
       <div>
         <label for="ref">参考图（可选 —— 选了就是图生图）</label>
@@ -281,7 +289,7 @@
 
   async function loadStatus() {
     try {
-      const s = await P.apiGet("/ncd-imggen/status");
+      const s = await P.apiGet("/ncd-draw/status");
       if (!s || s.ok === false) throw new Error((s && s.error) || "状态读取失败");
       statLine(s);
       if (s.width) $("width").value = s.width;
@@ -383,7 +391,7 @@
     pollTimer = setInterval(async () => {
       const elapsed = (Date.now() - t0ref.t) / 1000;
       try {
-        const p = await P.apiGet("/ncd-imggen/progress");
+        const p = await P.apiGet("/ncd-draw/progress");
         if (p && p.ok) {
           paintBar(p.step || 0, p.total || 0, p.elapsed || elapsed, p.mode, p.steps_full);
           return;
@@ -434,7 +442,7 @@
     //   自己 a.click() 下载实测无效；父页面不受这个限制。
     if (P && typeof P.download === "function") {
       try {
-        await P.download("/ncd-imggen/last", {}, name);
+        await P.download("/ncd-draw/last", {}, name);
         return;
       } catch (e) {
         console.warn("桥接下载失败，退回本地下载:", e);
@@ -458,6 +466,8 @@
     if (!prompt) { setErr("先写一句英文的画面描述。"); return; }
     setErr("");
     const body = { prompt };
+    const negative = $("negative").value.trim();
+    if (negative) body.negative = negative;
     ["width", "height", "steps", "cfg", "seed"].forEach((k) => {
       const v = $(k).value.trim();
       if (v !== "") body[k] = v;
@@ -488,7 +498,7 @@
 
     const t0 = Date.now();
     try {
-      const r = await P.apiPost("/ncd-imggen/generate", body);
+      const r = await P.apiPost("/ncd-draw/generate", body);
       if (!r || r.ok === false) throw new Error((r && r.error) || "生成失败");
       stopPoll();
       showBar(false);
@@ -548,4 +558,5 @@
 </script>
 </body>
 </html>
+
 

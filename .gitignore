@@ -1,4 +1,4 @@
-# 忽略运行时产物：AstrBot 会把配置/缓存/日志写进插件目录，
+﻿# 忽略运行时产物：AstrBot 会把配置/缓存/日志写进插件目录，
 # 这些不该进仓库（里面可能有 QC 号、路径、白名单）。
 __pycache__/
 *.py[cod]
@@ -10,3 +10,10 @@ thumbcache/
 .venv/
 .DS_Store
 Thumbs.db
+
+# 标签库是数据不是代码（体积大、有各自的许可），只保留说明文件
+kb/core/
+kb/full/
+!kb/README.md
+*.zip
+

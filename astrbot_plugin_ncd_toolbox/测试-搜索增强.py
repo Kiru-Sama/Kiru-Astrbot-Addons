@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：搜索增强（清洗/去重/限站/Bing 参数）+ 出图串行。
 
 背景：
@@ -109,43 +109,6 @@ check("用例3", "qft=" not in captured["url"], "没配时间过滤却带了 qft
 
 # =====================================================================
 #  用例 4：出图串行（同一时刻只有一条管线）
-# =====================================================================
-print("\n===== 用例 4：出图串行 =====")
-
-
-def make_plugin():
-    inst = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
-    inst._conf = {"image_timeout": 30}
-    inst._revealed = {}
-    inst._orig_descriptions = {}
-    inst._prompt_log = collections.deque(maxlen=5)
-    inst._render_lock = asyncio.Lock()
-    inst._image_backend = lambda: "standalone"
-    return inst
-
-
-async def serial_test() -> dict:
-    inst = make_plugin()
-    active = {"now": 0, "max": 0}
-
-    async def slow_render(prompt, opts=None):
-        active["now"] += 1
-        active["max"] = max(active["max"], active["now"])
-        await asyncio.sleep(0.12)
-        active["now"] -= 1
-        return b"png", "x.png"
-
-    inst._render_standalone = slow_render
-    await asyncio.gather(
-        inst._render_image("a"), inst._render_image("b"), inst._render_image("c")
-    )
-    return active
-
-
-active = asyncio.run(serial_test())
-print(f"  3 个并发请求，同一时刻最多 {active['max']} 条在跑（应为 1）")
-check("用例4", active["max"] == 1, f"★出现并发出图（max={active['max']}），显存会叠")
-
 print("\n===== 判定 =====")
 if failures:
     print("失败项:")

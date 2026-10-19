@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：用本地模型时联动禁用绘图。
 
 为什么要有：本地小模型（4B）写 SDXL 提示词明显更差——标签少、爱塞无效质量词、
@@ -51,7 +51,7 @@ class FakeToolSet:
 
 
 def make(conf, provider_id):
-    inst = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
+    inst = plugin_main.NcdDrawPlugin.__new__(plugin_main.NcdDrawPlugin)
     inst._conf = dict(conf)
 
     class Ctx:
@@ -65,8 +65,7 @@ def make(conf, provider_id):
 
 
 ev = types.SimpleNamespace(unified_msg_origin="t:GroupMessage:1")
-ALL = ["web_search_bing", "fetch_page", "list_stickers", "preview_sticker",
-       "send_sticker", "generate_image", "view_avatar", "recall_history"]
+ALL = ["drawing_tools", "generate_image", "switch_model"]
 
 # =====================================================================
 print("===== ① 怎么判定本地模型 =====")
@@ -101,7 +100,7 @@ left = req.func_tool.names()
 print(f"  剩余 {len(left)} 个: {left}")
 check("②", "generate_image" not in left, "★本地模型下没移除 generate_image")
 check("②", len(left) == len(ALL) - 1, "不该动别的工具")
-check("②", "view_avatar" in left and "recall_history" in left, "别的工具被误删")
+check("②", "drawing_tools" in left and "switch_model" in left, "别的工具被误删")
 
 # =====================================================================
 print("\n===== ③ 云端模型 → 不动 =====")
@@ -138,7 +137,7 @@ check("⑤", len(req.func_tool.names()) == len(ALL) - 1, "重复调用出错")
 # =====================================================================
 print("\n===== ⑥ 接线 & 配置 =====")
 src = (PLUGIN / "main.py").read_text(encoding="utf-8")
-check("⑥", "self._hide_image_tool_for_local(req, event)" in src, "_tune_request 里没调用")
+check("⑥", "self._hide_image_tool_for_local(req, event)" in src, "_gate_local_model 里没调用")
 conf_schema = (PLUGIN / "_conf_schema.json").read_text(encoding="utf-8")
 for k in ("disable_image_on_local", "local_model_keywords"):
     ok = k in conf_schema
@@ -146,16 +145,11 @@ for k in ("disable_image_on_local", "local_model_keywords"):
     check("⑥", ok, f"schema 里缺 {k}")
 
 # =====================================================================
-print("\n===== ⑦ 头像说明里提到「自己的形象」=====")
-doc = (src.split('async def view_avatar')[1][:1600])
-check("⑦", "自己的形象" in doc or "你自己" in doc, "说明里没提能看自己的形象")
-summary = plugin_main.TOOL_SUMMARY.get("view_avatar", "")
-check("⑦", "你自己" in summary, "菜单说明里没提你自己")
-
 print("\n===== 判定 =====")
 if failures:
     print("失败项:")
     for item in failures:
         print(f"  ✗ {item}")
     sys.exit(1)
-print("PASS: 本地判定 / 本地移除绘图 / 云端不动 / 开关可关 / 容错幂等 / 接线 / 说明")
+print("PASS: 本地判定 / 本地移除绘图 / 云端不动 / 开关可关 / 容错幂等 / 接线")
+

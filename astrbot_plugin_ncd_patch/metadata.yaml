@@ -1,0 +1,6 @@
+name: astrbot_plugin_ncd_patch
+display_name: 链路补丁
+desc: 源码补丁管理器：列出补丁状态（已应用/未应用/AstrBot 升级后版本不匹配），手动应用与回滚，绝不自动打补丁。
+author: 本地自用
+version: 1.0.0
+repo: ""

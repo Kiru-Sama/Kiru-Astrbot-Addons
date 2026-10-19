@@ -61,8 +61,7 @@ def make_event(umo: str):
     return types.SimpleNamespace(unified_msg_origin=umo)
 
 
-ALL = list(plugin_main.TOOL_NAMES)
-DRAW = list(plugin_main.DRAW_TOOLS)
+ALL = list(plugin_main.TOOL_NAMES) + list(plugin_main.FOREIGN_KEEP)
 REAL = [n for n in ALL if n != plugin_main.MENU_TOOL]
 # ★ 2026-10-19：画图工具已改成常驻（不再有"二级目录藏起来"），
 #   所以点开 ncd_tools 之后就应该是全部工具，没有中间态了。
@@ -96,8 +95,8 @@ ev = make_event("x:FriendMessage:1")
 ts = FakeToolSet(ALL + ["astrbot_builtin_tool"])
 inst._apply_tool_menu(types.SimpleNamespace(func_tool=ts), ev)
 print(f"  未点开: {ts.names()}")
-check("用例2", ts.names() == [plugin_main.MENU_TOOL, "astrbot_builtin_tool"],
-      f"应只剩菜单和别家工具，实际 {ts.names()}")
+check("用例2", sorted(ts.names()) == sorted([plugin_main.MENU_TOOL] + list(plugin_main.FOREIGN_KEEP) + ["astrbot_builtin_tool"]),
+      f"应只剩菜单、姊妹插件工具和别家工具，实际 {ts.names()}")
 
 inst._revealed[ev.unified_msg_origin] = 1.0
 ts2 = FakeToolSet(ALL)
@@ -124,7 +123,8 @@ inst3._apply_tool_menu(types.SimpleNamespace(func_tool=tb), ev_b)
 print(f"  A（两个都点开过）: {len(ta.names())} 个")
 print(f"  B（没点过）: {tb.names()}")
 check("用例3", len(ta.names()) == len(ALL), f"A 应全在（实际 {len(ta.names())}）")
-check("用例3", tb.names() == [plugin_main.MENU_TOOL], f"B 应只剩菜单（实际 {tb.names()}）")
+check("用例3", sorted(tb.names()) == sorted([plugin_main.MENU_TOOL] + list(plugin_main.FOREIGN_KEEP)),
+      f"B 应只剩菜单和姊妹插件工具（实际 {tb.names()}）")
 
 # =====================================================================
 #  用例 4：开关关掉 → 不收窄（可回滚）
@@ -150,20 +150,17 @@ async def run_tune(conf, umo="x:FriendMessage:1"):
 
 inst_on, req_on = asyncio.run(run_tune({"tool_menu": True}))
 print(f"  tool_menu=True  → {req_on.func_tool.names()}")
-check("用例4", req_on.func_tool.names() == [plugin_main.MENU_TOOL],
+check("用例4", sorted(req_on.func_tool.names()) == sorted([plugin_main.MENU_TOOL] + list(plugin_main.FOREIGN_KEEP)),
       f"开菜单应只剩 ncd_tools，实际 {req_on.func_tool.names()}")
 
 inst_off, req_off = asyncio.run(run_tune({"tool_menu": False}))
 # ★ 2026-10-18 改：菜单关掉时 ncd_tools 也要摘掉 —— 否则模型（尤其 DeepSeek）
 #   会先点它拿清单、再调真正的工具，白花一次往返和几百 token。
-# ★ 2026-10-19 再改：画图工具常驻（不再藏），所以关菜单时它们也照常在。
 expected_off = sorted(n for n in REAL)
 print(f"  tool_menu=False → {len(req_off.func_tool.names())} 个（应 {len(expected_off)}，只去掉 ncd_tools）")
-check("用例4", sorted(req_off.func_tool.names()) == expected_off,
-      f"关菜单应保留全部真实工具（含画图工具）、只去掉 ncd_tools，"
+check("用例4", sorted(req_off.func_tool.names()) == sorted(expected_off),
+      f"关菜单应保留全部真实工具、只去掉 ncd_tools，"
       f"实际 {req_off.func_tool.names()}")
-check("用例4", set(plugin_main.DRAW_TOOLS) <= set(req_off.func_tool.names()),
-      "★ 画图工具应该常驻，关菜单时也在")
 
 
 
@@ -207,6 +204,13 @@ inst5d, req5d = asyncio.run(run_tune({"tool_menu": False}))
 check("用例5", plugin_main.DEFAULT_MENU_HINT not in (req5d.system_prompt or ""),
       "★ 菜单关着还在注入能力提示")
 
+print("\n===== 用例5：姊妹插件（绘图）的工具不许被删 =====")
+inst5, req5 = asyncio.run(run_tune({"rp_mode": "full", "tool_menu": False}))
+names5 = req5.func_tool.names()
+print(f"  {names5}")
+check("用例5", set(plugin_main.FOREIGN_KEEP) <= set(names5),
+      f"★ 绘图工具被工具箱当外人也删了（模型会说不会画图）：{names5}")
+
 print("\n===== 判定 =====")
 if failures:
     print("失败项:")
@@ -214,5 +218,6 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 命名一致 / 收窄与解锁 / 会话隔离 / 开关回滚 / 提示注入 全部正确")
+
 
 

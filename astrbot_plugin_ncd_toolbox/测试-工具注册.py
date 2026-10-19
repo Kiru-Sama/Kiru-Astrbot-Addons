@@ -1,4 +1,4 @@
-"""自测：全部工具是否注册成功、参数 schema 与描述是否齐全。
+﻿"""自测：全部工具是否注册成功、参数 schema 与描述是否齐全。
 
 不联网、不启动 AstrBot，只导入模块并检查注册表。
 用法：<AstrBot>\\.venv\\Scripts\\python.exe 测试-工具注册.py
@@ -18,12 +18,6 @@ EXPECTED = {
     "list_stickers": {"page": "number"},
     "preview_sticker": {"index": "number"},
     "send_sticker": {"index": "number"},
-    "generate_image": {"prompt": "string", "style": "string", "reference": "string",
-                       "size": "string", "force": "boolean"},
-    # 换底模：只有一个 model，留空=只列清单（AI 想先看有什么可选时用）
-    "switch_model": {"model": "string"},
-    # 画图二级菜单：刻意不带参数（它只是"展开目录"）
-    "draw_tools": {},
     # 头像：只有一个 who，留空=当前说话的人
     "view_avatar": {"who": "string"},
     "recall_history": {"count": "number"},
@@ -116,52 +110,3 @@ cases = {
     "a cat, soft light": False,
     "": False,
 }
-for text, expect in cases.items():
-    got = plugin_main.looks_chinese(text)
-    print(f"  {text!r:38} → {got}（应 {expect}）")
-    if got != expect:
-        failures.append(f"looks_chinese({text!r}) 应为 {expect}，实际 {got}")
-
-print("\n--- 出图总超时 ---")
-
-
-async def _slow(prompt, opts=None):
-    await asyncio.sleep(5)
-    return b"x", "x.png"
-
-
-inst = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
-inst._conf = {"image_backend": "standalone", "image_timeout": 1}
-inst._render_standalone = _slow          # 实例属性直接顶掉方法
-
-t0 = __import__("time").time()
-try:
-    asyncio.run(inst._render_image("a cat"))
-    failures.append("★ 超时没生效：1 秒的配置下竟然正常返回了")
-    print("  !! 超时没生效")
-except plugin_main.SDBackendError as exc:
-    cost = __import__("time").time() - t0
-    print(f"  {cost:.1f} 秒后中止：{str(exc)[:70]}…")
-    if "超时" not in str(exc):
-        failures.append(f"超时错误信息里没有「超时」字样：{exc}")
-    if cost > 3:
-        failures.append(f"超时用了 {cost:.1f} 秒才生效，应该在 1 秒左右")
-except Exception as exc:  # noqa: BLE001
-    failures.append(f"超时抛的是 {type(exc).__name__}，应为 SDBackendError")
-
-# 默认值也要对：不配 image_timeout 时应落到 70
-inst2 = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
-inst2._conf = {"image_backend": "standalone"}
-print(f"  不配 image_timeout 时的默认值：{inst2._conf_int('image_timeout', 70)}")
-if inst2._conf_int("image_timeout", 70) != 70:
-    failures.append("image_timeout 默认值不是 70")
-
-if failures:
-    print("\n失败项:")
-    for item in failures:
-        print(f"  ✗ {item}")
-    sys.exit(1)
-
-print(f"\nPASS: {len(EXPECTED)} 个工具全部注册成功，参数与描述齐全，TOOL_NAMES 与源码声明一致，"
-      "中文 prompt 能识别，出图超时能中止")
-

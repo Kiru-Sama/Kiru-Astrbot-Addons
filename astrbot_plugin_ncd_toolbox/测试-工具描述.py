@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：每个工具的描述可以被改，而且改回来要真能回到代码原文。
 
 最容易错的地方（本测试重点）：
@@ -38,14 +38,14 @@ def make_plugin(conf=None):
 
 ORIG = {
     "web_search_bing": "【原文】用本机浏览器搜网页",
-    "generate_image": "【原文】按描述画一张图",
+    "web_search_bing": "【原文】搜网页",
     "ncd_tools": "【原文】查出我能用的工具",
     "某个别人的工具": "【别人的】不该被碰",
 }
 
 
 def make_req(names=None):
-    names = names or ["web_search_bing", "generate_image", "ncd_tools", "某个别人的工具"]
+    names = names or ["web_search_bing", "ncd_tools", "某个别人的工具"]
     tools = [types.SimpleNamespace(name=n, description=ORIG.get(n, "")) for n in names]
     return types.SimpleNamespace(func_tool=types.SimpleNamespace(tools=tools))
 
@@ -63,8 +63,8 @@ def desc_of(req, name):
 print("===== 用例 1：读取覆盖表 =====")
 check("用例1", make_plugin()._tool_desc_overrides() == {}, "没配置时应为空表")
 check("用例1",
-      make_plugin({"tool_descriptions": {"generate_image": "画图"}})._tool_desc_overrides()
-      == {"generate_image": "画图"},
+      make_plugin({"tool_descriptions": {"web_search_bing": "搜"}})._tool_desc_overrides()
+      == {"web_search_bing": "搜"},
       "正常配置没读到")
 check("用例1",
       make_plugin({"tool_descriptions": "这不是对象"})._tool_desc_overrides() == {},
@@ -74,16 +74,16 @@ check("用例1",
 #  用例 2：覆盖生效
 # =====================================================================
 print("\n===== 用例 2：覆盖生效 =====")
-inst = make_plugin({"tool_descriptions": {"generate_image": "你自己写的画图说明"}})
+inst = make_plugin({"tool_descriptions": {"web_search_bing": "你自己写的搜索说明"}})
 req = make_req()
 inst._apply_tool_descriptions(req)
-print(f"  generate_image → {desc_of(req, 'generate_image')!r}")
-check("用例2", desc_of(req, "generate_image") == "你自己写的画图说明", "覆盖没生效")
-check("用例2", desc_of(req, "web_search_bing") == ORIG["web_search_bing"],
+print(f"  web_search_bing → {desc_of(req, 'web_search_bing')!r}")
+check("用例2", desc_of(req, "web_search_bing") == "你自己写的搜索说明", "覆盖没生效")
+check("用例2", desc_of(req, "ncd_tools") == ORIG["ncd_tools"],
       "没覆盖的工具不该被改")
 check("用例2", desc_of(req, "某个别人的工具") == ORIG["某个别人的工具"],
       "★ 把别家插件的工具也改了")
-check("用例2", inst._orig_descriptions["generate_image"] == ORIG["generate_image"],
+check("用例2", inst._orig_descriptions["web_search_bing"] == ORIG["web_search_bing"],
       "原文没记对")
 
 # =====================================================================
@@ -96,11 +96,11 @@ inst._conf["tool_descriptions"] = {}
 req2 = make_req()
 # 模拟共享对象仍带着上一轮的覆盖值
 for t in req2.func_tool.tools:
-    if t.name == "generate_image":
-        t.description = "你自己写的画图说明"
+    if t.name == "web_search_bing":
+        t.description = "你自己写的搜索说明"
 inst._apply_tool_descriptions(req2)
-print(f"  清空后 generate_image → {desc_of(req2, 'generate_image')!r}")
-check("用例3", desc_of(req2, "generate_image") == ORIG["generate_image"],
+print(f"  清空后 web_search_bing → {desc_of(req2, 'web_search_bing')!r}")
+check("用例3", desc_of(req2, "web_search_bing") == ORIG["web_search_bing"],
       "★清空覆盖后没回到代码原文（很可能把覆盖值当成了原文）")
 
 # =====================================================================
@@ -136,3 +136,4 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 读取覆盖 / 覆盖生效 / 清空回到原文 / 空白按原文 / 边界 全部正确")
+

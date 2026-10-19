@@ -1,16 +1,16 @@
 ﻿# -*- coding: utf-8 -*-
-"""回归护栏：画图二级目录（draw_tools）+ AI 自选画幅。
+"""回归护栏：画图入口（drawing_tools）+ AI 自选画幅。
 
 为什么要有这个文件：
     2026-10-18 用户说"生图设置给 ai 展现的很多，单独把生图划进一个画图工具目录，
     细节工具部分展开二级目录"。改动看起来只是加了个工具，但真正容易坏的是：
-      · draw_tools 只解开了"自己那个会话"，却把别的会话也一起放开了
+      · drawing_tools 只解开了"自己那个会话"，却把别的会话也一起放开了
       · 清单里没有提示词规则/画风/底模 → 模型拿到工具却不会用
       · size 解析失败时【静默用默认尺寸】→ 模型以为指定了，实际画的是另一个比例
     这几条都在这里钉住。
 
 本测试覆盖：
-  1. draw_tools 返回的内容：提示词四条规则 / 画风清单 / 底模清单 / 当前参数
+  1. drawing_tools 返回的内容：提示词四条规则 / 画风清单 / 底模清单 / 当前参数
   2. 重复调用只回一句短提醒（省上下文）
   3. 只解锁本会话（另一个会话仍然看不到画图工具）
   4. generate_image(size=...) → payload 带 width/height；留空 → 不带（用配置默认）
@@ -98,10 +98,11 @@ class FakeClient:
 
 
 def make_plugin():
-    inst = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
+    inst = plugin_main.NcdDrawPlugin.__new__(plugin_main.NcdDrawPlugin)
     inst._conf = dict(CONF)
     inst._revealed = {}
-    inst._draw_revealed = {}
+    # 画图入口已开（避免每次调用都撞闸门；闸门本身另有测试）
+    inst._draw_revealed = {u: 1.0 for u in ('t:GroupMessage:1', 't:FriendMessage:1', 'A:GroupMessage:1')}
     inst._pending_images = {}
     inst._render_lock = asyncio.Lock()
     inst._last_image = None
@@ -128,9 +129,10 @@ def make_event(umo="t:GroupMessage:1"):
 
 
 # =====================================================================
-print("===== ① draw_tools 返回的内容 =====")
+print("===== ① drawing_tools 返回的内容 =====")
 inst, client = make_plugin()
-out = asyncio.run(inst.draw_tools(make_event()))
+inst._draw_revealed = {}      # 入口状态清零，才拿得到完整说明
+out = asyncio.run(inst.drawing_tools(make_event()))
 print(out[:400].replace("\n", " | "))
 for token, label in (
     ("generate_image", "没给出 generate_image"),
@@ -141,6 +143,7 @@ for token, label in (
     ("waiIllustriousSDXL_v170", "没给底模清单"),
     ("采样器", "没给当前采样器"),
     ("832x1216", "没给画幅写法"),
+    ("draw_kb_search", "没推荐先查标签库"),
 ):
     check("①", token in out, label)
 
@@ -149,40 +152,25 @@ check("①", "720×1024" in out or "720x1024" in out, "没给出当前默认尺�
 
 # =====================================================================
 print("\n===== ② 重复调用只回一句提醒 =====")
-again = asyncio.run(inst.draw_tools(make_event()))
+again = asyncio.run(inst.drawing_tools(make_event()))
 print(f"  第二次：{again[:80]}…")
 check("②", len(again) < len(out), "第二次不该再给一遍长清单")
-check("②", "已经给过你了" in again, "第二次没提示「已经给过你了」")
+check("②", "已经开过了" in again, "第二次没提示「已经开过了」")
 check("②", "cunnyfunky" not in again, "第二次仍在塞画风清单")
 
 # =====================================================================
 print("\n===== ③ 说明书按会话记（只影响「要不要重复给长文案」）=====")
 inst2, _ = make_plugin()
-asyncio.run(inst2.draw_tools(make_event("A:GroupMessage:1")))
+asyncio.run(inst2.drawing_tools(make_event("A:GroupMessage:1")))
 check("③", "A:GroupMessage:1" in inst2._draw_revealed, "A 会话没记下")
 check("③", "B:GroupMessage:2" not in inst2._draw_revealed, "★ B 会话被一起记下了")
 
-# ★ 2026-10-19 改：画图工具【常驻】，不再被藏起来 —— 这里钉住"谁都不会被摘掉"
-class FakeToolSet:
-    def __init__(self, names):
-        self.tools = [types.SimpleNamespace(name=n) for n in names]
-
-    def remove_tool(self, name):
-        self.tools = [t for t in self.tools if t.name != name]
-
-    def names(self):
-        return [t.name for t in self.tools]
-
-
-req_a = FakeToolSet(list(plugin_main.TOOL_NAMES))
-inst2._apply_tool_menu(types.SimpleNamespace(func_tool=req_a), make_event("A:GroupMessage:1"))
-print(f"  菜单模式下点开过 ncd_tools 的会话：{sorted(req_a.names())}")
+# ★ 本插件没有「工具菜单」那套（菜单在工具箱插件里）：
+#   这里只钉住三个画图工具都在本插件的 TOOL_NAMES 里，且没有隐藏逻辑。
 check("③", set(plugin_main.DRAW_TOOLS) <= set(plugin_main.TOOL_NAMES), "画图工具不在 TOOL_NAMES 里")
-req_b = FakeToolSet(list(plugin_main.TOOL_NAMES))
-inst2._hide_menu_tool(types.SimpleNamespace(func_tool=req_b))
-print(f"  菜单关闭时的工具：{sorted(req_b.names())}")
-check("③", set(plugin_main.DRAW_TOOLS) <= set(req_b.names()),
-      "★ 画图工具应该常驻（菜单关了也在），不能再被藏起来")
+src3 = (PLUGIN / "main.py").read_text(encoding="utf-8")
+check("③", "_apply_tool_menu" not in src3 and "_hide_menu_tool" not in src3,
+      "★ 画图插件里不该有「工具菜单」那套逻辑（菜单在工具箱插件里）")
 
 # =====================================================================
 print("\n===== ④ 画幅真的进了 payload =====")
@@ -283,20 +271,38 @@ check("④-3", _dcap == 1920 and _dpx >= 1920 * 1440,
 
 # =====================================================================
 print("\n===== ⑤ 画图工具在 TOOL_NAMES / 菜单里 =====")
-check("⑤", "draw_tools" in plugin_main.TOOL_NAMES, "draw_tools 不在 TOOL_NAMES")
+check("⑤", "drawing_tools" in plugin_main.TOOL_NAMES, "drawing_tools 不在 TOOL_NAMES")
 check("⑤", plugin_main.DRAW_TOOLS == ("generate_image", "switch_model"),
       f"DRAW_TOOLS 变了：{plugin_main.DRAW_TOOLS}")
-check("⑤", "draw_tools" in plugin_main.TOOL_SUMMARY, "TOOL_SUMMARY 漏了 draw_tools")
+check("⑤", "drawing_tools" in plugin_main.TOOL_SUMMARY, "TOOL_SUMMARY 漏了 drawing_tools")
 
 # =====================================================================
-print("\n===== ⑥ 不再往提示词里塞「先调 draw_tools」（工具已常驻）=====")
-# 事故复盘：曾经把两个画图工具藏进二级目录，模型从历史里记得名字直接调，
-# runner 只回一句「未找到指定的工具，将跳过」，每次画图空转 1~2 轮。
-# 现在改成常驻 + 说明书可选，所以那段注入也删了 —— 这里用源码断言钉住"别再加回来"。
+print("\n===== ⑥ 没先调 drawing_tools 就用绘图工具 → 返回错误并指正 =====")
+# 2026-10-19 用户要求：所有绘图工具收进 drawing_tools，必须先调；
+# 但**不能靠"把工具藏起来"**（那样 runner 只记一条 warning，模型反复空转）。
+# 现在是工具在、调用时返回一条可执行的指正。
+inst7, client7 = make_plugin()
+inst7._draw_revealed = {}          # 清掉 make_plugin 里的"已开"
+out_g = asyncio.run(inst7.generate_image(make_event(), "1girl"))
+print(f"  generate_image（未开入口）→ {out_g[:60]}…")
+check("⑥", out_g.startswith("画图失败") and "drawing_tools" in out_g,
+      f"应返回指正，实际 {out_g[:50]}")
+check("⑥", not client7.calls, "★ 没先开入口却真的去画了")
+
+out_m = asyncio.run(inst7.switch_model(make_event(), "nope"))
+print(f"  switch_model（未开入口）→ {out_m[:60]}…")
+check("⑥", out_m.startswith("画图失败") and "drawing_tools" in out_m,
+      f"应返回指正，实际 {out_m[:50]}")
+
+# 调过入口之后就放行
+asyncio.run(inst7.drawing_tools(make_event()))
+out_g2 = asyncio.run(inst7.generate_image(make_event(), "1girl"))
+print(f"  开了入口之后 → {out_g2[:40]}…")
+check("⑥", client7.calls, "★ 调过 drawing_tools 之后还是不让画")
+
 src = (PLUGIN / "main.py").read_text(encoding="utf-8")
-check("⑥", "_inject_draw_gate_hint" not in src, "★ 又把「隐藏 + 提示注入」加回来了")
-check("⑥", "_apply_draw_gate" not in src, "★ 又把画图工具藏起来了")
-check("⑥", "remove_tool(name)" in src, "菜单收窄本身失效了（ncd_tools 也该能收）")
+check("⑥", "_draw_gate_error" in src, "闸门方法不见了")
+check("⑥", "_inject_draw_gate_hint" not in src, "★ 又把「隐藏 + 提示注入」那种做法加回来了")
 
 print("\n===== 判定 =====")
 if failures:
@@ -304,6 +310,14 @@ if failures:
     for item in failures:
         print(f"  ✗ {item}")
     sys.exit(1)
-print("PASS: 说明书内容齐全 / 重复调用省上下文 / 按会话记 / 画图工具常驻 / 画幅进 payload / 越界报错")
+print("PASS: 入口内容齐全 / 重复调用省上下文 / 按会话记 / 未开入口返回指正 / 画幅进 payload")
+
+
+
+
+
+
+
+
 
 

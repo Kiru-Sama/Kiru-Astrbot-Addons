@@ -53,7 +53,7 @@ def snap(**kw) -> dict:
 
 
 def make_plugin(**conf):
-    inst = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
+    inst = plugin_main.NcdDrawPlugin.__new__(plugin_main.NcdDrawPlugin)
     inst._conf = dict({"sd_progress_interval": 5, "sd_load_grace": 10,
                        "image_timeout": 180}, **conf)
     inst._sd = None
@@ -199,6 +199,8 @@ def run_boom() -> tuple[str, list, list]:
     inst = make_plugin()
     inst._sd = FakeSD()
     inst._revealed = {}
+    # ★ 画图入口已开：否则 generate_image 会先返回"请先调 drawing_tools"，不建进度任务
+    inst._draw_revealed = {"t:GroupMessage:1": 1.0}
     inst._pending_images = {}
     inst._render_lock = asyncio.Lock()
     inst._last_image = None
@@ -257,5 +259,7 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 加载静默10秒 / 只报动过的百分比 / 整轮 5 条上限 / 图生图步数标注 / 就绪不提前收工 / 异常时不留任务")
+
+
 
 

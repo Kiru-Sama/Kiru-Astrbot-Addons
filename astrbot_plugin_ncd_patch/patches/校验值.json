@@ -16,14 +16,6 @@
     "title": "戳一戳时按人设回应"
   },
   {
-    "id": "P3",
-    "patch": "P3-media_utils.py.patch",
-    "rel": "core/utils/media_utils.py",
-    "sha_before": "9fa5fd78a7e4c283",
-    "sha_after": "e4396c67558f8de1",
-    "title": "动图取 3 帧（原版是 9 宫格）"
-  },
-  {
     "id": "P4",
     "patch": "P4-astr_main_agent.py.patch",
     "rel": "core/astr_main_agent.py",

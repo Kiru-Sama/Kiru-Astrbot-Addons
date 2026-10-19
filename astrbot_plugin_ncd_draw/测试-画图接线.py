@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：generate_image 的接线（画风 + 参考图）。
 
 为什么要有这个文件：
@@ -73,7 +73,7 @@ class FakeClient:
 
 
 def make_plugin(opts=None):
-    inst = plugin_main.NcdToolboxPlugin.__new__(plugin_main.NcdToolboxPlugin)
+    inst = plugin_main.NcdDrawPlugin.__new__(plugin_main.NcdDrawPlugin)
     inst._conf = dict({
         "sd_lora_dir": str(tmp),
         "sd_allow_nsfw_lora": True,
@@ -84,6 +84,8 @@ def make_plugin(opts=None):
         "sd_width": 512, "sd_height": 768, "sd_steps": 10, "sd_cfg": 5.5,
     }, **(opts or {}))
     inst._revealed = {}
+    # 画图入口已开（避免每次调用都撞闸门；闸门本身另有测试）
+    inst._draw_revealed = {u: 1.0 for u in ('t:GroupMessage:1', 't:FriendMessage:1', 'A:GroupMessage:1')}
     inst._pending_images = {}
     inst._render_lock = asyncio.Lock()
     inst._last_image = None
@@ -127,6 +129,16 @@ check("①", payload["loras"][0]["scale"] == 0.7, f"强度不对：{payload['lor
 check("①", "sd_" in out or "画好了" in out or "画" in out, f"返回太怪：{out[:40]}")
 
 # =====================================================================
+print("\n===== ①-2 负面词：AI 传的是【追加】，不能冲掉默认那套 =====")
+inst, client = make_plugin()
+asyncio.run(inst.generate_image(make_event(), "1girl", "", "", "", False, "extra arms, helmet"))
+kind, payload = client.calls[-1]
+neg = payload.get("negative") or ""
+print(f"  {kind}  negative={neg[:80]}…")
+check("①-2", "lowres" in neg, "★ 默认那套（sd_negative）被冲掉了")
+check("①-2", "extra arms" in neg and "helmet" in neg, "AI 给的负面词没进 payload")
+
+# =====================================================================
 print("\n===== ② 不填 style → 不挂 LoRA =====")
 inst, client = make_plugin()
 asyncio.run(inst.generate_image(make_event(), "1girl"))
@@ -165,12 +177,45 @@ print(f"  {kind}  image_len={len(payload.get('image') or '')}")
 check("⑤", kind == "img2img", f"应走 img2img，实际 {kind}")
 
 # =====================================================================
-print("\n===== ⑥ 消息里没图 + reference=message → 退回文生图 =====")
+print("\n===== ⑥ 消息里没图 + reference=message → 明确拒绝，不画文生图 =====")
+# 2026-10-19 事故：用户引用一张图说"用图生图"，插件取不到被引用的图就静默画了
+# 一张毫无关系的新图。现在必须报错并让模型去要图，而不是"画点什么交差"。
 inst, client = make_plugin()
-asyncio.run(inst.generate_image(make_event(), "1girl", "", "message"))
-kind, _ = client.calls[-1]
-print(f"  {kind}（没有图时应退回文生图）")
-check("⑥", kind == "txt2img", f"应退回文生图，实际 {kind}")
+out6 = asyncio.run(inst.generate_image(make_event(), "1girl", "", "message"))
+print(f"  返回：{out6[:80]}…")
+check("⑥", out6.startswith("画图失败"), f"应明确失败，实际 {out6[:40]}")
+check("⑥", not client.calls, "★ 没取到参考图却还是画了（会画出一张无关的新图）")
+
+# =====================================================================
+print("\n===== ⑥-2 被引用的消息里有图 → 走 img2img =====")
+# AstrBot 的 aiocqhttp 适配器会把被引用消息解析进 Reply.chain，这里模拟那种结构。
+reply_img = tmp / "quoted.png"
+reply_img.write_bytes(b"\x89PNG" + b"4" * 120)
+
+
+def make_reply_event(path):
+    quoted = plugin_main.Comp.Reply(
+        id="123456",
+        chain=[plugin_main.Comp.Image(file=str(path), path=str(path))],
+        sender_id=1,
+        sender_nickname="某人",
+    )
+    return types.SimpleNamespace(
+        unified_msg_origin="t:GroupMessage:1",
+        get_messages=lambda: [quoted],
+        get_sender_id=lambda: "1",
+        get_self_id=lambda: "2",
+        get_sender_name=lambda: "x",
+        get_group_id=lambda: "3",
+    )
+
+
+inst, client = make_plugin()
+asyncio.run(inst.generate_image(make_reply_event(reply_img), "1girl", "", "message"))
+kind, payload = client.calls[-1]
+print(f"  {kind}  image_len={len(payload.get('image') or '')}")
+check("⑥-2", kind == "img2img", f"★ 引用的图没被取到，实际走了 {kind}")
+check("⑥-2", payload.get("image"), "参考图字节没传下去")
 
 # =====================================================================
 print("\n===== ⑦ _render_standalone 不许再自己解析 style/reference =====")
@@ -194,3 +239,5 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 画风解析 / 不挂 / 报错给人话 / last 参考图 / message 参考图 / 退回文生图 / 渲染层不越位")
+
+

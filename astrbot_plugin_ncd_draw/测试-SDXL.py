@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：SDXL 独立后端（SD1.5 支线已删除）。
 
 覆盖：
@@ -24,7 +24,7 @@ import sd_worker  # noqa: E402
 # ★ 不要写死本机路径：分享包里出现本机目录名会被隐私扫描抓出来。
 #   这里从插件目录往上推出 AstrBot 根，再拼配置路径。
 ASTRBOT_ROOT = PLUGIN.parents[2]
-CONFIG = ASTRBOT_ROOT / "data" / "config" / "astrbot_plugin_ncd_toolbox_config.json"
+CONFIG = ASTRBOT_ROOT / "data" / "config" / "astrbot_plugin_ncd_draw_config.json"
 WORKER_SRC = (PLUGIN / "sd_worker.py").read_text(encoding="utf-8")
 
 failures: list[str] = []
@@ -120,3 +120,5 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 只认 SDXL / SD1.5 支线已删 / offload 三档 / 配置指向 SDXL / LoRA 可开关")
+
+

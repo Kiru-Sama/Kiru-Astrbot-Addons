@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：采样器（欧拉+普通 / DPM++ 2M+Karras）与画幅解析。
 
 为什么要有这个文件：
@@ -65,7 +65,7 @@ print("\n===== ② 两种档位的调度器（在 SD 的 python 里真造一遍�
 import subprocess  # noqa: E402
 
 ASTRBOT_ROOT = PLUGIN.parents[2]
-CONFIG = ASTRBOT_ROOT / "data" / "config" / "astrbot_plugin_ncd_toolbox_config.json"
+CONFIG = ASTRBOT_ROOT / "data" / "config" / "astrbot_plugin_ncd_draw_config.json"
 conf = json.loads(CONFIG.read_bytes().decode("utf-8-sig")) if CONFIG.exists() else {}
 SD_PYTHON = str(conf.get("sd_python") or "").strip()
 
@@ -155,7 +155,7 @@ for raw in bad_cases:
 # =====================================================================
 print("\n===== ④ 配置与 payload 里的 sampler =====")
 ASTRBOT_ROOT = PLUGIN.parents[2]
-CONFIG = ASTRBOT_ROOT / "data" / "config" / "astrbot_plugin_ncd_toolbox_config.json"
+CONFIG = ASTRBOT_ROOT / "data" / "config" / "astrbot_plugin_ncd_draw_config.json"
 schema = json.loads((PLUGIN / "_conf_schema.json").read_text(encoding="utf-8"))
 print(f"  schema.sd_sampler 默认 = {schema.get('sd_sampler', {}).get('default')!r}")
 check("④", schema.get("sd_sampler", {}).get("default") == "euler", "配置默认不是 euler")
@@ -191,3 +191,5 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 采样器名收敛 / 两档调度器真的不同 / 画幅解析与报错 / 配置与接线 / 不重载权重")
+
+

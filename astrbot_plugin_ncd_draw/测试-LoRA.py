@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """回归护栏：LoRA 要能一路传到 worker 的命令行上。
 
 链路：配置 sd_lora / sd_lora_scale → StandaloneClient → 子进程参数 --lora / --lora-scale
@@ -125,3 +125,4 @@ if failures:
         print(f"  ✗ {item}")
     sys.exit(1)
 print("PASS: 有 LoRA 时拼参数 / 没 LoRA 不带参数 / 属性归一化 / worker 参数与调用点 全部正确")
+

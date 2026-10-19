@@ -2094,7 +2094,7 @@ git -C <包目录> -c core.autocrlf=false -c core.safecrlf=false -c core.eol=lf 
 
 > 这也是为什么「验证补丁」不能只看 `git apply` 的退出码，
 > **必须比 SHA256**（`生成源码补丁.py` 会把每个文件打完应有的哈希写进
-> `patches\校验值.json` 和 `补丁说明.md`，就是为这个）。
+> 补丁已拆到独立插件 `astrbot_plugin_ncd_patch`（`patches\校验值.json` 与 `补丁说明.md` 在那里）。
 
 ---
 
