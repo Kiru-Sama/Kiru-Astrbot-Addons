@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>生图</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root {
+    --bg: #0f1115;
+    --card: #171a20;
+    --border: #2a2f3a;
+    --text: #e6e8ec;
+    --muted: #8b93a3;
+    --accent: #4c8dff;
+    --ok: #3ecf8e;
+    --bad: #ff6b6b;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6f8; --card: #ffffff; --border: #dfe3ea;
+      --text: #1c2028; --muted: #6b7280;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px; background: var(--bg); color: var(--text);
+    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 16px; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; margin-bottom: 14px;
+  }
+  label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+  textarea, input {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font: inherit; outline: none;
+  }
+  textarea { min-height: 84px; resize: vertical; font-size: 13.5px; }
+  textarea:focus, input:focus { border-color: var(--accent); }
+  /* 下拉框要和 input 长得一样，否则两个控件挨着看很跳 */
+  select {
+    width: 100%; background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 9px 11px; font: inherit; outline: none;
+  }
+  select:focus { border-color: var(--accent); }
+  .row { display: grid; gap: 12px; margin-top: 12px; }
+  .row.cols2 { grid-template-columns: repeat(2, 1fr); }
+  .row.cols5 { grid-template-columns: repeat(5, 1fr); }
+  .row.ref { grid-template-columns: 1fr 1fr auto; align-items: end; }
+  #refthumb {
+    height: 56px; border-radius: 6px; border: 1px solid var(--border);
+    display: block; object-fit: cover;
+  }
+  .actions { display: flex; align-items: center; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 8px;
+    padding: 10px 20px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  button.ghost {
+    background: transparent; color: var(--text);
+    border: 1px solid var(--border); font-weight: 500; padding: 8px 14px;
+  }
+  .hint { color: var(--muted); font-size: 12px; }
+  .pill {
+    display: inline-block; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid var(--border); font-size: 12px; color: var(--muted);
+  }
+  .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+  .pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 40%, transparent); }
+
+  /* 进度条 */
+  .barwrap { margin-top: 12px; display: none; }
+  .barwrap.on { display: block; }
+  .bar {
+    height: 8px; background: var(--border); border-radius: 999px;
+    overflow: hidden; position: relative;
+  }
+  .bar > i {
+    display: block; height: 100%; width: 0%;
+    background: linear-gradient(90deg, var(--accent), #7fb0ff);
+    border-radius: 999px; transition: width .3s linear;
+  }
+  .bar.indet > i {
+    width: 34%; transition: none;
+    animation: indet 1.1s ease-in-out infinite;
+  }
+  @keyframes indet { 0% { margin-left: -34%; } 100% { margin-left: 100%; } }
+  .barlabel { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+  #preview { display: none; }
+  #preview img {
+    width: 100%; border-radius: 10px; display: block; cursor: zoom-in;
+    background: repeating-conic-gradient(#00000010 0 25%, transparent 0 50%) 0 0/16px 16px;
+  }
+  #err {
+    display: none; border: 1px solid var(--bad); color: var(--bad);
+    border-radius: 8px; padding: 10px 12px; font-size: 13px;
+    white-space: pre-wrap; word-break: break-word; margin-bottom: 14px;
+  }
+  #err.on { display: block; }
+  #recent { display: flex; gap: 8px; flex-wrap: wrap; }
+  #recent img {
+    width: 84px; height: 84px; object-fit: cover; border-radius: 8px;
+    border: 1px solid var(--border); cursor: zoom-in;
+  }
+  #recent img:hover { border-color: var(--accent); }
+  .tiny { font-size: 12px; color: var(--muted); }
+
+  /* 灯箱（点图放大） */
+  #lightbox {
+    position: fixed; inset: 0; background: #000000d0; display: none;
+    align-items: center; justify-content: center; z-index: 99;
+    cursor: zoom-out; padding: 20px;
+  }
+  #lightbox.on { display: flex; }
+  #lightbox img {
+    max-width: 96vw; max-height: 92vh; border-radius: 10px;
+    box-shadow: 0 10px 50px #000c;
+  }
+  #lightbox .close {
+    position: absolute; top: 14px; right: 20px; font-size: 28px;
+    color: #fff; line-height: 1; opacity: .8;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>生图</h1>
+  <div class="sub" id="stat">读取状态中…</div>
+
+  <div class="card">
+    <label for="prompt">画面描述（英文）</label>
+    <textarea id="prompt" placeholder="a giant classical marble statue standing alone in a pure white empty void, soft diffused lighting, fine art photography"></textarea>
+    <div class="hint" style="margin-top:6px">
+      ★ <b>底模是 Illustrious 系 SDXL：只能英文，用逗号分隔的短标签，不要写长句。</b><br>
+      ★ 上限 <b>77 token</b>（约 10~15 个标签）—— 超出部分会被<b>静默截断</b>，不报错但等于白写。<br>
+      例：<code>1girl, silver hair, blue eyes, black dress, forest, backlight</code>
+    </div>
+
+    <div class="row ref">
+      <div>
+        <label for="ref">参考图（可选 —— 选了就是图生图）</label>
+        <input id="ref" type="file" accept="image/png,image/jpeg,image/webp">
+      </div>
+      <div>
+        <label for="strength">强度（越大越偏离参考图）</label>
+        <input id="strength" type="number" min="0.05" max="1" step="0.05" value="0.6">
+      </div>
+      <div id="refbox" style="display:none">
+        <label>预览 <button id="refclear" class="ghost" style="padding:2px 8px">清除</button></label>
+        <img id="refthumb" alt="参考图">
+      </div>
+    </div>
+
+    <div class="row cols5">
+      <div><label for="width" id="wlabel">宽</label><input id="width" type="number" min="64" max="1920" step="8"></div>
+      <div><label for="height" id="hlabel">高</label><input id="height" type="number" min="64" max="1920" step="8"></div>
+      <div><label for="steps">步数</label><input id="steps" type="number" min="1" max="150"></div>
+      <div><label for="cfg">CFG</label><input id="cfg" type="number" min="0" max="30" step="0.5"></div>
+      <div><label for="seed">种子（空 = 随机）</label><input id="seed" type="number" placeholder="随机"></div>
+    </div>
+
+    <div class="row cols2">
+      <div>
+        <label for="model">底模（换模型要重新加载，约十几秒）</label>
+        <select id="model">
+          <option value="">（用当前底模）</option>
+        </select>
+      </div>
+      <div>
+        <label for="style">画风（LoRA）</label>
+        <select id="style">
+          <option value="">不用画风</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row cols2">
+      <div>
+        <label for="stylew">画风强度</label>
+        <input id="stylew" type="number" min="0" max="1.5" step="0.05" placeholder="0.8">
+      </div>
+      <div>
+        <label>说明</label>
+        <div class="hint" style="padding-top:9px">
+          换底模/画风都是「按需加载」：第一次会慢（底模约十几秒，画风约 2 秒），之后复用。
+        </div>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="go">生成</button>
+      <button id="dl" class="ghost" style="display:none">下载原图</button>
+      <span class="hint" id="prog"></span>
+    </div>
+
+    <div class="barwrap" id="barwrap">
+      <div class="bar" id="bar"><i></i></div>
+      <div class="barlabel"><span id="barleft">准备中…</span><span id="barright"></span></div>
+    </div>
+  </div>
+
+  <div id="err"></div>
+
+  <div class="card" id="preview">
+    <img id="shot" alt="生成结果">
+    <div class="tiny" id="meta" style="margin-top:8px"></div>
+  </div>
+
+  <div class="card" id="recentCard" style="display:none">
+    <div class="tiny" style="margin-bottom:8px">本次打开的记录（点缩略图放大）</div>
+    <div id="recent"></div>
+  </div>
+</div>
+
+<div id="lightbox"><span class="close">×</span><img id="lightimg" alt="放大预览"></div>
+
+<script>
+(function () {
+  const P = window.AstrBotPluginPage;
+  const $ = (id) => document.getElementById(id);
+  const recent = [];
+  let lastResult = null;
+  // 参考图（base64 data URL，空串表示走文生图）
+  let refData = "";
+  let pollTimer = null;
+  const t0ref = { t: 0 };
+
+  /* ---------- 错误提示 ---------- */
+  function setErr(msg) {
+    const box = $("err");
+    if (!msg) { box.className = ""; box.textContent = ""; return; }
+    box.className = "on";
+    box.textContent = msg;
+  }
+
+  /* ---------- 灯箱 ---------- */
+  function openLightbox(src) {
+    $("lightimg").src = src;
+    $("lightbox").classList.add("on");
+  }
+  function closeLightbox() {
+    $("lightbox").classList.remove("on");
+    $("lightimg").src = "";
+  }
+  $("lightbox").addEventListener("click", closeLightbox);
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeLightbox();
+  });
+
+  /* ---------- 状态条 ---------- */
+  function statLine(s) {
+    const backend = "独立后端（SDXL）";
+    const parts = ["后端：<b>" + backend + "</b>", "模型：<b>" + (s.model || "—") + "</b>"];
+    if (s.sampler) {
+      const cn = s.sampler === "dpmpp2m_karras" ? "DPM++ 2M + Karras" : "欧拉 + 普通";
+      parts.push('<span class="pill">采样器 ' + cn + "</span>");
+    }
+    if (s.backend === "standalone") {
+      parts.push('<span class="pill ' + (s.worker_running ? "ok" : "") + '">' +
+        (s.worker_running ? "worker 运行中" : "worker 未启动（首次生成会自动拉起）") + "</span>");
+      parts.push('<span class="pill">空闲 ' + s.idle_timeout + " 秒自动退出</span>");
+      // ★ 把 LoRA 状态显示出来：加载失败是"静默降级"（只记日志、继续无 LoRA 出图），
+      //   不显示的话用户只会觉得"风格没出来"，根本无从判断。
+      if (s.lora) {
+        parts.push('<span class="pill ok">LoRA ' + s.lora + " × " + s.lora_scale + "</span>");
+      } else if (s.worker_running) {
+        parts.push('<span class="pill">没挂 LoRA</span>');
+      }
+      if (!s.sd_ready) parts.push('<span class="pill bad">sd_python / sd_checkpoint 没配全</span>');
+    }
+    $("stat").innerHTML = parts.join(" · ");
+  }
+
+  async function loadStatus() {
+    try {
+      const s = await P.apiGet("/ncd-imggen/status");
+      if (!s || s.ok === false) throw new Error((s && s.error) || "状态读取失败");
+      statLine(s);
+      if (s.width) $("width").value = s.width;
+      if (s.height) $("height").value = s.height;
+      if (s.steps) $("steps").value = s.steps;
+      if (s.cfg) $("cfg").value = s.cfg;
+      fillStyles(s.styles || []);
+      fillModels(s.models || [], s.model);
+      fillLimits(s);
+    } catch (e) {
+      $("stat").textContent = "状态读取失败：" + (e && e.message ? e.message : e);
+    }
+  }
+
+  /* 画幅上限：跟着插件配置（sd_max_side / sd_max_mp）走，不在页面写死 */
+  function fillLimits(s) {
+    const cap = parseInt(s.max_side, 10) || 1920;
+    const mp = parseFloat(s.max_mp) || (cap * 1440 / 1e6);
+    const side = Math.round(mp * 1e6 / cap / 8) * 8 || 1440;
+    ["width", "height"].forEach((id) => { $(id).max = String(cap); });
+    const txt = "（单边 ≤" + cap + "，面积 ≤" + mp.toFixed(2) + " MP，约 " +
+      cap + "×" + Math.min(cap, side) + "）";
+    $("wlabel").textContent = "宽" + txt;
+    $("hlabel").textContent = "高" + txt;
+  }
+
+  /* 底模下拉：列出目录里的所有底模，标出当前那个 */
+  function fillModels(models, current) {
+    const sel = $("model");
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">（用当前底模）</option>';
+    if (!models.length) {
+      sel.innerHTML += '<option value="" disabled>（目录里没有可用底模）</option>';
+      return;
+    }
+    models.forEach((m) => {
+      const o = document.createElement("option");
+      o.value = m.name;
+      o.textContent =
+        m.name + "（" + (m.size_mb / 1024).toFixed(1) + " GB" +
+        (m.current ? " · 当前" : "") + "）";
+      sel.appendChild(o);
+    });
+    if (keep) sel.value = keep;
+    else if (current) sel.value = String(current).replace(/\.(safetensors|ckpt)$/i, "");
+  }
+
+  /* 画风下拉：按 SFW / NSFW 分组显示 */
+  function fillStyles(styles) {
+    const sel = $("style");
+    const keep = sel.value;
+    sel.innerHTML = '<option value="">不用画风</option>';
+    if (!styles.length) {
+      sel.innerHTML += '<option value="" disabled>（目录里没有可用画风）</option>';
+      return;
+    }
+    ["SFW", "NSFW"].forEach((rating) => {
+      const group = styles.filter((x) => x.rating === rating);
+      if (!group.length) return;
+      const og = document.createElement("optgroup");
+      og.label = rating === "SFW" ? "SFW（正常场景）" : "NSFW（露骨内容）";
+      group.forEach((x) => {
+        const o = document.createElement("option");
+        o.value = x.name;
+        o.textContent = x.name + "（" + Math.round(x.size_mb) + "MB）";
+        og.appendChild(o);
+      });
+      sel.appendChild(og);
+    });
+    if (keep) sel.value = keep;
+  }
+
+  /* ---------- 进度条 ---------- */
+  function showBar(on) { $("barwrap").classList.toggle("on", !!on); }
+  function paintBar(step, total, elapsed, mode, full) {
+    const bar = $("bar");
+    if (total > 0) {
+      bar.classList.remove("indet");
+      const pct = Math.max(0, Math.min(100, (step / total) * 100));
+      bar.firstElementChild.style.width = pct.toFixed(1) + "%";
+      // ★ 图生图只重绘 steps×strength 步，标出来免得看着像"少跑了"
+      const note = (mode === "img2img" && full && full !== total)
+        ? "（图生图 " + full + " 步 × " + (total / full).toFixed(2) + "）"
+        : "";
+      $("barleft").textContent = "第 " + step + " / " + total + " 步" + note;
+      $("barright").textContent = elapsed.toFixed(1) + " 秒";
+    } else {
+      bar.classList.add("indet");
+      bar.firstElementChild.style.width = "";
+      $("barleft").textContent = "生成中…";
+      $("barright").textContent = elapsed > 0 ? elapsed.toFixed(1) + " 秒" : "";
+    }
+  }
+
+  function startPoll() {
+    stopPoll();
+    t0ref.t = Date.now();
+    paintBar(0, 0, 0);
+    pollTimer = setInterval(async () => {
+      const elapsed = (Date.now() - t0ref.t) / 1000;
+      try {
+        const p = await P.apiGet("/ncd-imggen/progress");
+        if (p && p.ok) {
+          paintBar(p.step || 0, p.total || 0, p.elapsed || elapsed, p.mode, p.steps_full);
+          return;
+        }
+      } catch (e) { /* 轮询失败不影响生成，继续用计时兜底 */ }
+      paintBar(0, 0, elapsed);
+    }, 400);
+  }
+  function stopPoll() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  /* ---------- 结果 ---------- */
+  function addRecent(item) {
+    recent.unshift(item);
+    if (recent.length > 12) recent.pop();
+    const box = $("recent");
+    box.innerHTML = "";
+    recent.forEach((it) => {
+      const img = document.createElement("img");
+      img.src = it.image;
+      img.title = it.prompt;
+      img.alt = it.prompt;
+      img.addEventListener("click", () => openLightbox(it.image));
+      box.appendChild(img);
+    });
+    $("recentCard").style.display = recent.length ? "" : "none";
+  }
+
+  function showResult(r) {
+    lastResult = r;
+    $("shot").src = r.image;
+    $("preview").style.display = "";
+    $("dl").style.display = "";
+    $("meta").textContent =
+      (r.filename || "") + " · " + (r.bytes || 0).toLocaleString() + " 字节 · " +
+      (r.elapsed || "?") + " 秒 · " + (r.prompt || "").slice(0, 80);
+  }
+  $("shot").addEventListener("click", () => {
+    if (lastResult) openLightbox(lastResult.image);
+  });
+
+  /* ---------- 下载 ---------- */
+  async function download() {
+    if (!lastResult) return;
+    const name = lastResult.filename || "imggen.png";
+    // ★ 优先走桥接：插件页面在不透明源的 iframe 里（没有 allow-same-origin），
+    //   自己 a.click() 下载实测无效；父页面不受这个限制。
+    if (P && typeof P.download === "function") {
+      try {
+        await P.download("/ncd-imggen/last", {}, name);
+        return;
+      } catch (e) {
+        console.warn("桥接下载失败，退回本地下载:", e);
+      }
+    }
+    try {
+      const a = document.createElement("a");
+      a.href = lastResult.image;
+      a.download = name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } catch (e) {
+      setErr("下载失败：" + (e && e.message ? e.message : e) + "\n（可以直接右键图片选「图片另存为」）");
+    }
+  }
+
+  /* ---------- 生成 ---------- */
+  async function generate() {
+    const prompt = $("prompt").value.trim();
+    if (!prompt) { setErr("先写一句英文的画面描述。"); return; }
+    setErr("");
+    const body = { prompt };
+    ["width", "height", "steps", "cfg", "seed"].forEach((k) => {
+      const v = $(k).value.trim();
+      if (v !== "") body[k] = v;
+    });
+    // 有参考图就走图生图（独立后端才支持）
+    if (refData) {
+      body.image = refData;
+      const s = $("strength").value.trim();
+      if (s !== "") body.strength = s;
+    }
+
+    // 底模（可选）：选了才传；不选 = 用插件里当前的底模
+    const modelName = $("model").value;
+    if (modelName) body.model = modelName;
+
+    // 画风（可选）：选了才传；强度填了就拼成 name:0.7
+    const styleName = $("style").value;
+    if (styleName) {
+      const w = $("stylew").value.trim();
+      body.style = w === "" ? styleName : styleName + ":" + w;
+    }
+
+    const btn = $("go");
+    btn.disabled = true;
+    $("prog").textContent = "";
+    showBar(true);
+    startPoll();
+
+    const t0 = Date.now();
+    try {
+      const r = await P.apiPost("/ncd-imggen/generate", body);
+      if (!r || r.ok === false) throw new Error((r && r.error) || "生成失败");
+      stopPoll();
+      showBar(false);
+      $("prog").textContent = "完成，用时 " + r.elapsed + " 秒";
+      showResult(r);
+      addRecent(r);
+      loadStatus();
+    } catch (e) {
+      stopPoll();
+      showBar(false);
+      const msg = e && e.message ? e.message : String(e);
+      const waited = ((Date.now() - t0) / 1000).toFixed(1);
+      setErr("生成失败（等了 " + waited + " 秒）：" + msg);
+      $("prog").textContent = "";
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  /* ---------- 参考图 ---------- */
+  $("ref").addEventListener("change", () => {
+    const f = $("ref").files && $("ref").files[0];
+    if (!f) return;
+    if (f.size > 12 * 1024 * 1024) {
+      setErr("参考图太大（上限 12MB），换一张小点的。");
+      $("ref").value = "";
+      return;
+    }
+    const fr = new FileReader();
+    fr.onload = () => {
+      refData = String(fr.result || "");
+      $("refthumb").src = refData;
+      $("refbox").style.display = "";
+    };
+    fr.onerror = () => setErr("参考图读取失败，换一张试试。");
+    fr.readAsDataURL(f);
+  });
+  $("refclear").onclick = () => {
+    refData = "";
+    $("ref").value = "";
+    $("refbox").style.display = "none";
+  };
+
+  $("go").onclick = generate;
+  $("dl").onclick = download;
+  $("prompt").addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") generate();
+  });
+
+  if (!P) {
+    $("stat").textContent = "桥接 SDK 未加载（检查 /api/plugin/page/bridge-sdk.js 是否可达）";
+    return;
+  }
+  loadStatus();
+  P.ready().then(loadStatus).catch((e) => console.warn("bridge ready 失败:", e));
+})();
+</script>
+</body>
+</html>
+

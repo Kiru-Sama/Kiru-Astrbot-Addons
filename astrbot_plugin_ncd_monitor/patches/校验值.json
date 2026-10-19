@@ -1,0 +1,34 @@
+[
+  {
+    "id": "P1",
+    "patch": "P1-cron_tools.py.patch",
+    "rel": "core/tools/cron_tools.py",
+    "sha_before": "fbf449014986f500",
+    "sha_after": "6ad4e420b6cd2d2d",
+    "title": "定时任务参数兜底"
+  },
+  {
+    "id": "P2",
+    "patch": "P2-main.py.patch",
+    "rel": "builtin_stars/astrbot/main.py",
+    "sha_before": "cd91bdc57194c2cf",
+    "sha_after": "ea4f0b68b030ed32",
+    "title": "戳一戳时按人设回应"
+  },
+  {
+    "id": "P3",
+    "patch": "P3-media_utils.py.patch",
+    "rel": "core/utils/media_utils.py",
+    "sha_before": "9fa5fd78a7e4c283",
+    "sha_after": "e4396c67558f8de1",
+    "title": "动图取 3 帧（原版是 9 宫格）"
+  },
+  {
+    "id": "P4",
+    "patch": "P4-astr_main_agent.py.patch",
+    "rel": "core/astr_main_agent.py",
+    "sha_before": "1ebc3dd822a62383",
+    "sha_after": "185173192800a368",
+    "title": "模型不支持工具时，不再往系统提示里塞工具提示"
+  }
+]

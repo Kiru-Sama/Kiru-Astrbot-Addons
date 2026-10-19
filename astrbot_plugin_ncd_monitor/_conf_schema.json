@@ -1,0 +1,80 @@
+{
+  "persona_public": {
+    "type": "string",
+    "description": "公开场合用的人格（群聊等）",
+    "hint": "填 AstrBot 人格库里的【人格名】原文（面板 → 人格）。\n\n规则：除了私聊以外的一切会话（群聊、系统消息等）都用这个。留空 = 不干预，走 AstrBot 原本的默认人格。\n★ 会话被【手动】指定过人格时不覆盖（手动意图更强）。\n★ 内容仍然在 AstrBot 人格库里维护，这里只决定「选哪一个」。",
+    "default": ""
+  },
+  "persona_private": {
+    "type": "string",
+    "description": "私聊用的人格",
+    "hint": "填 AstrBot 人格库里的【人格名】原文（面板 → 人格）。留空 = 不干预。\n\n★ 判定依据是 umo 里的 MessageType：FriendMessage=私聊，其余（GroupMessage / OtherMessage）算公开。\n★ 名字写错或人格被删时会记一条 WARNING 并保持原人格，不会把对话搞没。",
+    "default": ""
+  },
+  "kb_public": {
+    "type": "string",
+    "description": "公开场合用的知识库（群聊等）",
+    "hint": "填 AstrBot 知识库的【名字】原文（面板 → 知识库）。留空 = 不干预，走 AstrBot 原本的全局 kb_names。\n\n★ 除了私聊以外的一切会话（群聊、系统消息等）都用这个。\n★ 用逗号分隔可以填多个，例如：常识库, 表情包索引\n★ 会话被【手动】绑定过知识库（面板 → 会话管理 → 知识库）时不覆盖，手动意图优先。\n★ 不想让群聊碰到某套语料时，这一项【留空】即可 —— 留空就是彻底不注入。",
+    "default": ""
+  },
+  "kb_private": {
+    "type": "string",
+    "description": "私聊用的知识库",
+    "hint": "填 AstrBot 知识库的【名字】原文（面板 → 知识库）。留空 = 不干预。\n\n★ 判定依据和人格分流同一套：umo 里的 MessageType，FriendMessage=私聊，其余（GroupMessage / OtherMessage）算公开。\n★ 新加的私聊好友自动生效，不用一个个去会话管理里绑。\n★ 名字对不上时会记一条 WARNING 并退回原逻辑（检查名字拼写）。\n★ 检索条数用 AstrBot 全局的 kb_final_top_k / kb_fusion_top_k，本插件不另设一套。",
+    "default": ""
+  },
+  "kb_score_threshold": {
+    "type": "float",
+    "description": "知识库相关度下限（0 = 不过滤）",
+    "hint": "低于这个分数的块不注入。默认 0（全都要）。\n\n★ 先搞清楚这个分数是什么再做决定：AstrBot 的融合分 =\n  0.9 × min-max归一化稠密分 + 0.1 × min-max归一化稀疏分。\n  min-max 归一化保证【每次检索的第一名都被顶到满分】，所以\n  「你好啊」和「支配方羞辱对方的台词」的第一名都是 0.90 ——\n  实测：你好啊 → 0.90 / 0.61 / 0.54 ；支配方羞辱的台词 → 0.99 / 0.43 / 0.41。\n\n★ 因此它能做的：砍掉第 2、3 名的弱命中（推荐 0.6 ~ 0.7）。\n  它做不到的：判断「这次检索整体不行」—— 第一名永远过关。\n  想连第一名都不要，只能把 kb_final_top_k 调成 1。\n\n★ 全部被筛掉时这一轮就不注入知识库（不是退回未过滤的结果）。\n★ 过滤失败（AstrBot 改了内部排版函数之类）会自动退回不过滤。",
+    "default": 0
+  },
+  "keep_reasoning_in_context": {
+    "type": "bool",
+    "description": "思考过程保留在上下文里",
+    "hint": "默认开（= AstrBot 原本的行为）。关掉后：每圈对话开始时，本插件会先把【历史】里的思考（ThinkPart）摘掉，再让 AstrBot 去判断压缩、去落盘 —— 一条会话实测能攒到 10 段、1.3 万字，全在 8192 的窗口里反复重发。\n\n★ 只剥【历史】：同一圈内新产生的思考保留，所以模型在一圈的多轮工具调用之间仍能看到自己刚才的推理（那正是开思考之后工具链变顺的原因）。\n★ 安全性：正文、工具调用、工具结果都不动；纯思考的空壳消息整条丢掉；这段代码出错时只记一行错误，绝不影响对话。\n★ 代价：推理模型失去跨轮的 reasoning 历史。AstrBot 原注释认为推理模型需要它 —— 如果关掉后发现回答质量下降，就把它打开。",
+    "default": true
+  },
+  "max_concurrent_replies": {
+    "type": "int",
+    "description": "最多几个会话同时生成回复",
+    "hint": "默认 1（串行 + 排队）；填 0 或负数 = 不限制（恢复 AstrBot 原本的全并行）。★ 别随便调大：LM Studio 以 kv_unified=true 加载时 KV 池是共享的（实测 n_slots=4, n_ctx_slot=8192），两个请求各带几千 token 同时进去会直接报 Context size has been exceeded。上下文窗口够大时才适合调大",
+    "default": 1
+  },
+  "gate_hold_timeout": {
+    "type": "int",
+    "description": "并发槽最长占用秒数（兜底强释放）",
+    "hint": "默认 300。某个会话响应始终没回来时会一直占着并发槽，超过这个秒数强制回收并打 WARNING",
+    "default": 300
+  },
+  "lm_studio_base": {
+    "type": "string",
+    "description": "LM Studio 地址",
+    "hint": "留空用内置缺省 http://127.0.0.1:1234。改成别的端口/机器时填这里，例如 http://127.0.0.1:1234",
+    "default": ""
+  },
+  "snowluma_base": {
+    "type": "string",
+    "description": "SnowLuma WebUI 地址",
+    "hint": "留空用内置缺省 http://127.0.0.1:5099。不用 SnowLuma 的话随便填，这一项只影响那盏灯",
+    "default": ""
+  },
+  "snowluma_dir": {
+    "type": "string",
+    "description": "SnowLuma 根目录（推荐填这个）",
+    "hint": "留空会自动就近探测。填了它下面两项目标就自动推导出来。例：<NapCat>\\DATA\\components\\SnowLuma",
+    "default": ""
+  },
+  "snowluma_onebot_config": {
+    "type": "string",
+    "description": "SnowLuma OneBot 配置文件的完整路径",
+    "hint": "一般不用填 —— 填了 snowluma_dir 就会自动找 config\\onebot_*.json。只有自动找错文件时才需要显式指定",
+    "default": ""
+  },
+  "snowluma_identity_db": {
+    "type": "string",
+    "description": "SnowLuma 身份库路径（用来把群号显示成群名）",
+    "hint": "一般不用填 —— 填了 snowluma_dir 就会自动找 data\\<QQ号>\\snowluma_identity.db。找不到时群名退化成「群 <群号>」，不影响其它功能",
+    "default": ""
+  }
+}

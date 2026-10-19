@@ -1,0 +1,50 @@
+diff --git a/builtin_stars/astrbot/main.py b/builtin_stars/astrbot/main.py
+--- a/builtin_stars/astrbot/main.py
++++ b/builtin_stars/astrbot/main.py
+@@ -70,8 +70,18 @@
+                 isinstance(messages[0], Comp.Plain)
+                 and messages[0].text.strip() in wake_prefix
+             )
+-
+-            if not (is_empty_mention or is_wake_prefix_only):
++            # [本地修改 2026-10-10] 处理「戳一戳」。
++            # 别人戳机器人时，消息事件是一个空的 Poke 组件：既没有 @ 也没有唤醒
++            # 前缀，所以原本两条回复路径都不会触发，表现成「戳它没反应」。
++            # 这里把「戳自己」当作和「空 @」等价的情况来处理。
++            # 只响应戳【机器人自己】的，戳别人时机器人不应插话。
++            # AstrBot 升级会覆盖本文件，升级后需重新应用此修改。
++            is_poke_at_me = (
++                isinstance(messages[0], Comp.Poke)
++                and str(messages[0].target_id() or "") == str(event.get_self_id())
++            )
++
++            if not (is_empty_mention or is_wake_prefix_only or is_poke_at_me):
+                 return
+ 
+             if p_settings.get("empty_mention_waiting_need_reply", True):
+@@ -96,12 +106,22 @@
+                             )
+                         )
+ 
+-                    yield event.request_llm(
+-                        prompt=(
++                    # [本地修改 2026-10-10] 戳一戳用单独的提示词：只需说明发生了什么，
++                    # 具体怎么回应交给人设。
++                    if is_poke_at_me:
++                        _prompt = (
++                            "用户戳了你一下（QQ 的戳一戳功能），这是在逗你、引起你的注意，"
++                            "但并未输入任何文字内容。他可能会在接下来一条发送他想发送的内容。"
++                            "请注意，你仅需要输出要回复用户的内容，不要输出其他任何东西"
++                        )
++                    else:
++                        _prompt = (
+                             "注意，你正在社交媒体上中与用户进行聊天，用户只是通过@来唤醒你，但并未在这条消息中输入内容，他可能会在接下来一条发送他想发送的内容。"
+                             "你友好地询问用户想要聊些什么或者需要什么帮助，回复要符合人设，不要太过机械化。"
+                             "请注意，你仅需要输出要回复用户的内容，不要输出其他任何东西"
+-                        ),
++                        )
++                    yield event.request_llm(
++                        prompt=_prompt,
+                         session_id=curr_cid,
+                         contexts=[],
+                         system_prompt="",

@@ -1,0 +1,22 @@
+diff --git a/core/astr_main_agent.py b/core/astr_main_agent.py
+--- a/core/astr_main_agent.py
++++ b/core/astr_main_agent.py
+@@ -1700,7 +1700,17 @@
+     if event.get_platform_name() == "webchat":
+         asyncio.create_task(_handle_webchat(event, req, provider))
+ 
+-    if req.func_tool and req.func_tool.tools:
++    # [P4] 原本只看「有没有工具」，于是给一个 modalities 里根本没有 tool_use
++    # 的模型（例如本机的 gemma，只有 ["text","image"]）也塞一段
++    # "When using tools: never return an empty response; ..." ——
++    # 它既调不了工具，这段就是纯 token 开销（每轮约 60 token）。
++    # 这里复用 AstrBot 自己的模态判定函数，语义与 :1299 判图片时一致：
++    # modalities 为空列表视为「未配置」→ 保持原行为，不会误伤老配置。
++    if (
++        req.func_tool
++        and req.func_tool.tools
++        and _provider_supports_modality(provider, "tool_use")
++    ):
+         tool_prompt = (
+             TOOL_CALL_PROMPT
+             if config.tool_schema_mode == "full"

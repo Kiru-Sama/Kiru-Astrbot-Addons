@@ -1,0 +1,332 @@
+{
+  "tool_menu": {
+    "type": "bool",
+    "description": "工具菜单（只暴露一个入口，模型点开才看得到具体工具）",
+    "hint": "默认打开。打开后模型第一轮只看到 `ncd_tools` 一个工具，调用它之后本会话才解锁其余工具。\n\n★ 为什么：6 个工具的 schema 每轮都要塞进提示词，小模型（4B 这类）在多个工具里挑一个会明显变笨——挑错、编工具名、或者只回一句台词根本不调。收窄成一个入口后，首轮负担从 6 个降到 1 个。\n★ 按会话记：A 群点开过不代表 B 群看得到。\n★ 代价：第一次要用某个能力会多一轮往返（模型先点菜单再调工具）。\n★ 如果发现机器人干脆不调工具了（连菜单都不点），把这项关掉就回到「全部工具常驻」的老行为。",
+    "default": true
+  },
+  "tool_menu_hint": {
+    "type": "string",
+    "description": "注入给模型的能力提示（告诉它自己会什么）",
+    "hint": "开了工具菜单之后，模型第一轮只看得到 `ncd_tools` 一个工具。不告诉它「你会搜网页/发表情包/画图」，它根本不会想到去点菜单——这段就是那本说明书，会追加到系统提示词末尾。\n\n★ 留空 = 完全不注入（适合你自己已经在人格里写清楚了的情况）。\n★ 这段文字会覆盖不了人格设定，只是追加在最后；人格里已经写了的内容不必重复。\n★ 改完需要重载插件（或者在面板里保存后按提示重载）。\n★ 面板里是单行输入框，太长不好改的话可以直接编辑 data/config/astrbot_plugin_ncd_toolbox_config.json 里的同名键。",
+    "default": "你手头有一套外部工具可以用来：搜网页、读网页正文、翻自己的收藏表情包、以及画图（含参考图生图）。\n要查东西 / 想发表情包 / 想画图之前，先调用工具： ncd_tools 拿到当轮可用的工具清单，再按清单里的名字去调用具体工具。不要凭印象编工具名。\n调用方式：这是「工具调用」，不是聊天 —— 要真的把工具调起来、参数按工具定义里的字段填，不要只用文字说「我去搜一下」。\n一次只调一个，等结果回来再决定下一步；ncd_tools 返回的清单里写了每个工具要哪些参数，照着填。"
+  },
+  "tool_descriptions": {
+    "type": "string",
+    "description": "每个工具的描述覆盖（内部用的 JSON 字符串）",
+    "hint": "这是「模型看到的每个工具那段说明」的覆盖表，内容是一段 JSON（{工具名: 文本}）。一般不用在这里手改 —— 打开 插件 → 链路工具箱 → 工具提示词 页面，那里每个工具一个多行输入框，改完点保存即可。\n\n★ 为什么是字符串而不是对象：AstrBot 的配置 schema 里 type=object 会被当成「对象数组」并要求 items 字段，写错会让插件直接加载失败（实测踩过 KeyError: 'items'）。\n★ 空文本（或 {}）= 该工具用代码里的原文 —— 注意不是「清空描述」，清空描述会让模型不知道这个工具干什么。",
+    "default": "{}"
+  },
+  "session_header": {
+    "type": "bool",
+    "description": "每轮告诉模型这是群聊还是私聊",
+    "hint": "默认关闭（它会往每轮请求里加一句带昵称和 QQ 号的话，等于往模型上下文里放身份信息，所以做成显式开关）。\n\n打开后每轮注入：\n【群聊】<system_reminder>当前对话场景：【群聊中】（群名：X）（昵称：Y，QQ：Z）</system_reminder>\n【私聊】<system_reminder>当前对话场景：【私聊中】（昵称：Y，QQ：Z）</system_reminder>\n\n★ 为什么需要它：AstrBot 原本只给一行 `Group name: xxx` 藏在 system_reminder 里，要靠模型自己推理出「有群名 = 我在群里 = 人设里那条群聊禁令现在生效」。实测人设里写「群聊不许 NSFW」不生效 —— 直接指令（人设）会赢过间接线索。这里把结论直接写出来，人设就能拿「【群聊中】」当明确判据。\n★ 注入在用户消息后面（跟 AstrBot 自己的 system_reminder 同一套做法），监控面板会把「注入块」单独画出来，能直接确认有没有生效。",
+    "default": false
+  },
+  "rp_mode": {
+    "type": "bool",
+    "description": "沉浸模式（角色扮演友好）",
+    "hint": "默认打开。打开后做两件事：① 剥掉 AstrBot 每轮注入的那段机械英文工具说明（它对角色扮演型人格干扰明显）；② 只把本插件的工具给模型，屏蔽 AstrBot 自带工具。\n\n★ 和「半沉浸模式」互斥：两个都打开时以这个为准，插件会自动把半沉浸关掉并写回配置（重载面板后能看到半沉浸已变为关闭）。\n★ 如果发现工具调用变得不稳定，把它关掉试试。",
+    "default": true
+  },
+  "rp_mode_half": {
+    "type": "bool",
+    "description": "半沉浸模式（给小模型用）",
+    "hint": "默认关闭。**和「沉浸模式」互斥**：两个都开时以沉浸模式为准，插件会自动把这一项关掉并写回配置。\n\n它和沉浸模式的区别只有一处：AstrBot 注入的那段工具说明是「一句话四个分句」，沉浸模式整段剥掉；半沉浸只剥掉机械语气的两句，留下『never return an empty response（不许只回空话）』和『do not invent parameters（别瞎编参数）』这两条行为约束。\n\n为什么需要这一档：实测切到 4B 之后，模型开始只回一句台词、根本不真去调用工具；而 27B 在同样配置下一天 214 次工具调用完全正常 —— 也就是说沉浸模式的收益在语气上、代价落在行为约束上，而代价只在弱模型上暴露。",
+    "default": false
+  },
+  "edge_path": {
+    "type": "string",
+    "description": "Edge 可执行文件路径",
+    "hint": "留空会自动找常见安装位置（C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe）。装在别处或想用 Chrome 时填这里",
+    "default": ""
+  },
+  "debug_port": {
+    "type": "int",
+    "description": "CDP 调试端口",
+    "hint": "默认 9222。如果这个端口被别的程序占了，换一个，例如 9333",
+    "default": 9222
+  },
+  "profile_dir": {
+    "type": "string",
+    "description": "浏览器专用配置目录",
+    "hint": "留空用 <AstrBot>\\data\\plugin_data\\ncd_toolbox\\browser_profile。★ 千万别填到插件目录下面 —— 这份配置里含登录态与账号信息（邮箱、手机号），插件目录是最容易被整个打包分享的目录",
+    "default": ""
+  },
+  "headless": {
+    "type": "bool",
+    "description": "无头模式（不显示浏览器窗口）",
+    "hint": "默认关闭，也就是你能看见它在搜。打开后省资源、不抢焦点，但更容易被网站风控拦（百度在无头下基本必被拦）",
+    "default": false
+  },
+  "block_private_urls": {
+    "type": "bool",
+    "description": "禁止抓正文时访问本机/内网地址",
+    "hint": "默认打开。抓正文是在你自己这台机器、带着登录态的浏览器里跑的，而模型可能被网页内容牵着去访问本机服务 —— 实测本机就有几个读了就出事的端口：9222 是 CDP 调试端点（读 /json 等于把浏览器控制权递出去）、5099 是 SnowLuma、1234 是 LM Studio（无鉴权）、6185 是 AstrBot 面板。打开后要求域名解析出来的每个地址都是公网地址。★ 代价：有些站会被 DNS 屏蔽手法解析成 127.0.0.1（实测这台机器上 example.com、github.com 就是），而 Edge 走 DoH 其实打得开 —— 那种站会被误拦。真需要抓这类站再关掉，关了就没有这层保护了",
+    "default": true
+  },
+  "search_engine": {
+    "type": "string",
+    "description": "搜索引擎预设",
+    "hint": "填 bing 或 baidu，默认 bing。填了下面的 search_url 时本项失效",
+    "default": "bing"
+  },
+  "search_url": {
+    "type": "string",
+    "description": "自定义搜索地址模板",
+    "hint": "留空用 search_engine 的预设。格式里用 {query} 占位，例如 https://cn.bing.com/search?q={query}",
+    "default": ""
+  },
+  "search_with_snippet": {
+    "type": "bool",
+    "description": "搜索结果里带上摘要片段",
+    "hint": "默认关闭 —— 只回「序号 + 标题 + 网址」。实测带摘要时 8 条要 617 token，不带只要约 250。要看内容就让模型用 fetch_page 抓那一页（抓取会先总结，很便宜）",
+    "default": false
+  },
+  "summarize_page": {
+    "type": "bool",
+    "description": "抓正文后先总结再给模型",
+    "hint": "默认打开。★ 强烈建议保持打开：实测一篇正文不总结是 2604 token（占 8192 上下文的 32%），总结后约 300。关掉它等于每次抓页面都把上下文吃掉三分之一",
+    "default": true
+  },
+  "summarize_threshold": {
+    "type": "int",
+    "description": "超过多少字才总结",
+    "hint": "默认 1200。短于这个字数直接返回原文 —— 小页面没必要多花一次模型调用（每次约 10~20 秒）",
+    "default": 1200
+  },
+  "summary_max_chars": {
+    "type": "int",
+    "description": "总结最多多少字",
+    "hint": "默认 400。这是给总结模型的硬要求，同时插件侧也会按这个长度截断兜底",
+    "default": 400
+  },
+  "page_timeout": {
+    "type": "int",
+    "description": "页面就绪等待上限（秒）",
+    "hint": "默认 25。网慢或目标站很重时可以调大",
+    "default": 25
+  },
+  "fetch_max_chars": {
+    "type": "int",
+    "description": "抓正文最多取多少字（喂给总结模型的上限）",
+    "hint": "默认 4000。注意这是【总结之前】的上限，不是给主模型的上限 —— 给主模型的是总结后的 summary_max_chars 字。上下文够大的话可以调大，让总结模型看到更多原文",
+    "default": 4000
+  },
+  "search_cache_ttl": {
+    "type": "int",
+    "description": "搜索/抓取的缓存有效期（秒），0 = 关闭缓存",
+    "hint": "默认 600（10 分钟）。同一个关键词、同一个网址在有效期内不再真去开浏览器，直接回上次的结果。\n\n★ 省的是什么：一次搜索 = 真开一次本机 Edge 页面去搜；一次抓正文 = 打开页面 + 提取 + 再调一次模型总结。重复问同样的东西本来要重跑整套。\n★ 缓存只放内存，重启即清空，不落盘。\n★ 想强制重搜：把这个值临时改成 0 跑一轮，或者等下一条缓存过期。\n★ 新闻/行情这类时效性强的场景建议调小（比如 60）或者直接 0。",
+    "default": 600
+  },
+  "sticker_shuffle": {
+    "type": "bool",
+    "description": "打乱收藏表情的排列顺序",
+    "hint": "默认关闭。收藏几十上百张时打开：模型每次只会看到其中一页，不打乱的话它永远只对着开头那几张挑。规则：同一条消息内（翻页 / 预览 / 发送）顺序固定不动，否则序号会指向别的表情；换一条新消息才换一份新排列",
+    "default": false
+  },
+  "sticker_page_size": {
+    "type": "int",
+    "description": "收藏表情每页几条",
+    "hint": "默认 10",
+    "default": 10
+  },
+  "sticker_max_side": {
+    "type": "int",
+    "description": "表情预览图最长边（像素）",
+    "hint": "默认 224，等比缩放不拉伸。别再调小：实测 64 像素时模型会把图认错，224 才读得出图上的文字",
+    "default": 224
+  },
+  "sd_python": {
+    "type": "string",
+    "description": "独立后端用的 Python（必须装了 torch+diffusers）",
+    "hint": "只在 image_backend=standalone 时有用。填一个【装了 torch 和 diffusers 的 python.exe 完整路径】。\n\n★ 为什么要单独一个：torch 带 CUDA 就有 2~3 GB，装进 AstrBot 的环境会把主环境搞得很重。建议单独建一个 venv，里面只装 torch / diffusers / transformers / accelerate / safetensors / pillow。\n★ 建议把它放在**不依赖 ComfyUI 的目录**——否则删了 ComfyUI 这条也跟着断（这正是 image_backend 想解决的问题）。\n★ 填错 / 没装 torch 时，错误信息会带上 worker 日志尾部，能直接看出缺什么。",
+    "default": ""
+  },
+  "sd_checkpoint": {
+    "type": "string",
+    "description": "默认底模（SDXL .safetensors 完整路径）",
+    "hint": "只支持 SDXL 单文件底模（Illustrious / NoobAI / WAI 这类）。\n\n★ 这是【默认】底模：AI 调 switch_model、或生图页下拉框换过之后，以换过的那个为准，直到重载插件。\n★ 底模列表是从这一项所在目录扫出来的（见 sd_model_dir）——换机器只要改这两项。\n★ 别指向 ComfyUI 目录里的文件：ComfyUI 删了/升级了这条链路就断，复制一份到自己的目录更稳。",
+    "default": ""
+  },
+  "sd_model_dir": {
+    "type": "string",
+    "description": "底模目录（留空 = sd_checkpoint 所在目录）",
+    "hint": "生图页下拉框和 AI 的 switch_model 都从这个目录里列底模。\n★ 扫 .safetensors / .ckpt，并且只收 ≥ sd_model_min_gb 的文件 —— 所以 LoRA 和底模混放在一个目录里也没关系，不会把 LoRA 当底模。\n★ 留空 = sd_checkpoint 的上级目录（推荐：换底模目录只要改 sd_checkpoint 一处）。\n★ 加/删模型文件后不用重载插件，刷新页面或让 AI 再调一次 switch_model 就能看到。",
+    "default": ""
+  },
+  "sd_model_min_gb": {
+    "type": "float",
+    "description": "底模的最小体积（GB）：小于它的文件不列进底模清单",
+    "hint": "默认 3.0。SDXL 融合底模一般 6~7 GB，LoRA 只有几十~几百 MB，3 GB 足够把两者分开。\n★ 如果你有裁剪/量化过的小底模（2 GB 左右）也想出现在列表里，把这个值调小。\n★ 调它只影响【列表】，不影响 sd_checkpoint 能不能加载。",
+    "default": 3.0
+  },
+  "sd_width": {
+    "type": "int",
+    "description": "出图宽度。★ SDXL 的原生分辨率是 1024 级别；实测 720x1024 竖版很稳。",
+    "hint": "出图宽度（像素，会自动对齐到 8 的倍数）。\n★ 当前底模是 SDXL，原生训练分辨率在 1024 级别：竖版推荐 720~832 宽 × 1024~1216 高。\n★ 比 512 小很多会糊、比 1400 大会浪费显存（本机 12 GB，且要和 LM Studio 共存）。",
+    "default": 512
+  },
+  "sd_height": {
+    "type": "int",
+    "description": "出图高度。★ SDXL 的原生分辨率是 1024 级别；720x1024 是竖版、704x1024 更窄。",
+    "hint": "出图高度（像素，会自动对齐到 8 的倍数）。\n★ 竖版常用 1024（配合 720~832 的宽）；方图用 1024x1024。\n★ 显存吃紧时优先降高度，别降太多 —— SDXL 在 1024 附近质量最好。",
+    "default": 512
+  },
+  "sd_steps": {
+    "type": "int",
+    "description": "独立后端的采样步数",
+    "hint": "默认 25（和你工作流里一致）。降低到 15~20 会快一些；再低质量明显掉。",
+    "default": 25
+  },
+  "sd_cfg": {
+    "type": "float",
+    "description": "独立后端的 CFG（提示词贴合度）",
+    "hint": "默认 7.0（和你工作流里一致）。太高会过饱和/发硬，太低会不听话。",
+    "default": 7.0
+  },
+  "sd_sampler": {
+    "type": "string",
+    "description": "采样器/调度器：euler（欧拉+普通，默认）或 dpmpp2m_karras",
+    "hint": "填 euler 或 dpmpp2m_karras（也认 欧拉 / dpmpp_2m 这类写法，认不出按 euler 处理）。\n\n★ euler + 普通（默认）：线性 timestep、不预放大不锐化，细节交给底模和提示词，SDXL 上更“老实”。\n★ dpmpp2m_karras：之前用的那套，会系统性地偏锐一点。\n★ 换采样器本身不用重新加载模型（毫秒级），但【已经在跑的 worker 不吃新配置】—— 等它空闲退出、或重载插件后再出图才生效。\n★ 只换算法，不改底模自带的 beta 曲线（scaled_linear），所以色调不会偏。",
+    "default": "euler"
+  },
+  "sd_max_side": {
+    "type": "int",
+    "description": "画幅单边上限（像素）：超过直接拒绝",
+    "hint": "默认 1920（配合 sd_max_mp=2.76，最大画布约 1920×1440）。\n\n★ 这个值是按【12 GB 显卡】实测定的：1920×1920（3.69 MP）就会把显存逼到临界。\n★ 换张 24 GB 的卡可以调大（例如 2560），同时把 sd_max_mp 一起调大。\n★ 单边超过上限的 3/4（默认 1440）时，AI 会先返回警告并问用户，私聊里用户同意后才画；群聊里一律禁止。\n★ 改完要重载插件；已经跑着的 worker 会把新值带在下次拉起时生效。",
+    "default": 1920
+  },
+  "sd_max_mp": {
+    "type": "float",
+    "description": "画幅面积上限（百万像素 MP）：超过直接拒绝",
+    "hint": "默认 2.7648 MP（= 1920×1440，正好够 1920×1440 这一档）。\n\n★ 为什么要按面积另卡一道：单边都在范围内，但 1920×1920 的面积是 1920×1440 的 1.33 倍，12 GB 卡实测就会爆。\n★ 换算：1024×1024 = 1.0486 MP，832×1216 = 1.0116 MP，1920×1440 = 2.7648 MP，1920×1920 = 3.6864 MP。\n★ 显存越大可以调越大；调大之后 sd_max_side 也要跟着放宽，否则会被单边限制挡住。",
+    "default": 2.7648
+  },
+  "sd_port": {
+    "type": "int",
+    "description": "独立后端 worker 的本地端口",
+    "hint": "默认 8199。只监听 127.0.0.1。如果这个端口被别的程序占了，换一个（会明确报「端口被别的服务占着」而不是乱发请求）。",
+    "default": 8199
+  },
+  "sd_idle_timeout": {
+    "type": "int",
+    "description": "独立后端空闲多久自己退出（秒）",
+    "hint": "默认 300（5 分钟）。worker 是插件按需拉起的子进程：连续画图时复用同一个（省掉模型加载的 2~10 秒），空闲超过这个秒数就自己退出，把显存还给别的程序（比如 LM Studio）。\n★ 调太小会频繁重载模型；调太大等于常驻占显存。",
+    "default": 300
+  },
+  "image_timeout": {
+    "type": "int",
+    "description": "一次出图的总超时（秒），超过就中止",
+    "hint": "默认 70。两个后端都吃这个上限；计时从「开始出图」算起，**包含 worker 冷启动**（首次要加载 2~3 GB 模型）。\n\n★ 为什么不是更小：实测冷启动到过 31.9 秒，再加 5~6 秒推理就 38 秒，40 秒很容易把正常请求误杀。70 秒对「冷启动 + 一张图」是够的（实测 18~20 秒）。\n★ 超时会明确报「出图超时：超过 N 秒还没画完」，不会无限挂着占住并发槽。\n★ 显存小、模型大、或者之前有任务在排队时再往上调。",
+    "default": 70
+  },
+  "sd_lora": {
+    "type": "string",
+    "default": "",
+    "description": "LoRA 文件路径（留空 = 不用 LoRA）",
+    "hint": "LoRA 文件路径（留空 = 不挂 LoRA）。\n\n★ 必须是 SDXL 的 LoRA（SD1.5 的 LoRA 结构不兼容，挂上去会报错）。\n★ 建议把 LoRA 放在独立环境自己的目录（例如 SD-standalone\\models\\loras\\）。\n★ 只在 worker 启动时加载一次；改强度不用重启（推理时按 sd_lora_scale 缩放）。\n★ 想临时关掉：把 sd_lora_scale 设成 0，或者把这里清空。"
+  },
+  "sd_lora_scale": {
+    "type": "float",
+    "default": 0.8,
+    "description": "LoRA 强度（0~1）",
+    "hint": "默认 0.8。越大风格越强、越容易盖掉底模和提示词；越小越接近原底模。\n· 0.4~0.6 轻微染色，还能保留底模画风\n· 0.7~0.9 风格明显（推荐区间）\n· 1.0 满强度，可能过拟合（脸崩、构图僵）\n★ 实测（style_GZC，同一 seed 同一提示词）：无 LoRA ↔ 0.8 平均像素差 18.08，无 LoRA ↔ 1.0 是 19.54，0.8 ↔ 1.0 是 7.40 —— 强度确实线性生效。\n★ 这个值只在推理时缩放，改完重载插件即可生效（不用等 worker 退出）。"
+  },
+  "sd_device": {
+    "type": "string",
+    "default": "cuda",
+    "description": "出图用哪个设备：cuda（显卡）或 cpu（纯 CPU）",
+    "hint": "填 cuda 或 cpu。\n\n★ 填 cpu：完全不吃显存，LM Studio 那边就不会被挤爆；代价是慢一个数量级（实测数据见 README 的「CPU 出图」一节）。\n★ 填 cuda：快，但会和 LM Studio / 视频编码等抢显存。显存紧张时建议换 cpu。\n★ 选 cpu 时插件会自动把出图超时放宽到至少 300 秒（CPU 真得很慢，70 秒不够），其余逻辑不变。\n★ 改完要重载插件；而且 worker 是空闲才退出，所以等它退一次（或把 sd_idle_timeout 调小）才会用新设备重启。"
+  },
+  "search_time_filter": {
+    "type": "string",
+    "default": "",
+    "description": "搜索结果的时间范围（day / week / month，留空=不限）",
+    "hint": "填 day / week / month，留空（或 none）表示不限时间。\n★ 实现：给 Bing 加 qft=+filterui:age-lt<分钟>，是 Bing 自己的参数；只对 Bing 生效，换成别的引擎会被忽略。\n★ 什么时候用：问「今天/最近/最新」这类时效性问题时开 day 或 week；否则第一页经常是几年前的老文章。\n★ 注意：范围太窄会把结果砍到很少（冷门词 + day 可能一条都没有）。"
+  },
+  "sd_negative": {
+    "type": "string",
+    "default": "",
+    "description": "负面提示词（留空 = 用内置的那套常规负面词）",
+    "hint": "留空就用内置默认：lowres, blurry, out of focus, jpeg artifacts, deformed, bad anatomy, extra limbs, mutated, watermark, text, logo, signature\n\n★ 什么时候要自己填：\n· 想要「黑白/线稿」风格 → 加上 `color, colored, monochrome` 的反面（即把它们放进负面）\n· 画面偏灰、饱和度上不去 → 检查这里是不是被谁塞了 `color`（会压掉颜色）\n· 某模型特别爱画坏手 → 加 `bad hands, extra fingers`\n★ 2026-10-18 修：内置默认原来开头是 `color, colored`（那是给黑白 LoRA 配的），挂在全局默认里会让所有出图系统性偏灰。现在挪到配置里，默认不再压颜色。"
+  },
+  "sd_progress_in_chat": {
+    "type": "bool",
+    "default": true,
+    "description": "AI 出图时在聊天里报进度（步数）",
+    "hint": "默认开启。开启后，机器人自己调 generate_image 时，会每隔几秒往会话里发一句「🎨 出图中… 12/20 步」，模型没加载好时会先发「📦 读取权重… 10%」。\n\n★ QQ 没有可编辑消息、也没有进度条，所以只能发新消息来报进度。\n★ 【出图最多 2 条 + 加载最多 2 条】——再多就成刷屏了。GPU 出图 5~6 秒通常一条都不发（还没到间隔就画完了）。\n★ 嫌吵就关掉；网页生图页那边一直是真进度条，不受这个开关影响。"
+  },
+  "sd_progress_interval": {
+    "type": "int",
+    "default": 8,
+    "description": "聊天里报进度的间隔（秒）",
+    "hint": "默认 8 秒，最小 3 秒。只在 sd_progress_in_chat 开启时生效。\n★ 有进度之后每 8 秒报一条（出图最多 2 条 + 加载最多 2 条）。\n★ 调小 → 报得更勤，但更容易刷屏；调大 → 基本只在很慢的时候才报。"
+  },
+  "sd_load_grace": {
+    "type": "int",
+    "default": 10,
+    "description": "模型加载进度：先等这么久再报（秒）",
+    "hint": "默认 10 秒。worker 刚拉起来的那几秒，进度一定是「启动中 0%」（python 和 torch 还在 import），这时候报出来只有一串 0%，看着像卡死。\n★ 所以加载阶段先静默这么久，之后只报【百分比真的动了】的进度（10% / 55% / 70%…），同一档不重复。\n★ 填 0 = 一有加载进度就报（会先冒一条 0%）；调大 = 更安静，加载快的话一条都不报。\n★ 只影响聊天里的进度消息，网页进度条一直是实时的。"
+  },
+  "sd_arch": {
+    "type": "string",
+    "default": "auto",
+    "description": "底模架构：auto / sd15 / sdxl",
+    "hint": "留 auto 就行 —— 按文件大小自动判断（SDXL 融合模型 6~7 GB，SD1.5 约 2 GB）。\n★ 什么时候要手动填：模型被裁剪/量化过、大小不在这个范围时。\n★ 填错了表现是加载就报错（不会静默出怪图），报错信息里会带真实架构名。"
+  },
+  "sd_offload": {
+    "type": "string",
+    "default": "auto",
+    "description": "CPU offload：auto / on / off（省显存，但更慢）",
+    "hint": "auto：SDXL 开、SD1.5 关。\n★ 开 offload 后，模型各模块留在内存、用到哪个搬哪个进显存 —— SDXL 显存峰值从约 7 GB 降到约 3 GB，代价是慢一些。\n★ 这台机器只有 12.8 GB 显存，LM Studio 一个模型就占 7 GB，所以和 LM Studio 同时跑时必须开。\n★ 显存很富裕（比如 LM Studio 关掉了）可以填 off 换速度。"
+  },
+  "avatar_size": {
+    "type": "int",
+    "default": 640,
+    "description": "取头像的尺寸（像素，40~640）",
+    "hint": "QQ 头像 CDN 只认几档尺寸，这里会被夹在 40~640 之间。\n★ 640 是最大档，模型看图够用；调小能省流量，但脸会糊。"
+  },
+  "avatar_cache_ttl": {
+    "type": "int",
+    "default": 21600,
+    "description": "头像缓存有效期（秒），0 = 不缓存",
+    "hint": "默认 21600 秒（6 小时）。头像很少变，缓存能省 CDN 请求，\n也能避免同一张图反复喂给模型（那一步最花钱）。\n★ 想看最新换的头像就调小，或设 0 强制每次都重新下载。"
+  },
+  "disable_image_on_local": {
+    "type": "bool",
+    "default": true,
+    "description": "用本地模型时禁用绘图",
+    "hint": "默认开启。当前对话模型是本地模型（LM Studio / Ollama 之类）时，\n插件会把 generate_image 从本轮工具里移除 —— 本地小模型写 SDXL 提示词\n质量明显差（标签少、爱写无效质量词、照抄上一次），画出来是浪费显存。\n\n★ 换回云端模型（DeepSeek 等）会自动恢复，不用改这里。\n★ 关掉它 → 本地模型也能画。"
+  },
+  "local_model_keywords": {
+    "type": "string",
+    "default": "lmstudio,ollama",
+    "description": "怎么判定「本地模型」（逗号分隔，匹配 provider id）",
+    "hint": "默认 lmstudio,ollama。判据是 provider 的 id 里是否含这些词，\n例如 `lmstudio/qwen3.8-4b-distill-...` 命中 lmstudio。\n\n★ 你换了别的本地服务（比如 llama.cpp、vLLM）就往这里加词。"
+  },
+  "sd_lora_dir": {
+    "type": "string",
+    "default": "",
+    "description": "画风 LoRA 目录（留空 = 底模同级的 loras\\）",
+    "hint": "扫描规则：文件名必须是 `<SFW|NSFW>_<画风名>.safetensors`。\n· 前缀决定评价，会写进工具说明，模型据此判断该不该用\n· 往目录里丢新文件就自动可用（重载插件后生效），不用改配置\n\n★ 会自动跳过不能用的：LoKr（LyCORIS）格式 diffusers 不支持、\n  以及 SD1.5 的 LoRA（结构对不上，加载会 shape mismatch）。\n  跳过原因写在日志里，别以为是文件丢了。\n★ 留空时用「底模所在目录\\loras」，换机器通常不用改。"
+  },
+  "sd_allow_nsfw_lora": {
+    "type": "bool",
+    "default": true,
+    "description": "允许模型使用 NSFW 画风",
+    "hint": "默认允许。关掉后，NSFW_ 开头的画风不会出现在清单里，模型也选不到。\n★ 评价前缀（SFW/NSFW）来自文件名，你自己在命名时决定。"
+  },
+  "sd_lora_status": {
+    "type": "string",
+    "default": "",
+    "description": "（自动生成，别手改）当前可用的画风",
+    "hint": "这个字段由插件自己维护：每次加载/重扫画风目录时重新写一遍。\n你在这里能看到：有哪些画风可用、各自评价（SFW/NSFW）和大小、\n以及哪些文件被跳过了、为什么跳过。\n\n★ 不用手改 —— 改了也会被下次扫描覆盖。\n★ 想看最新结果：往目录里加减文件后重载插件即可。"
+  },
+  "img2img_strength": {
+    "type": "float",
+    "default": 0.6,
+    "description": "参考图生图的强度（0.1~1.0）",
+    "hint": "只在模型调 generate_image 时填了 reference 才有用。\n数值越大越偏离原图、越听话；越小越保留原图构图。\n\n· 0.3~0.45：几乎只换画风/上色\n· 0.5~0.65：保构图换风格（推荐）\n· 0.7~0.85：只借个大概，细节全重画\n★ SDXL 的 img2img 比 SD1.5 稳得多，0.6 是个不错的起点。"
+  }
+}

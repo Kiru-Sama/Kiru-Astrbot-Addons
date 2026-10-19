@@ -1,0 +1,11 @@
+{
+  "metadata": {
+    "display_name": "链路监控",
+    "desc": "端到端链路监控：整合宿主机 / LM Studio / AstrBot / SnowLuma 四个环节，并显示上下文压缩产生的摘要文字。"
+  },
+  "pages": {
+    "monitor": {
+      "title": "链路监控"
+    }
+  }
+}

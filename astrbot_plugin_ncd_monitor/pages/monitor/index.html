@@ -1,0 +1,2107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>链路监控</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --border: #e6e8ec;
+    --text: #1f2328;
+    --muted: #6b7280;
+    --accent: #3b82f6;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+    --track: #eceef2;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  html[data-theme="dark"] {
+    --bg: #0f1115;
+    --card: #171a21;
+    --border: #262b35;
+    --text: #e6e8ec;
+    --muted: #9aa3b2;
+    --track: #232833;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 14px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+
+  /* ---- 左右分栏：左边监控面板（3/4），右边上下文（1/4）---- */
+  .wrap {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    width: 100%;
+  }
+  .col-main {
+    flex: 1 1 auto;
+    min-width: 0;          /* 关键：允许 flex 子项收缩，不然宽表格会把布局撑破 */
+  }
+  .col-side {
+    flex: 0 0 25%;
+    min-width: 300px;
+    max-width: 520px;
+    position: sticky;
+    top: 14px;
+    max-height: calc(100vh - 28px);
+    /* ★ 改成 flex 竖排 + 自己不许滚：
+       这样「模型正在输出」那块能【钉在右栏底部】，像打字一样一边生成一边看。
+       以前是整栏 overflow:auto，实时区会被一长串上下文顶到屏幕外，
+       得手动滚下去才看得到 —— 那就没法"边生成边看"了。
+       现在改成：上下文卡片吃掉剩余高度、列表在它【内部】滚。 */
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    overflow: hidden;
+    padding-right: 2px;
+  }
+  .col-side > .card:first-child {
+    flex: 1 1 auto; min-height: 0;
+    display: flex; flex-direction: column;
+    margin-bottom: 0;
+  }
+  .col-side > .card:first-child > .ctxwrap {
+    flex: 1 1 auto; min-height: 0; overflow: auto;
+  }
+  /* 窄屏（或面板被塞进小 iframe）时改成上下排列 */
+  @media (max-width: 1080px) {
+    .wrap { flex-direction: column; }
+    .col-side {
+      flex: none; width: 100%; max-width: none;
+      position: static; max-height: none;
+      display: block; overflow: visible;
+    }
+    .col-side > .card:first-child { display: block; }
+    .col-side > .card:first-child > .ctxwrap { overflow: visible; }
+  }
+
+  header {
+    display: flex; align-items: baseline; gap: 12px;
+    margin-bottom: 16px; flex-wrap: wrap;
+  }
+  header h1 { font-size: 19px; margin: 0; font-weight: 650; letter-spacing: .3px; }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  header .spacer { flex: 1; }
+  .refresh {
+    font-size: 12.5px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+  .dot.pulse { animation: p 1.4s ease-in-out infinite; }
+  @keyframes p { 0%,100%{opacity:1} 50%{opacity:.25} }
+
+  .grid { display: grid; gap: 14px; }
+  .g4 { grid-template-columns: repeat(auto-fit, minmax(215px, 1fr)); }
+  .g2 { grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 15px 16px;
+  }
+  .card h2 {
+    font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 0 0 12px; font-weight: 600;
+  }
+
+  /* ---- 链路健康 ---- */
+  .link { display: flex; align-items: center; gap: 10px; }
+  .led {
+    width: 10px; height: 10px; border-radius: 50%; flex: none;
+    box-shadow: 0 0 0 3px color-mix(in srgb, currentColor 18%, transparent);
+  }
+  .led.ok   { background: var(--ok);   color: var(--ok); }
+  .led.warn { background: var(--warn); color: var(--warn); }
+  .led.bad  { background: var(--bad);  color: var(--bad); }
+  .link .name { font-weight: 600; font-size: 13.5px; }
+  .link .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  /* ---- 上下文条 ---- */
+  .bar {
+    position: relative; height: 26px; border-radius: 7px;
+    background: var(--track); overflow: hidden; margin: 4px 0 8px;
+  }
+  .bar > .fill {
+    height: 100%; width: 0%;
+    background: linear-gradient(90deg, var(--ok), #4ade80);
+    transition: width .5s ease, background .3s;
+  }
+  .bar.hot  > .fill { background: linear-gradient(90deg, var(--warn), #fbbf24); }
+  .bar.crit > .fill { background: linear-gradient(90deg, var(--bad), #f87171); }
+  .bar > .mark {
+    position: absolute; top: 0; bottom: 0; width: 2px;
+    background: var(--bad); opacity: .8;
+  }
+  .bar > .label {
+    position: absolute; inset: 0; display: flex;
+    align-items: center; justify-content: center;
+    font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 2px rgba(0,0,0,.28); color: #fff;
+  }
+
+  .kv { display: flex; justify-content: space-between; gap: 10px; padding: 3.5px 0; font-size: 13px; }
+  .kv .k { color: var(--muted); }
+  .kv .v { font-variant-numeric: tabular-nums; font-weight: 550; }
+
+  .ctx-live {
+    margin-top: 10px; padding-top: 9px; border-top: 1px dashed var(--border);
+    font-size: 12.5px; color: var(--muted);
+  }
+
+  /* 模型/资源里的键值列表 */
+  .kvlist .kv { border-bottom: 1px dashed var(--border); padding: 5px 0; }
+  .kvlist .kv:last-child { border-bottom: none; }
+  .kv .v.wrap { text-align: right; word-break: break-all; max-width: 62%; }
+
+  /* ---- 宿主机资源：每秒刷新 + 每条 3 分钟趋势 ---- */
+  .res-row {
+    display: flex; align-items: center; gap: 9px;
+    padding: 4px 0; border-bottom: 1px dashed var(--border);
+    font-size: 13px;
+  }
+  .res-row:last-of-type { border-bottom: none; }
+  .res-k { flex: none; width: 40px; color: var(--muted); }
+  .res-spark { flex: 1; height: 26px; min-width: 50px; display: block; }
+  .res-v {
+    flex: none; min-width: 48px; text-align: right;
+    font-variant-numeric: tabular-nums; font-weight: 600;
+  }
+  .res-sub {
+    margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
+    font-size: 11.5px; color: var(--muted);
+  }
+  .res-note { font-size: 11.5px; color: var(--muted); padding: 3px 0; }
+
+  /* ---- 各会话上下文占用 ----
+     行样式沿用原来「持久化的群聊消息」卡片那一套（名称 + 进度条 + 数值），
+     前缀从 pg- 改成 ses-（session），因为持久化卡片已经删掉了。 */
+  .ses-list { display: flex; flex-direction: column; gap: 3px; }
+  .ses-row { display: flex; align-items: center; gap: 9px; font-size: 13px; }
+  .ses-name {
+    flex: none; width: 170px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ses-bar {
+    flex: 1; height: 7px; min-width: 40px; border-radius: 4px;
+    background: var(--border); overflow: hidden;
+  }
+  .ses-bar > i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
+  .ses-bar > i.hot { background: var(--warn); }
+  .ses-cnt {
+    flex: none; min-width: 150px; text-align: right;
+    font-variant-numeric: tabular-nums; color: var(--muted);
+  }
+  .ses-cnt.hot { color: var(--warn); font-weight: 600; }
+  .ses-empty { font-size: 12.5px; color: var(--muted); padding: 4px 0; }
+  .pill.off { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
+
+  /* ---- 「其他」折叠卡（低频信息，默认收起）---- */
+  #otherCard > summary { padding: 0; }
+  #otherCard > summary h2 { margin: 0; }
+  #otherCard > summary .hint { font-size: 11px; }
+  .other-body {
+    margin-top: 11px; padding-top: 10px;
+    border-top: 1px dashed var(--border);
+  }
+  .other-label {
+    font-size: 11px; font-weight: 700; letter-spacing: .05em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 6px;
+  }
+
+  /* ---- 摘要 ---- */
+  /* ★ 容器上【不能】加 white-space: pre-wrap ——
+     renderSummaries 的模板字符串是跨行的，pre-wrap 会把那些缩进和换行
+     当成真实文本渲染出来。pre-wrap 只能加在真正装文本的元素上（.summary-body）。*/
+  .summary {
+    word-break: break-word;
+    background: var(--track); border-radius: 9px;
+    padding: 12px 13px; font-size: 13px; line-height: 1.7;
+    max-height: 340px; overflow: auto;
+  }
+  .summary-body { white-space: pre-wrap; word-break: break-word; }
+  .summary.empty { color: var(--muted); font-style: italic; }
+  .tag {
+    display: inline-block; padding: 1px 7px; border-radius: 5px;
+    font-size: 11.5px; font-weight: 600; background: var(--track);
+    color: var(--muted); margin-right: 6px;
+  }
+  .summary-item + .summary-item { margin-top: 10px; padding-top: 10px; border-top: 1px dashed var(--border); }
+  .summary-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+  /* 压缩没生效：红标 + 说明。★ 这条是实测出来的需求 ——
+     总结那次 LLM 调用失败时压缩器原样返回，日志里只是 "X -> X"，
+     面板上原本完全看不出异常，只有翻日志才知道白跑一趟。 */
+  .summary-item.bad { border-left: 3px solid var(--bad); padding-left: 9px; }
+  .tag.bad { background: var(--bad); color: #fff; }
+  .summary-note {
+    margin-top: 6px; font-size: 12px; line-height: 1.55;
+    color: var(--bad); background: rgba(239, 68, 68, .07);
+    border-radius: 6px; padding: 6px 8px;
+  }
+
+  /* ---- 表格 ---- */
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: .05em; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+  tbody tr:last-child td { border-bottom: none; }
+  .scroll { max-height: 360px; overflow: auto; }
+  .pill { padding: 1px 6px; border-radius: 5px; background: var(--track); font-size: 11px; white-space: nowrap; }
+  .pill.tool { background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent); }
+  .pill.active { background: color-mix(in srgb, var(--warn) 20%, transparent); color: var(--warn); }
+  .pill.img { background: color-mix(in srgb, var(--ok) 18%, transparent); color: var(--ok); }
+  .nowrap { white-space: nowrap; }
+  .prev {
+    font-size: 12px; color: var(--text); line-height: 1.45;
+    max-width: 460px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .prev.out { color: var(--muted); margin-top: 2px; }
+  .prev.out::before { content: "↳ "; }
+
+  /* 统计小卡 */
+  .stat {
+    background: var(--track); border-radius: 9px; padding: 9px 11px;
+  }
+  .stat .lab { font-size: 11.5px; color: var(--muted); margin-bottom: 3px; }
+  .stat .val { font-size: 17px; font-weight: 650; font-variant-numeric: tabular-nums; }
+  .stat .sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+  /* ---- 上下文查看器（纵向聊天形式，塞在右侧 1/4 栏里）---- */
+  .card h2 .h2sub {
+    text-transform: none; letter-spacing: 0; font-weight: 400;
+    margin-left: 6px; font-size: 11px; color: var(--muted);
+    display: inline;
+  }
+  /* 只有右侧栏里的副标题才换行 */
+  .col-side .card h2 .h2sub { display: block; margin-top: 3px; margin-left: 0; }
+
+  /* 曲线量程切换按钮 */
+  .scalebtns { float: right; display: inline-flex; gap: 4px; }
+  .sbtn {
+    font-family: inherit; font-size: 11px; padding: 2px 9px; cursor: pointer;
+    border: 1px solid var(--border); background: transparent; color: var(--muted);
+    border-radius: 6px; text-transform: none; letter-spacing: 0;
+  }
+  .sbtn:hover { color: var(--text); }
+  .sbtn.on {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+  #chartInfo { white-space: nowrap; }
+  /* 侧栏里的上下文列表自己滚（见 .col-side 的 flex 说明），这里不要再设 max-height */
+  .ctxwrap { padding-right: 2px; }
+  .ctx-empty { color: var(--muted); font-style: italic; font-size: 12.5px; padding: 4px 0; }
+
+  /* ---- 右栏底部：模型的输出（生成中实时刷新；结束后常驻）----
+     数据来自 /sysinfo（1 秒一次），所以是"一段一段跳"而不是逐字动画 ——
+     它反映的是 LM Studio 流式进度的真实粒度。 */
+  .live-card { flex: none; margin-bottom: 0; }
+  .live-card h2 {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  }
+  .live-card h2 .h2sub { flex: 1 1 100%; }
+  .lbtn {
+    flex: none; margin-left: auto; cursor: pointer;
+    font-size: 10.5px; padding: 1px 7px; border-radius: 5px;
+    background: var(--border); color: var(--muted);
+    border: 1px solid transparent; font-family: inherit;
+  }
+  .lbtn:hover { color: var(--text); border-color: var(--muted); }
+  .live-body {
+    white-space: pre-wrap; word-break: break-word;
+    font-size: 12.5px; line-height: 1.55;
+    max-height: 190px; overflow: auto;
+    padding: 6px 9px; border-radius: 0 7px 7px 0;
+    background: color-mix(in srgb, var(--accent) 8%, var(--track));
+    border-left: 3px solid var(--accent);
+  }
+  .live-body.done { border-left-color: var(--ok); }
+  /* 提前结束用 warn 不用 bad：多数是消费者提前关闭，属正常收尾，不该看着像报错 */
+  .live-body.fail { border-left-color: var(--warn); }
+  .live-body .live-empty { color: var(--muted); font-style: italic; }
+
+  /* ---- 并发 / 排队两个状态胶囊 ----
+     只在真的发生时才由 renderGateChips() 渲染出来，平时这两个元素是空的。
+     ★ 用胶囊而不是大按钮：它属于"标题行的附加状态"，不该长得比标题还重。 */
+  .gate-chips { display: inline-flex; gap: 5px; align-items: center; }
+  .gate-chip {
+    cursor: pointer; font-size: 10.5px; padding: 1px 8px; border-radius: 999px;
+    border: 1px solid transparent; font-family: inherit; white-space: nowrap;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+  }
+  .gate-chip:hover { border-color: currentColor; }
+  .gate-chip.on {
+    background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok);
+  }
+  .gate-chip.q {
+    background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn);
+  }
+  .gate-chip.q.open { border-color: var(--warn); }
+
+  /* ---- 排队队列（点「排队」胶囊才展开） ---- */
+  .gate-queue {
+    margin-top: 6px; padding: 6px 9px; border-radius: 7px;
+    font-size: 11.5px; line-height: 1.7;
+    background: color-mix(in srgb, var(--warn) 8%, var(--track));
+    border-left: 3px solid var(--warn);
+  }
+  .gate-queue .qhead { color: var(--warn); margin-bottom: 3px; }
+  .gate-queue .qrow { display: flex; gap: 8px; }
+  .gate-queue .qpos { color: var(--warn); flex: none; }
+  .gate-queue .qlabel { flex: 1 1 auto; word-break: break-all; }
+  .gate-queue .qwait { flex: none; color: var(--muted); }
+  .live-body .caret {
+    display: inline-block; width: 7px; height: 14px; margin-left: 1px;
+    vertical-align: -2px; background: var(--accent);
+    animation: liveblink 1s steps(2, start) infinite;
+  }
+  @keyframes liveblink { to { visibility: hidden; } }
+
+  /* ---- 思考过程（reasoning）----
+     ★ 刻意做得比正文【弱】：斜体、灰、左边一条虚线。
+       它是模型的内心活动，不该跟真正会发出去的那句话抢视觉重量。
+       生成中默认展开（能实时看它想什么），生成完收起（要回头看再点开）。 */
+  .live-body .think {
+    margin: 0 0 8px; border-left: 2px dashed var(--border); padding-left: 8px;
+  }
+  .live-body .think > summary {
+    cursor: pointer; color: var(--muted); font-size: 12px;
+    list-style: none; user-select: none;
+  }
+  .live-body .think > summary::-webkit-details-marker { display: none; }
+  .live-body .think > summary::before { content: "▸ "; }
+  .live-body .think[open] > summary::before { content: "▾ "; }
+  .live-body .think-body {
+    margin-top: 5px; color: var(--muted); font-style: italic;
+    font-size: 12.5px; line-height: 1.6;
+    white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto;
+  }
+  /* 请求历史里的思考块：同一套观感，但换到 req-foot 的语境里 */
+  .req-think { margin: 4px 0 6px; border-left: 2px dashed var(--border); padding-left: 8px; }
+  .req-think > summary {
+    cursor: pointer; color: var(--muted); font-size: 12px;
+    list-style: none; user-select: none;
+  }
+  .req-think > summary::-webkit-details-marker { display: none; }
+  .req-think > summary::before { content: "▸ "; }
+  .req-think[open] > summary::before { content: "▾ "; }
+  .req-think .think-body {
+    margin-top: 5px; color: var(--muted); font-style: italic;
+    font-size: 12.5px; line-height: 1.6;
+    white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow: auto;
+  }
+
+  /* ---- 「施工中」：上下文压缩进行中 ---- */
+  /* ★ 用 outline 而不是 border：加 border 会改变盒子宽度，整栏会抖一下。
+     outline 不占布局，套上去也不会挤动下面的东西。 */
+  .live-card.compressing {
+    outline: 2px solid var(--warn);
+    outline-offset: 3px;
+    border-radius: 10px;
+    animation: livepulse 1.6s ease-in-out infinite;
+  }
+  .live-card.compressing h2 { color: var(--warn); }
+  .live-card.compressing .live-body {
+    border-left-color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 12%, var(--track));
+  }
+  @keyframes livepulse {
+    0%, 100% { outline-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+    50%      { outline-color: var(--warn); }
+  }
+  .live-card.failed h2 { color: var(--warn); }
+
+  .req {
+    border: 1px solid var(--border); border-radius: 10px;
+    margin-bottom: 10px; overflow: hidden;
+  }
+  .req.compress { border-color: color-mix(in srgb, var(--warn) 55%, var(--border)); }
+  .req-head {
+    display: flex; align-items: center; gap: 5px 7px; flex-wrap: wrap;
+    padding: 7px 9px; background: var(--track); font-size: 11.5px;
+    line-height: 1.5;
+  }
+  .req.compress .req-head { background: color-mix(in srgb, var(--warn) 14%, var(--track)); }
+  .req-head .idx { font-family: var(--mono); font-weight: 700; color: var(--muted); }
+  .req-head .who { display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+  .req-head .grow { flex: 1; }
+  .req-body { padding: 9px; }
+
+  /* ---- 消息：平铺的一行，不是气泡 ----
+     ★ 只有 .msg-body / .txt 这些【真正装文本】的元素才允许 pre-wrap。
+       容器上绝不能有 pre-wrap，否则模板里的换行缩进会变成可见空白。 */
+  .msg {
+    padding: 5px 0 6px;
+    border-bottom: 1px dashed var(--border);
+    font-size: 12px;
+  }
+  .msg:last-child { border-bottom: none; }
+  .msg.sum { border-left: 3px solid var(--ok); padding-left: 7px; background: color-mix(in srgb, var(--ok) 8%, transparent); }
+  .msg-role {
+    font-size: 10px; font-weight: 700; letter-spacing: .03em;
+    color: var(--muted); margin-bottom: 2px;
+  }
+  .msg.user .msg-role { color: var(--accent); }
+  .msg.bot .msg-role { color: var(--ok); }
+  .msg-role.sys { color: var(--muted); }
+
+  /* ---- 身份标牌：谁、在哪个群 ----
+     原来「谁说的」只藏在那行被截断的 system_reminder 里
+     （Nickname 后面紧跟 Current datetime，一行省略号正好把群名和时间吃掉），
+     所以把身份单独提出来做成有底色有边框的标牌，一眼能认人。 */
+  .idchip {
+    display: inline-flex; align-items: baseline; gap: 4px;
+    padding: 0 6px; border-radius: 999px; white-space: nowrap;
+    font-size: 10.5px; font-weight: 700; line-height: 17px;
+    border: 1px solid transparent; vertical-align: middle;
+  }
+  .idchip .qq {
+    font-family: var(--mono); font-weight: 600;
+    font-size: 9.5px; opacity: .8;
+  }
+  .idchip.nick {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 15%, transparent);
+    border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+  }
+  .idchip.group {
+    color: var(--warn);
+    background: color-mix(in srgb, var(--warn) 16%, transparent);
+    border-color: color-mix(in srgb, var(--warn) 38%, transparent);
+  }
+  .idchip.dm {
+    color: var(--muted);
+    background: color-mix(in srgb, var(--muted) 12%, transparent);
+    border-color: var(--border);
+  }
+  .msg-role .idchip { margin-left: 5px; }
+  .msg-role:has(.idchip) { margin-bottom: 3px; }
+  .msg-body {
+    white-space: pre-wrap; word-break: break-word;
+    line-height: 1.5; color: var(--text);
+  }
+
+  /* 图片缩略图行 */
+  .imgs { display: flex; flex-wrap: wrap; gap: 3px; margin: 3px 0; }
+  .thumb {
+    width: 52px; height: 52px; object-fit: cover; border-radius: 5px;
+    background: var(--border); border: 1px solid var(--border);
+    display: block; cursor: zoom-in;
+  }
+  .thumb:not(.loaded) { opacity: .4; }
+  /* 引用消息里的图：图片在 req.image_urls 里而不是正文里，
+     加个橙框区分，免得跟直接发的图混淆 */
+  .thumb.quoted { border-color: var(--warn); box-shadow: 0 0 0 1px var(--warn); }
+
+  /* 系统提醒：压成一行小灰字，悬停看全文 */
+  .remind {
+    font-size: 10px; color: var(--muted); margin-top: 3px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    opacity: .85; cursor: help;
+  }
+
+  /* ★ AstrBot 自动注入块（extra_user_content_parts）——
+     不在 contexts 里，是 AstrBot 在请求发出前另塞进来的内容，
+     最终被并进这条 user 消息。用虚线分隔 + 左侧色条区别于正文。 */
+  details.inject {
+    margin-top: 5px; padding-top: 4px;
+    border-top: 1px dashed color-mix(in srgb, var(--warn) 55%, transparent);
+  }
+  details.inject > summary { font-size: 10px; color: var(--warn); opacity: .95; }
+  details.inject > summary::before { color: var(--warn); }
+  .inject-body {
+    margin-top: 3px; padding: 5px 8px;
+    border-left: 3px solid color-mix(in srgb, var(--warn) 70%, transparent);
+    background: color-mix(in srgb, var(--warn) 9%, var(--track));
+    border-radius: 0 6px 6px 0;
+    font-size: 11px; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-word;
+    max-height: 220px; overflow: auto;
+  }
+
+  /* 折叠：统一用浏览器原生 <details>，点击必然生效 */
+  details > summary {
+    cursor: pointer; list-style: none;
+    display: flex; align-items: baseline; gap: 6px;
+  }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before {
+    content: "▸"; color: var(--accent); font-size: 10px; flex: none;
+  }
+  details[open] > summary::before { content: "▾"; }
+  details .len { font-size: 10px; color: var(--muted); }
+  details .hint { font-size: 10px; color: var(--accent); margin-left: auto; flex: none; }
+  details.msg > summary { margin-bottom: 2px; }
+  details.msg > .msg-body { margin-top: 3px; }
+  details > summary > span.msg-role { margin-bottom: 0; }
+  .msg.sum .msg-role { color: var(--ok); }
+
+  /* 摘要块（压缩器产出） */
+  .sumblock {
+    border-left: 3px solid var(--ok); background: color-mix(in srgb, var(--ok) 10%, var(--track));
+    border-radius: 0 7px 7px 0; padding: 6px 9px; margin: 6px 0;
+    font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  }
+  .req-foot {
+    padding: 6px 9px; border-top: 1px dashed var(--border);
+    font-size: 11px; color: var(--muted);
+    display: flex; gap: 4px 9px; flex-wrap: wrap;
+  }
+  .req-foot .out {
+    color: var(--text); width: 100%; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- ==================== 左：监控面板 ==================== -->
+  <div class="col-main">
+
+  <header>
+    <h1>链路监控</h1>
+    <span class="sub">宿主机 → LM Studio → AstrBot → SnowLuma</span>
+    <span class="spacer"></span>
+    <span class="refresh"><span class="dot pulse" id="liveDot"></span><span id="meta">加载中…</span></span>
+  </header>
+
+  <!-- 链路健康 -->
+  <div class="grid g4" style="margin-bottom:14px" id="links"></div>
+
+  <!-- 上下文 -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>上下文用量</h2>
+    <div class="bar" id="ctxBar">
+      <div class="fill" id="ctxFill"></div>
+      <div class="mark" id="ctxMark" title="82% 压缩触发线"></div>
+      <div class="label" id="ctxLabel">— / —</div>
+    </div>
+    <div class="grid g2" style="margin-top:10px">
+      <div>
+        <div class="kv"><span class="k">已用</span><span class="v" id="ctxUsed">—</span></div>
+        <div class="kv"><span class="k">模型上下文上限</span><span class="v" id="ctxMax">—</span></div>
+      </div>
+      <div>
+        <div class="kv"><span class="k">压缩触发线（82%）</span><span class="v" id="ctxThr">—</span></div>
+        <div class="kv"><span class="k">已触发压缩次数</span><span class="v" id="ctxCount">—</span></div>
+        <div class="kv"><span class="k">思考剥离</span><span class="v" id="reasonStrip">—</span></div>
+      </div>
+    </div>
+    <div class="ctx-live" id="ctxLive"></div>
+  </div>
+
+  <!-- 压缩摘要 -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>上下文压缩摘要（压缩后的实际文字）</h2>
+    <div class="summary empty" id="summaries">还没有触发过上下文压缩。</div>
+  </div>
+
+  <!-- 发给模型的完整上下文（已移到右侧栏）-->
+
+  <!-- 模型 + 资源 -->
+  <div class="grid g2" style="margin-bottom:14px">
+    <div class="card">
+      <h2>模型 / AstrBot</h2>
+      <div id="modelBox"></div>
+    </div>
+    <div class="card">
+      <h2>宿主机资源 <span class="h2sub">每秒刷新 · 3 分钟趋势</span></h2>
+      <div id="resBox"></div>
+    </div>
+  </div>
+
+  <!-- 各会话上下文占用：同一个模型上限，各会话自己的历史长度独立 -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>各会话上下文占用 <span class="h2sub" id="sesSub"></span></h2>
+    <div id="sesBox"></div>
+  </div>
+
+  <!-- 其他：低频/次要信息，默认折叠，别占地方 -->
+  <details class="card" id="otherCard" style="margin-bottom:14px">
+    <summary>
+      <h2>其他</h2>
+      <span class="hint">SnowLuma / OneBot 端点 · 展开 / 收起</span>
+    </summary>
+    <div class="other-body">
+      <div class="other-label">SnowLuma / OneBot 端点</div>
+      <div id="slBox"></div>
+    </div>
+  </details>
+
+  <!-- 统计 + 曲线 -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>
+      上下文用量曲线（最近 <span id="chartCount">0</span> 次请求）
+      <span class="h2sub" id="chartInfo"></span>
+      <span class="scalebtns">
+        <button class="sbtn on" data-mode="full" onclick="setScale('full')">全量程</button>
+        <button class="sbtn" data-mode="auto" onclick="setScale('auto')">自动缩放</button>
+      </span>
+    </h2>
+    <canvas id="chart" height="150" style="width:100%;display:block"></canvas>
+    <div class="grid g4" style="margin-top:12px" id="stats"></div>
+  </div>
+
+  <!-- 请求历史 -->
+  <div class="card">
+    <h2>最近的 LLM 请求</h2>
+    <div class="scroll">
+      <table>
+        <thead><tr>
+          <th>时间</th><th>来源</th><th>内容 / 回复</th>
+          <th class="num">输入</th><th class="num">输出</th>
+          <th class="num">缓存</th><th class="num">耗时</th><th>工具</th>
+        </tr></thead>
+        <tbody id="calls"><tr><td colspan="8" style="color:var(--muted)">暂无数据</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  </div><!-- /col-main -->
+
+  <!-- ==================== 右：上下文（1/4）==================== -->
+  <aside class="col-side">
+    <div class="card">
+      <h2>
+        发给模型的完整上下文
+        <span class="h2sub">每次实际发出去的消息 · 时间正序，最新在最下面</span>
+      </h2>
+      <div class="ctxwrap" id="contexts">
+        <div class="ctx-empty">还没有抓到请求 —— 给机器人发条消息就会出现。</div>
+      </div>
+    </div>
+
+    <!-- 模型的输出：生成中实时刷新，结束后常驻（下次生成才覆盖） -->
+    <div class="card live-card" id="liveCard" hidden>
+      <h2>
+        <span id="liveTitle">模型输出</span>
+        <span class="gate-chips" id="liveGate"></span>
+        <button class="lbtn" onclick="hideLive()" title="收起。下次开始生成会自动再出现">收起</button>
+        <span class="h2sub" id="liveSub"></span>
+      </h2>
+      <div class="live-body" id="liveBody"></div>
+      <div class="gate-queue" id="queueBox" hidden></div>
+    </div>
+  </aside>
+
+</div><!-- /wrap -->
+
+<script>
+const P = window.AstrBotPluginPage;
+let first = true;
+
+const fmtNum = (n) => (n === null || n === undefined) ? "—" : Number(n).toLocaleString();
+const fmtTime = (sec) => {
+  const d = new Date(sec * 1000);
+  const p = (x) => String(x).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+};
+const fmtUptime = (s) => {
+  s = Math.floor(s || 0);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h ? `${h} 小时 ${m} 分` : `${m} 分 ${s % 60} 秒`;
+};
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) =>
+  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+/* ---------- 链路健康卡 ---------- */
+function renderLinks(d) {
+  const items = [];
+  const sl = d.snowluma || {}, lm = d.lm_studio || {}, sys = d.system || {};
+  const gpu = (sys.gpus || [])[0];
+
+  const state = (ok, warnMsg) => !ok ? "bad" : (warnMsg ? "warn" : "ok");
+
+  items.push({
+    name: "SnowLuma（QQ 协议端）",
+    cls: state(sl.reachable),
+    meta: sl.reachable
+      ? `已连接 · WS 客户端 ${sl.ws_clients ?? "?"} 个`
+      : `不可达${sl.error ? " · " + sl.error : ""}`,
+  });
+
+  items.push({
+    name: "AstrBot（框架）",
+    cls: "ok",
+    meta: `运行中 · 已运行 ${fmtUptime((d.astrbot || {}).uptime_sec)}`,
+  });
+
+  // LM Studio：把「已加载模型的上下文长度」摊开，并提示最近有没有配置漂移。
+  // ★ 这些字段来自 /api/v0/models 的 state / loaded_context_length / capabilities。
+  //   老版本 LM Studio 没有这个端点 → lm.loaded 不存在，退回原来的说法。
+  //   为什么值得占用卡片空间：2026-10-16 踩过「4 槽×8192 ↔ 1 槽×24576」来回跳，
+  //   表现成 Context size exceeded / 工具不调用，当时没任何地方能看出它变过。
+  const fmtCtx = (n) =>
+    typeof n === "number" ? (n >= 1024 ? Math.round(n / 1024) + "k" : String(n)) : "?";
+  const lmLoaded = lm.loaded || [];
+  const lmDrift = lm.drift || [];
+  const lmShort = (id) => String(id || "").split("/").pop();
+  let lmMeta = lm.reachable
+    ? `已加载 ${lmLoaded.length || (lm.models || []).length} 个模型`
+    : `不可达${lm.error ? " · " + lm.error : ""}`;
+  if (lm.reachable && lmLoaded.length) {
+    lmMeta += " · " + lmLoaded
+      .map((m) => `${lmShort(m.id)} ctx=${fmtCtx(m.context)}`)
+      .join(" · ");
+  }
+  // 嵌入模型本来就没有 tool_use，不算异常
+  const lmNoTool = lmLoaded.filter((m) => m.type !== "embeddings" && !m.tool_use);
+  if (lm.reachable && lmNoTool.length) {
+    lmMeta += ` · ⚠ 缺 tool_use：${lmNoTool.map((m) => lmShort(m.id)).join(", ")}`;
+  }
+  const lmExtra = lmDrift.slice(0, 3)
+    .map(
+      (r) =>
+        `⚠ ${esc(lmShort(r.model))} ${esc(r.field)} ` +
+        `${esc(String(r.old))} → ${esc(String(r.new))}`,
+    )
+    .join("<br>");
+
+  items.push({
+    name: "LM Studio（模型）",
+    cls:
+      lmNoTool.length || lmDrift.length
+        ? "warn"
+        : state(lm.reachable, (lm.models || []).length === 0),
+    meta: lmMeta,
+    extra: lmExtra,
+  });
+
+  items.push({
+    name: "GPU",
+    cls: gpu ? (gpu.temp >= 85 ? "warn" : "ok") : "bad",
+    meta: gpu
+      ? `${gpu.mem_used}/${gpu.mem_total} MiB · ${gpu.util}% · ${gpu.temp}°C · ${gpu.power}W`
+      : "未检测到 NVIDIA GPU",
+  });
+
+  document.getElementById("links").innerHTML = items.map((it) => `
+    <div class="card">
+      <div class="link">
+        <span class="led ${it.cls}"></span>
+        <div>
+          <div class="name">${esc(it.name)}</div>
+          <div class="meta">${esc(it.meta)}</div>
+          ${it.extra ? `<div class="meta" style="margin-top:4px;opacity:.9">${it.extra}</div>` : ""}
+        </div>
+      </div>
+    </div>`).join("");
+}
+
+/* ---------- 上下文条 ---------- */
+function renderContext(d) {
+  const c = d.context || {};
+  const lc = d.live_context || {};
+  const pct = Math.max(0, Math.min(100, c.percent || 0));
+  const bar = document.getElementById("ctxBar");
+  const fill = document.getElementById("ctxFill");
+  const mark = document.getElementById("ctxMark");
+
+  fill.style.width = pct + "%";
+  bar.classList.remove("hot", "crit");
+  if (pct >= 82) bar.classList.add("crit");
+  else if (pct >= 60) bar.classList.add("hot");
+
+  mark.style.left = "82%";
+  // 三种情况要分清：
+  //   完全没有数据      -> "—"
+  //   有数据 且 来自 API -> "7,234 token"
+  //   有数据 但 是估算   -> "7,234 token（估算）"
+  const hasData = (lc.request_count || 0) > 0 && (c.used || 0) > 0;
+  const isReal = lc.real !== null && lc.real !== undefined;
+  document.getElementById("ctxLabel").textContent = hasData
+    ? `${fmtNum(c.used)} / ${fmtNum(c.max)}  (${pct.toFixed(1)}%)`
+    : `— / ${fmtNum(c.max)}`;
+  document.getElementById("ctxUsed").textContent = !hasData
+    ? "—（还没有请求数据）"
+    : fmtNum(c.used) + " token" + (isReal ? "" : "（估算）");
+  document.getElementById("ctxMax").textContent = fmtNum(c.max) + " token";
+  document.getElementById("ctxThr").textContent = fmtNum(c.threshold_tokens) + " token";
+  document.getElementById("ctxCount").textContent = (d.astrbot || {}).compression_count ?? 0;
+
+  // 思考剥离的账：开了剥离就该看到数字在涨；关了这里如实说"保留"
+  const ab = d.astrbot || {};
+  const rsEl = document.getElementById("reasonStrip");
+  if (rsEl) {
+    if (ab.keep_reasoning_in_context) {
+      rsEl.textContent = "保留（思考会进上下文）";
+      rsEl.style.color = "var(--warn)";
+      rsEl.title = "开关在 插件 → 链路监控 → 配置 → 「思考过程保留在上下文里」";
+    } else {
+      rsEl.textContent =
+        `已剥离 ${ab.reasoning_stripped_segments ?? 0} 段 / ` +
+        `${fmtNum(ab.reasoning_stripped_chars ?? 0)} 字`;
+      rsEl.style.color = "";
+      rsEl.title = "每圈对话开始时剥掉【历史】里的思考；本圈新产生的保留";
+    }
+  }
+
+  // 实时概况：压缩发生【之前】也能看到上下文在长大
+  const live = document.getElementById("ctxLive");
+  if (lc.request_count) {
+    const bits = [`已统计请求 ${lc.request_count} 次`];
+    if (lc.messages) bits.push(`最近一次 ${lc.messages} 条消息`);
+    bits.push(
+      lc.real !== null && lc.real !== undefined
+        ? "用量来自模型 API 的真实 token 数"
+        : "用量为估算值（API 未返回 usage）"
+    );
+    if (lc.time) bits.push(`${fmtTime(lc.time)}`);
+    live.innerHTML = bits.map(esc).join(" · ") +
+      (lc.has_summary ? ' <span class="pill tool">已含压缩摘要</span>' : "");
+  } else {
+    live.textContent = "还没有收到过 LLM 请求 —— 给机器人发条消息就有了";
+  }
+}
+
+/* ---------- 模型信息 ---------- */
+function renderModel(d) {
+  const a = d.astrbot || {};
+  const mods = (a.modalities || []).join(" / ") || "—";
+  const ceb = a.custom_extra_body || {};
+  const rows = [
+    ["当前模型", a.model || "—"],
+    ["模型能力", mods],
+    ["上下文上限", fmtNum(a.max_context_tokens) + " token"],
+    ["关闭思考", ceb.reasoning_effort === "none" ? "已开启（reasoning_effort=none）" : "未设置"],
+    ["压缩策略", (a.compression_config || {}).strategy || "—"],
+    ["压缩轮数阈值", (a.compression_config || {}).max_turns ?? "—"],
+    ["保留最近比例", (a.compression_config || {}).keep_recent_ratio ?? "—"],
+    ["群聊上下文条数", a.group_message_max_cnt ?? "—"],
+  ];
+  document.getElementById("modelBox").innerHTML = rows.map(([k, v]) => `
+    <div class="kv"><span class="k">${esc(k)}</span><span class="v">${esc(v)}</span></div>`).join("");
+}
+
+/* ---------- 宿主机资源 ---------- */
+/* ---------- 宿主机资源：1 秒刷新 + 趋势图 ----------
+   ★ 为什么不复用 5 秒的 tick()：
+     占用率是「看瞬时抖动」的东西，5 秒一次会漏掉尖峰；但 /overview
+     要探测 LM Studio / SnowLuma，1 秒拉一次太重。所以单独开一个
+     【只读内存】的 /sysinfo —— 采样在后端按固定 1 秒节奏跑。
+   ★ 好处：刷新页面不会把曲线清零，后端还留着最近 N 个点。            */
+const RES_METRICS = [
+  { key: "cpu",  label: "CPU",  color: "--accent" },
+  { key: "gpu",  label: "GPU",  color: "--ok" },
+  { key: "vram", label: "显存", color: "--warn" },
+  { key: "mem",  label: "内存", color: "--bad" },
+];
+let _resSeries = [];
+let _resBuilt = false;
+// 实时输出区：是否【跟随】滚动到底。
+// ★ 这里原本叫 _liveWasAtBottom，初始 true，却【从头到尾没有被赋值过一次】
+//   （全文只有声明 + 读取两处）。于是 `atBottom || _liveWasAtBottom` 恒为 true，
+//   每 1 秒重绘都把视口拽回底部 —— 用户根本没法往上翻，
+//   正是"一直往下拽，看不了上面的东西"那个报障。
+//   现在改成真正的闩：用户往上滚就松开，滚回底部再重新咬合。
+let _liveFollow = true;
+
+// 用户自己滚了 → 按「离底部多远」重新决定要不要跟。
+// ★ 程序化的 body.scrollTop = scrollHeight 也会触发 scroll，但那时距离≈0，
+//   算出来仍是 true，不会自激成"永远跟随"。
+function _liveOnScroll() {
+  const body = document.getElementById("liveBody");
+  if (!body) return;
+  _liveFollow = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+}
+
+// 脚本在 </body> 之前，元素已经存在。
+// ★ 监听挂在【容器】上：paintLive 换的是它的 innerHTML（子节点），容器本身不换，
+//   所以监听不会丢。
+(function attachLiveScroll() {
+  const body = document.getElementById("liveBody");
+  if (body) body.addEventListener("scroll", _liveOnScroll, { passive: true });
+})();
+
+function cssVar(name, fallback) {
+  const v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return v || fallback;
+}
+
+function fmtPct(v) {
+  return (v === null || v === undefined) ? "—" : Math.round(v * 10) / 10 + "%";
+}
+
+/* 迷你趋势图：固定 0~100% 量程，只看形状，不画坐标轴 */
+function drawSpark(cv, values, stroke) {
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 120;
+  const H = cv.clientHeight || 26;
+  cv.width = Math.max(1, Math.round(W * dpr));
+  cv.height = Math.max(1, Math.round(H * dpr));
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+
+  // 50% 参考线
+  g.strokeStyle = cssVar("--border", "#e6e8ec");
+  g.lineWidth = 1;
+  g.beginPath();
+  g.moveTo(0, H / 2 + 0.5);
+  g.lineTo(W, H / 2 + 0.5);
+  g.stroke();
+
+  if (!values || values.length < 2) return;
+
+  const pad = 2;
+  const plotH = H - pad * 2;
+  const stepX = W / (values.length - 1);
+  const yOf = (v) => pad + plotH * (1 - Math.max(0, Math.min(100, v)) / 100);
+
+  g.strokeStyle = stroke;
+  g.lineWidth = 1.4;
+  g.lineJoin = "round";
+  g.beginPath();
+  values.forEach((v, i) => {
+    const x = i * stepX;
+    const y = yOf(v);
+    if (i === 0) g.moveTo(x, y);
+    else g.lineTo(x, y);
+  });
+  g.stroke();
+
+  // 末端点：一眼看到「现在在哪」
+  g.fillStyle = stroke;
+  g.beginPath();
+  g.arc(W - 1.5, yOf(values[values.length - 1]), 2, 0, Math.PI * 2);
+  g.fill();
+}
+
+/* 行只建一次 —— 每秒 innerHTML 重建会让曲线闪、也浪费 */
+function buildResRows() {
+  const box = document.getElementById("resBox");
+  if (!box) return;
+  box.innerHTML =
+    RES_METRICS.map(
+      (m) =>
+        '<div class="res-row">' +
+        '<span class="res-k">' + esc(m.label) + "</span>" +
+        '<canvas class="res-spark" data-metric="' + m.key + '"></canvas>' +
+        '<span class="res-v" data-val="' + m.key + '">—</span>' +
+        "</div>"
+    ).join("") + '<div class="res-sub" id="resSub">采样中…</div>';
+  _resBuilt = true;
+}
+
+function paintRes() {
+  if (!_resBuilt) return;
+  RES_METRICS.forEach((m) => {
+    // ★ 前值填充，而不是 filter 掉缺失值：
+    //   采样刚启动的那 1 个样本可能还没有 GPU（nvidia-smi 第一行要 ~50ms 才到），
+    //   直接 filter 会让数组变短、曲线的时间轴被压缩，看起来像"数据错位"。
+    const vals = [];
+    let carry = null;
+    for (const s of _resSeries) {
+      const v = s[m.key];
+      if (typeof v === "number") carry = v;
+      if (carry !== null) vals.push(carry);
+    }
+    const cur = vals.length ? vals[vals.length - 1] : null;
+    const valEl = document.querySelector('#resBox .res-v[data-val="' + m.key + '"]');
+    if (valEl) {
+      valEl.textContent = fmtPct(cur);
+      valEl.style.color = cur === null ? "var(--muted)" : cssVar(m.color, "#3b82f6");
+    }
+    drawSpark(
+      document.querySelector('#resBox .res-spark[data-metric="' + m.key + '"]'),
+      vals,
+      cssVar(m.color, "#3b82f6")
+    );
+  });
+}
+
+function renderSys(d) {
+  _resSeries = d.series || [];
+  if (!_resBuilt) buildResRows();
+  paintRes();
+
+  // 副行：GPU 型号 / 温度 / 功耗 + 显存与内存的绝对值
+  const last = d.latest || {};
+  const bits = [];
+  if (last.gpu_name) bits.push(esc(last.gpu_name));
+  if (last.gpu_temp !== undefined) bits.push(last.gpu_temp + "°C");
+  if (last.gpu_power !== undefined) bits.push(esc(String(last.gpu_power)) + "W");
+  if (last.vram_used !== undefined) {
+    bits.push("显存 " + last.vram_used + " / " + last.vram_total + " MiB");
+  }
+  if (last.mem_used_gb !== undefined) {
+    bits.push("内存 " + last.mem_used_gb + " / " + last.mem_total_gb + " GB");
+  }
+  const sub = document.getElementById("resSub");
+  if (sub) {
+    sub.textContent = bits.length
+      ? bits.join(" · ") + " · 已采 " + _resSeries.length + " 点"
+      : "GPU 未检测到（nvidia-smi 不可用），只有 CPU / 内存";
+  }
+}
+
+async function refreshSys() {
+  try {
+    const d = await P.apiGet("/ncd-monitor/sysinfo");
+    renderSys(d);
+    renderLive(d.live, d.lives, d.gate);
+  } catch (e) {
+    if (!_resBuilt) {
+      const box = document.getElementById("resBox");
+      if (box) box.innerHTML = '<div class="res-note">资源接口读取失败，自动重试中…</div>';
+    }
+  }
+}
+
+/* ---------- 右栏底部：模型的输出 ----------
+   生成中实时刷新、结束后【常驻】（下次开始生成才覆盖）。
+   数据挂在 /sysinfo 上（那条路由前端本来就 1 秒拉一次，
+   而且它只读后端内存），所以零新增路由、零新增请求。
+
+   ★ 1 秒粒度 = "一段一段跳"，不是逐字动画。这是诚实的：
+     它反映的是流式进度的真实粒度，硬做逐字反而要额外插值、会骗人。
+   ★ 只在【开流式】时才有内容。`streaming_response` 关着的话，
+     主对话走 text_chat（非流式），这里永远是空的 —— 不是坏了。 */
+let _liveHidden = false;      // 「收起」是纯前端状态
+let _livePrevDone = true;     // 上一拍是否已结束，用来检测状态跃迁
+let _liveRefreshing = false;  // 防止 refreshContexts 叠一起
+let _lastLives = [];          // 后端给的全部实时输出（新的在前）
+let _lastGate = null;         // 并发闸门状态
+let _liveSelKey = null;       // 用户点「并发」选中的那一路；null = 跟随默认（最新那路）
+let _queueOpen = false;       // 「排队」是否展开
+/* 思考块的开合：null = 用户没表过态，用默认（生成中展开、生成完收起）。
+   ★ 为什么必须记：这块的父容器【每秒】被 paintLive() 用 innerHTML 整个重建
+     （/sysinfo 1 秒轮询 → renderLive → paintLive），
+     <details> 的 open 状态不会被浏览器保留 —— 于是"生成完后点开思考"
+     会在 1 秒内被下一拍收回。
+   ★ 和 _expanded 的区别：那个记的是"某个具体的块开着"，缺省即关。
+     这里缺省要落到"默认行为"，是三态，所以单独一个变量。 */
+let _thinkUserOpen = null;
+
+// 「并发」入口：点一下换到另一个正在生成的会话
+function cycleLive() {
+  if (_lastLives.length < 2) return;
+  const keys = _lastLives.map((x) => x.key);
+  const i = keys.indexOf(_liveSelKey);
+  _liveSelKey = keys[(i + 1) % keys.length];
+  _livePrevDone = !!(_lastLives.find((x) => x.key === _liveSelKey) || {}).done;
+  _liveFollow = true;       // 换了一路 → 重新跟随
+  paintLive();
+  nudgeContexts();
+}
+
+// 「排队」入口：展开 / 收起队列
+function toggleQueue() {
+  _queueOpen = !_queueOpen;
+  paintLive();
+}
+
+function hideLive() {
+  _liveHidden = true;
+  const c = document.getElementById("liveCard");
+  if (c) c.hidden = true;
+}
+
+/* 生成状态一变就立刻刷右栏的上下文列表。
+   ★ 为什么需要：那个列表原本只靠 tick() 的 5 秒节奏刷新，而流式这块是 1 秒 ——
+     实测出现过"QQ 都收到了、面板上这条还没有回复"，等最多 5 秒才补上。
+     这里在"刚开始生成"和"刚生成完"两个时刻各补一次，消除这个时间差。 */
+function nudgeContexts() {
+  if (_liveRefreshing) return;
+  _liveRefreshing = true;
+  Promise.resolve()
+    .then(refreshContexts)
+    .catch((e) => console.error(e))
+    .finally(() => { _liveRefreshing = false; });
+}
+
+/* 当前该显示哪一路：
+   用户点过「并发」就显示他选的那路（选的那路被清理掉了就退回默认），
+   否则显示最新开始的那路（后端返回的顺序就是新的在前）。 */
+function currentLive() {
+  if (!_lastLives.length) return null;
+  if (_liveSelKey) {
+    const hit = _lastLives.find((x) => x.key === _liveSelKey);
+    if (hit) return hit;
+    _liveSelKey = null;
+  }
+  return _lastLives[0];
+}
+
+/* 两个状态入口只在真正发生时出现：
+   「并发」= 同时在生成的路数 > 1；「排队」= 队列非空。
+   ★ 没有并发、没有排队时这两个小胶囊【一个都不显示】。 */
+function renderGateChips() {
+  const box = document.getElementById("liveGate");
+  if (!box) return;
+  const active = (_lastGate && _lastGate.active) || [];
+  const queued = (_lastGate && _lastGate.queued) || [];
+  const limit = _lastGate ? _lastGate.limit : 0;
+  const chips = [];
+  if (active.length > 1) {
+    chips.push(
+      '<span class="gate-chip on" onclick="cycleLive()" ' +
+        'title="点一下切换到另一个正在生成的会话">并发 ' +
+        active.length + (limit > 0 ? "/" + limit : "") + "</span>"
+    );
+  }
+  if (queued.length) {
+    chips.push(
+      '<span class="gate-chip q' + (_queueOpen ? " open" : "") +
+        '" onclick="toggleQueue()" title="点一下展开/收起排队队列">排队 ' +
+        queued.length + "</span>"
+    );
+  }
+  box.innerHTML = chips.join("");
+}
+
+function renderQueueBox() {
+  const box = document.getElementById("queueBox");
+  if (!box) return;
+  const queued = (_lastGate && _lastGate.queued) || [];
+  if (!_queueOpen || !queued.length) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  box.hidden = false;
+  box.innerHTML =
+    '<div class="qhead">排队中（先进先出，前面的跑完自动进来）</div>' +
+    queued
+      .map(
+        (q) =>
+          '<div class="qrow"><span class="qpos">#' + q.pos + "</span>" +
+          '<span class="qlabel">' + esc(q.label || q.umo || "?") + "</span>" +
+          '<span class="qwait">已等 ' + q.waited + " 秒</span></div>"
+      )
+      .join("");
+}
+
+function renderLive(live, lives, gate) {
+  _lastLives = Array.isArray(lives) ? lives : (live ? [live] : []);
+  _lastGate = gate || null;
+  paintLive();
+}
+
+function paintLive() {
+  const card = document.getElementById("liveCard");
+  const body = document.getElementById("liveBody");
+  const sub = document.getElementById("liveSub");
+  const title = document.getElementById("liveTitle");
+  if (!card || !body) return;
+
+  renderGateChips();
+  renderQueueBox();
+
+  const live = currentLive();
+
+  // 一次都没生成过（例如没开流式）→ 整块不显示
+  if (!live) {
+    card.hidden = true;
+    _livePrevDone = true;
+    return;
+  }
+
+  const nowDone = !!live.done;
+  if (!nowDone && _livePrevDone) {
+    _liveHidden = false;      // 新的一次生成开始 → 自动取消「收起」
+    _liveFollow = true;       // 新的一次生成 → 重新跟随（上一轮你往上翻过也重新咬合）
+    nudgeContexts();          // 让新的用户消息立刻出现在列表里
+  } else if (nowDone && !_livePrevDone) {
+    nudgeContexts();          // 刚生成完 → 立刻把回复挂上去
+  }
+  _livePrevDone = nowDone;
+
+  if (_liveHidden) { card.hidden = true; return; }
+  card.hidden = false;
+
+  /* 「施工中」状态：压缩进行中时把这块套上黄框。
+     ★ 判据是 mode==="compress" && 未结束 —— 压缩一完就自动摘掉黄框，
+       不需要后端再发一个"结束"信号（后端把 done 置真就够了）。 */
+  const isCompress = live.mode === "compress";
+  const compressing = isCompress && !nowDone;
+  card.classList.toggle("compressing", compressing);
+  card.classList.toggle("failed", nowDone && live.ok === false);
+
+  body.classList.toggle("done", nowDone);
+  body.classList.toggle("fail", nowDone && live.ok === false);
+
+  const who = live.group_name
+    ? "🏠 " + live.group_name
+    : (live.sender_name ? "👤 " + live.sender_name : (live.label || ""));
+  // 多路并发时把"这是第几路"标出来，否则切过去了也看不出来
+  const multi = _lastLives.length > 1
+    ? "第 " + (_lastLives.findIndex((x) => x.key === live.key) + 1) + "/" + _lastLives.length + " 路"
+    : "";
+  const state = compressing
+    ? "上下文压缩中…"
+    : (!nowDone
+        ? "生成中…"
+        : (live.ok === false
+            ? "提前结束"
+            : (live.sent ? "已发出 " + live.sent : "已生成完")));
+  if (title) {
+    if (compressing) title.textContent = "⛏ 正在压缩中";
+    else if (isCompress && nowDone) title.textContent = "压缩已完成";
+    else title.textContent = nowDone ? "最近一次输出" : "模型正在输出";
+  }
+  if (sub) {
+    const parts = [who, multi, state, live.chars + " 字"];
+    // 思考过程有多少字也报出来 —— 一眼看出"这次它想了很多"
+    if (live.reasoning_chars) parts.push("🧠 " + live.reasoning_chars + " 字");
+    parts.push(live.elapsed + " 秒");
+    sub.textContent = parts.filter(Boolean).join(" · ");
+  }
+
+  const txt = live.text || "";
+  // 跟不跟随看 _liveFollow（用户往上滚就松开）。
+  // ★ 重建 innerHTML 会把 scrollTop 打回顶部，所以【不跟随】时要把用户
+  //   原来的阅读位置还回去 —— 否则不拽了，却直接跳到最上面，一样没法看。
+  const keepScroll = body.scrollTop;
+  // ★ 思考过程单独一块，样式刻意做得比正文弱（斜体/灰/左边细线）。
+  //   它【不会】进聊天 —— AstrBot 的 display_reasoning_text 管的是聊天，
+  //   这里是监控侧的观察，两者互不影响。
+  const think = live.reasoning || "";
+  // ★ 默认：生成中展开、生成完收起。
+  //   但用户手动点过之后一律听用户的（_thinkUserOpen）—— 否则这块每秒重建，
+  //   刚点开的思考会被下一拍收回。
+  const thinkOpen = _thinkUserOpen === null ? !nowDone : _thinkUserOpen;
+  const thinkHtml = think
+    ? '<details class="think"' + (thinkOpen ? " open" : "") +
+      ' ontoggle="rememberThink(this)">' +
+      "<summary>🧠 思考过程 " + think.length + " 字" +
+      (nowDone ? "" : "（正在想…）") + "</summary>" +
+      '<div class="think-body">' + esc(think) + "</div></details>"
+    : "";
+  body.innerHTML = thinkHtml + (txt
+    ? esc(txt) + (nowDone ? "" : '<i class="caret"></i>')
+    : '<span class="live-empty">' +
+      (nowDone ? (think ? "这次只输出了思考过程" : "这次没有可见文本输出（例如只调了工具）")
+               : "等待首字…") +
+      "</span>");
+  if (_liveFollow) body.scrollTop = body.scrollHeight;
+  else body.scrollTop = keepScroll;
+}
+
+/* ---------- SnowLuma 端点 ---------- */
+function renderSL(d) {
+  const sl = d.snowluma || {};
+  const eps = sl.endpoints || [];
+  if (!eps.length) {
+    // 读不到配置【不是错误】—— 很多人不用 SnowLuma，或装在别处。
+    // 所以这里给的是"去哪儿填"，而不是报错。
+    document.getElementById("slBox").innerHTML =
+      '<div class="kv"><span class="k">未读取 OneBot 配置</span>' +
+      '<span class="v">' + esc(sl.config_error || "—") + "</span></div>" +
+      '<div class="kv"><span class="k">怎么修</span>' +
+      '<span class="v">AstrBot 面板 → 插件 → 链路监控 → <b>配置</b> → 填 ' +
+      "<code>snowluma_dir</code></span></div>";
+    return;
+  }
+  const bad = eps.filter((e) => e.host === "0.0.0.0" && !e.has_token);
+  let html = eps.map((e) => `
+    <div class="kv">
+      <span class="k">${esc(e.kind)}[${e.index}] 监听</span>
+      <span class="v">${esc(e.host)}:${esc(e.port)}
+        <span class="pill ${e.has_token ? "" : "tool"}">${e.has_token ? "有 Token" : "无 Token"}</span>
+      </span>
+    </div>`).join("");
+  html += bad.length
+    ? `<div class="kv"><span class="k">⚠️ 安全提示</span><span class="v" style="color:var(--warn)">${bad.length} 个端点监听 0.0.0.0 且无 Token</span></div>`
+    : `<div class="kv"><span class="k">✅ 安全</span><span class="v">所有对外端点均有 Token 保护</span></div>`;
+  document.getElementById("slBox").innerHTML = html;
+}
+
+/* ---------- 各会话上下文占用 ----------
+   同一个模型上下文上限，但每个会话（QQ 群 / 私聊 / WebUI 通道）各自维护
+   独立的滚动历史，长度完全不同。顶部那条「上下文用量」只反映【最近一次
+   请求】的会话，所以这里按 umo 分开列，一眼看出谁在逼近压缩线。
+
+   ★ 进度条 = 该会话最近一次请求的估算 token / 模型上限。
+     只有发起过请求的会话才有真实用量回传，所以统一用估算口径，
+     避免真实值和估算值混着比。
+   ★ 数据在 5 秒的 tick() 里刷新，和「最近的 LLM 请求」同频。 */
+function renderSessions(ov) {
+  const box = document.getElementById("sesBox");
+  if (!box) return;
+
+  const ctx = ov.context || {};
+  const max = ctx.max || 0;
+  const thr = ctx.threshold_tokens || 0;
+  const rows = ov.sessions || [];
+
+  const sub = document.getElementById("sesSub");
+  if (sub) {
+    sub.textContent = max
+      ? "共 " + rows.length + " 个会话 · 上限 " + fmtNum(max) +
+        " token · 压缩线 " + fmtNum(thr)
+      : "共 " + rows.length + " 个会话";
+  }
+
+  if (!rows.length) {
+    box.innerHTML =
+      '<div class="ses-empty">还没有抓到请求 —— 给机器人发条消息就会出现。</div>';
+    return;
+  }
+
+  box.innerHTML =
+    '<div class="ses-list">' +
+    rows
+      .map((s) => {
+        const pct = Math.max(0, Math.min(100, Number(s.percent) || 0));
+        const hot = thr > 0 && (s.tokens || 0) >= thr;
+        const name = !s.umo
+          ? "❓ " + (s.label || "未识别会话")
+          : s.is_group
+          ? "🏠 " + (s.group_name || "群 " + (s.group_id || "?"))
+          : "👤 " + (s.sender_name || s.label || "私聊");
+        const title =
+          s.umo + "\n" + s.messages + " 条消息 · " + fmtNum(s.tokens) +
+          " token（估算）\n" + fmtNum(s.chars) + " 字 · 最后 " +
+          fmtTime(s.time) + " · 累计 " + s.requests + " 次请求";
+        return (
+          '<div class="ses-row" title="' + esc(title) + '">' +
+          '<span class="ses-name">' + esc(name) + "</span>" +
+          '<span class="ses-bar"><i class="' + (hot ? "hot" : "") +
+          '" style="width:' + pct + '%"></i></span>' +
+          '<span class="ses-cnt' + (hot ? " hot" : "") + '">' +
+          s.messages + " 条 · " + fmtNum(s.tokens) + " tok · " + fmtPct(pct) +
+          "</span>" +
+          "</div>"
+        );
+      })
+      .join("") +
+    "</div>";
+}
+
+/* ---------- 压缩摘要 ---------- */
+function renderSummaries(items, d) {
+  const box = document.getElementById("summaries");
+  if (!items || !items.length) {
+    box.className = "summary empty";
+    const lc = (d && d.live_context) || {};
+    const ctx = (d && d.context) || {};
+    const tips = ["还没有触发过上下文压缩。"];
+    if (lc.request_count) {
+      tips.push(
+        `当前上下文约 ${fmtNum(ctx.used)} / ${fmtNum(ctx.max)} token` +
+        `（${(ctx.percent || 0).toFixed(1)}%），到达 82%（${fmtNum(ctx.threshold_tokens)} token）时才会压缩。`
+      );
+      if (lc.has_summary) {
+        tips.push("注意：最近一次请求里【已经带了压缩摘要】，但插件没记录到 —— 可能压缩发生在插件加载之前。");
+      }
+    } else {
+      tips.push("给机器人发条消息，这里就会开始有数据。");
+    }
+    tips.push("压缩条件的另一个门槛是对话轮数（max_turns），聊够轮数才会触发。");
+    box.innerHTML = tips.map((t, i) =>
+      i === 0 ? `<div>${esc(t)}</div>` : `<div style="margin-top:6px;font-size:12.5px">${esc(t)}</div>`
+    ).join("");
+    return;
+  }
+  box.className = "summary";
+  // 和右侧上下文一样按时间正序：第 1 次压缩在最上面，最新的在下面
+  const ordered = items.slice().reverse();
+  box.innerHTML = ordered.map((it) => `
+    <div class="summary-item${it.ineffective ? " bad" : ""}">
+      <div class="summary-head">
+        <span class="tag">第 ${it.index} 次</span>
+        <span class="tag">${fmtTime(it.time)}</span>
+        <span class="tag">消息 ${it.before_messages} → ${it.after_messages}</span>
+        <span class="tag">省下约 ${fmtNum(it.saved_tokens)} token</span>
+        ${it.ineffective
+          ? `<span class="tag bad">⚠ 这次没生效</span>`
+          : ""}
+      </div>
+      <div class="summary-body">${esc(it.summary)}</div>
+      ${it.ineffective && it.note
+        ? `<div class="summary-note">${esc(it.note)}</div>`
+        : ""}
+    </div>`).join("");
+}
+
+/* ---------- 请求历史 ---------- */
+function sourceLabel(c) {
+  const umo = c.umo || "";
+  const id = c.group_id || umo.split(":").pop();
+  const name = (c.sender_name || "").trim();
+  const uid = (c.sender_id || "").trim();
+  const gname = (c.group_name || "").trim();
+
+  if (c.is_group || umo.includes("GroupMessage")) {
+    // 优先显示群名，没有则退回群号
+    const g = gname ? `${gname}(${id})` : `${id}`;
+    return name ? `${g} · ${name}` : g;
+  }
+  if (umo.includes("FriendMessage")) {
+    if (name && uid) return `${name} (${uid})`;
+    return name || id || "私聊";
+  }
+  return c.sender || uid || "—";
+}
+
+const fmtMs = (ms) => {
+  if (ms === null || ms === undefined) return "—";
+  return ms >= 1000 ? (ms / 1000).toFixed(1) + " s" : ms + " ms";
+};
+
+function renderCalls(calls) {
+  const tb = document.getElementById("calls");
+  if (!calls || !calls.length) {
+    tb.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">暂无数据</td></tr>`;
+    return;
+  }
+  tb.innerHTML = calls.slice().reverse().map((c) => {
+    const tools = (c.tool_calls || []).map((t) => `<span class="pill tool">${esc(t)}</span>`).join("") || "—";
+    const active = c.is_active_reply ? '<span class="pill active">主动</span>' : "";
+    const prev = c.preview
+      ? `<div class="prev">${esc(c.preview)}</div>`
+      : "";
+    const rep = c.reply_preview
+      ? `<div class="prev out">${esc(c.reply_preview)}</div>`
+      : "";
+    return `<tr>
+      <td class="nowrap">${fmtTime(c.time)}</td>
+      <td>${esc(sourceLabel(c))} ${active}</td>
+      <td>
+        ${prev || '<span style="color:var(--muted)">—</span>'}
+        ${rep}
+      </td>
+      <td class="num">${fmtNum(c.input_tokens)}</td>
+      <td class="num">${fmtNum(c.output_tokens)}</td>
+      <td class="num">${fmtNum(c.cached_tokens)}</td>
+      <td class="num">${fmtMs(c.latency_ms)}</td>
+      <td>${tools}</td>
+    </tr>`;
+  }).join("");
+}
+
+/* ---------- 统计小卡 ---------- */
+function renderStats(d) {
+  const s = d.stats || {};
+  const box = document.getElementById("stats");
+  const items = [
+    { lab: "LLM 请求总数", val: fmtNum(s.total_calls), sub: `群 ${s.group_calls ?? 0} · 私聊 ${s.private_calls ?? 0}` },
+    { lab: "主动回复", val: fmtNum(s.active_reply_count), sub: "群里没 @ 它、自己插的话" },
+    {
+      lab: "平均耗时",
+      val: s.avg_latency_ms != null ? fmtMs(s.avg_latency_ms) : "—",
+      sub: s.max_latency_ms != null ? `最长 ${fmtMs(s.max_latency_ms)}` : "从发出到收到响应",
+    },
+    {
+      lab: "累计 token",
+      val: fmtNum((s.total_input_tokens || 0) + (s.total_output_tokens || 0)),
+      sub: `输入 ${fmtNum(s.total_input_tokens)} · 输出 ${fmtNum(s.total_output_tokens)}`,
+    },
+  ];
+  box.innerHTML = items.map((it) => `
+    <div class="stat">
+      <div class="lab">${esc(it.lab)}</div>
+      <div class="val">${esc(it.val)}</div>
+      <div class="sub">${esc(it.sub)}</div>
+    </div>`).join("");
+}
+
+/* ---------- 上下文用量曲线（原生 Canvas，不依赖外部图表库）---------- */
+let _ctxSeries = [];
+let _scaleMode = "full";   // full = 0~上限（对照压缩线）；auto = 贴着数据（看细节）
+
+function setScale(mode) {
+  _scaleMode = mode;
+  document.querySelectorAll(".sbtn").forEach((b) => {
+    b.classList.toggle("on", b.dataset.mode === mode);
+  });
+  drawChart();
+}
+
+function drawChart() {
+  const cv = document.getElementById("chart");
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 600;
+  const H = 150;
+  cv.width = W * dpr;
+  cv.height = H * dpr;
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+
+  const css = getComputedStyle(document.documentElement);
+  const cMut = css.getPropertyValue("--muted").trim() || "#6b7280";
+  const cAcc = css.getPropertyValue("--accent").trim() || "#3b82f6";
+  const cBad = css.getPropertyValue("--bad").trim() || "#ef4444";
+  const cOk = css.getPropertyValue("--ok").trim() || "#22c55e";
+  const cBorder = css.getPropertyValue("--border").trim() || "#e6e8ec";
+
+  const padL = 58, padR = 12, padT = 12, padB = 20;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+
+  const data = _ctxSeries.slice(-120);
+  document.getElementById("chartCount").textContent = data.length;
+
+  if (!data.length) {
+    g.fillStyle = cMut;
+    g.font = "12.5px system-ui, sans-serif";
+    g.textAlign = "center";
+    g.fillText("还没有请求数据 —— 给机器人发条消息就会出现曲线", W / 2, H / 2);
+    return;
+  }
+
+  const maxCtx = (window.__maxCtx || 32768);
+  const thr = maxCtx * 0.82;
+  const vals = data.map((p) => p.tokens);
+  const dataMin = Math.min(...vals);
+  const dataMax = Math.max(...vals);
+
+  // 两种量程
+  let yMin = 0, yMax;
+  if (_scaleMode === "auto") {
+    const span = Math.max(dataMax - dataMin, 100);
+    yMin = Math.max(0, dataMin - span * 0.25);
+    yMax = dataMax + span * 0.25;
+  } else {
+    yMin = 0;
+    yMax = Math.max(maxCtx, dataMax) * 1.05;
+  }
+
+  const x = (i) => padL + (data.length === 1 ? plotW / 2 : (i / (data.length - 1)) * plotW);
+  const y = (v) => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+  // 网格 + Y 轴刻度
+  g.strokeStyle = cBorder;
+  g.fillStyle = cMut;
+  g.lineWidth = 1;
+  g.font = "10.5px ui-monospace, monospace";
+  g.textAlign = "right";
+  for (let k = 0; k <= 4; k++) {
+    const v = yMin + ((yMax - yMin) / 4) * k;
+    const yy = y(v);
+    g.beginPath();
+    g.moveTo(padL, yy);
+    g.lineTo(W - padR, yy);
+    g.stroke();
+    g.fillText(Math.round(v).toLocaleString(), padL - 6, yy + 3.5);
+  }
+
+  // 82% 压缩线（只有落在可视范围里才画）
+  if (thr >= yMin && thr <= yMax) {
+    g.save();
+    g.strokeStyle = cBad;
+    g.setLineDash([5, 4]);
+    g.beginPath();
+    g.moveTo(padL, y(thr));
+    g.lineTo(W - padR, y(thr));
+    g.stroke();
+    g.restore();
+    g.fillStyle = cBad;
+    g.textAlign = "left";
+    g.font = "10.5px system-ui, sans-serif";
+    g.fillText("82% 压缩线 " + Math.round(thr).toLocaleString(), padL + 4, y(thr) - 4);
+  } else if (_scaleMode === "auto") {
+    g.fillStyle = cBad;
+    g.textAlign = "left";
+    g.font = "10.5px system-ui, sans-serif";
+    const gap = thr - dataMax;
+    g.fillText(
+      `82% 压缩线 ${Math.round(thr).toLocaleString()}（还在上方 ${Math.round(gap).toLocaleString()} token 处）`,
+      padL + 4,
+      padT + 10
+    );
+  }
+
+  // 折线
+  g.strokeStyle = cAcc;
+  g.lineWidth = 2;
+  g.lineJoin = "round";
+  g.beginPath();
+  data.forEach((p, i) => (i ? g.lineTo(x(i), y(p.tokens)) : g.moveTo(x(i), y(p.tokens))));
+  g.stroke();
+
+  // 面积
+  const grad = g.createLinearGradient(0, padT, 0, padT + plotH);
+  grad.addColorStop(0, cAcc + "44");
+  grad.addColorStop(1, cAcc + "05");
+  g.fillStyle = grad;
+  g.beginPath();
+  g.moveTo(x(0), padT + plotH);
+  data.forEach((p, i) => g.lineTo(x(i), y(p.tokens)));
+  g.lineTo(x(data.length - 1), padT + plotH);
+  g.closePath();
+  g.fill();
+
+  // 点（有压缩摘要的用绿色标出来）
+  data.forEach((p, i) => {
+    g.beginPath();
+    g.arc(x(i), y(p.tokens), p.has_summary ? 3.5 : 2.2, 0, Math.PI * 2);
+    g.fillStyle = p.has_summary ? cOk : cAcc;
+    g.fill();
+  });
+
+  // 顶部信息条：让"涨了多少"一眼看到
+  const first = vals[0], last = vals[vals.length - 1];
+  const diff = last - first;
+  const info = document.getElementById("chartInfo");
+  if (info) {
+    info.textContent =
+      `${Math.round(dataMin).toLocaleString()} ~ ${Math.round(dataMax).toLocaleString()} token` +
+      `　首→末：${diff >= 0 ? "+" : ""}${Math.round(diff).toLocaleString()}` +
+      `　占上限 ${(last / maxCtx * 100).toFixed(1)}%` +
+      (_scaleMode === "auto" ? "　（自动缩放到数据范围）" : "　（0 ~ 模型上限）");
+  }
+}
+
+async function refreshChart() {
+  try {
+    const hi = await P.apiGet("/ncd-monitor/history");
+    _ctxSeries = hi.context_series || [];
+    drawChart();
+  } catch (e) {
+    /* 静默，主循环会报错 */
+  }
+}
+window.addEventListener("resize", () => {
+  drawChart();
+  paintRes();   // 迷你趋势图也要按新宽度重画
+});
+
+/* ---------- 发给模型的完整上下文（纵向聊天形式）---------- */
+const SUMMARY_PREFIX = "Our previous history conversation summary:";
+let _ctxItems = [];
+/* 记录哪些块被展开过，这样 5 秒自动刷新不会把用户展开的内容收回去 */
+const _expanded = new Set();
+/* 第一次拿到数据时要自动滚到底部（之后只在用户已贴底时才跟滚） */
+let _ctxFirstPaint = true;
+
+function roleLabel(role, kind) {
+  if (role === "system") return "系统提示（人设/规则）";
+  if (role === "assistant") return kind === "compress" ? "被压缩的旧对话·机器人" : "机器人";
+  if (role === "tool") return "工具返回";
+  if (role === "user") return kind === "compress" ? "被压缩的旧对话·用户" : "用户 / 群友";
+  return role;
+}
+
+/* 展开/收起改用浏览器【原生 details】—— 点击必然生效，不依赖我的 JS 状态。
+   这里只负责把开合状态记下来，这样 5 秒自动刷新后还能保持。 */
+function rememberToggle(el) {
+  const key = el.dataset.key;
+  if (!key) return;
+  if (el.open) _expanded.add(key);
+  else _expanded.delete(key);
+}
+
+/* 思考块的开合。父容器每秒重建，所以必须记 —— 见 _thinkUserOpen 的说明。
+   ★ 这里记的是【用户偏好】而不是"这个块的状态"：块本身每拍都换新的，
+     用户在意的其实是"我到底想不想看思考"。所以一旦他点过，
+     之后每一拍都听他的，不再被"生成完自动收起"覆盖。 */
+function rememberThink(el) {
+  _thinkUserOpen = el.open;
+}
+
+/* ---------- 缩略图 ----------
+   图片原图平均 576 KB，24 张就是 18 MB，直接塞进来会把页面拖垮。
+   所以后端缩到 96px（约 4.4 KB），这里按 hash 缓存在 JS Map：
+   同一张图无论在多少个快照里出现，都只向后端要一次。               */
+const _thumbCache = new Map();   // k -> dataURL
+const _thumbQueue = [];          // 待取队列（限制并发，别一次发 24 个请求）
+const _thumbQueued = new Set();  // 已在队列里的 k，防重复入队
+const _thumbBusy = new Set();
+const _thumbFailed = new Set();  // 取过一次失败就别每 5 秒再刷一次日志
+const THUMB_CONCURRENCY = 4;
+
+function paintThumb(k, data) {
+  document.querySelectorAll('img.thumb[data-k="' + CSS.escape(k) + '"]').forEach((el) => {
+    el.src = data;
+    el.classList.add("loaded");
+  });
+}
+
+function pumpThumbs() {
+  while (_thumbBusy.size < THUMB_CONCURRENCY && _thumbQueue.length) {
+    const k = _thumbQueue.shift();
+    _thumbQueued.delete(k);
+    if (_thumbCache.has(k)) {
+      paintThumb(k, _thumbCache.get(k));
+      continue;
+    }
+    if (_thumbBusy.has(k) || _thumbFailed.has(k)) continue;
+    _thumbBusy.add(k);
+    // ★ key 走【路径】而不是 query —— AstrBot 调 view_handler 时只传
+    //   路由正则捕获的名字，query 参数根本传不进去（见 main.py api_thumb 注释）
+    P.apiGet("/ncd-monitor/thumb/" + encodeURIComponent(k))
+      .then((r) => {
+        // ★ 桥交到前端手里的【不是】整个响应体，而是 (body.data) ?? body：
+        //     dashboard/dist/assets/PluginPagePage-*.js:
+        //         h(n, true, ((r.data)=null?void 0:r.data.data) ?? r.data)
+        //   而 json_response() 又【不加】{status,data} 信封（api/web.py:358
+        //   直接 JSONResponse(data)），所以后端返回的 {"k":..,"data":..}
+        //   会被桥再剥一层 —— 这里拿到的 r 就是那个 data URL 字符串本身。
+        //   原先写成 r.data 于是永远 undefined，缓存永远填不上，
+        //   每 5 秒重刷就重下一次、还每次把 base64 打进控制台。
+        const dataUrl =
+          typeof r === "string" ? r : (r && typeof r.data === "string" ? r.data : "");
+        if (dataUrl && dataUrl.startsWith("data:")) {
+          _thumbCache.set(k, dataUrl);
+          paintThumb(k, dataUrl);
+        } else {
+          // 只报形状，绝不把 base64 打进控制台
+          _thumbFailed.add(k);
+          console.warn("[ncd-monitor] 缩略图返回形状不认识", k, typeof r);
+        }
+      })
+      .catch((e) => {
+        _thumbFailed.add(k);
+        console.warn("[ncd-monitor] 缩略图请求失败", k, e && e.message);
+      })
+      .finally(() => {
+        _thumbBusy.delete(k);
+        pumpThumbs();
+      });
+  }
+}
+
+function collectThumbs() {
+  document.querySelectorAll("img.thumb[data-k]:not([data-queued])").forEach((el) => {
+    const k = el.dataset.k;
+    el.dataset.queued = "1";
+    if (_thumbCache.has(k)) {
+      el.src = _thumbCache.get(k);
+      el.classList.add("loaded");
+      return;
+    }
+    if (_thumbFailed.has(k) || _thumbQueued.has(k)) return;
+    _thumbQueued.add(k);
+    _thumbQueue.push(k);
+  });
+  pumpThumbs();
+}
+
+/* 图片缩略图行 */
+function renderImages(images) {
+  if (!images || !images.length) return "";
+  return (
+    '<div class="imgs">' +
+    images
+      .map((im) => {
+        // q = 来自引用消息（图片本身在 req.image_urls，不在 content 里）
+        const label = (im.q ? "引用图 · " : "") + im.n;
+        return (
+          '<img class="thumb' + (im.q ? " quoted" : "") +
+          '" data-k="' + esc(im.k) + '" alt="' + esc(label) +
+          '" title="' + esc(label) + '">'
+        );
+      })
+      .join("") +
+    "</div>"
+  );
+}
+
+/* ---------- 从系统提醒里把「谁」抠出来 ----------
+   AstrBot 的 system_reminder 是【换行拼接】的（astr_main_agent.py:935
+   用 "\n".join），各部门分别产出：
+
+       User ID: 100000001, Nickname: 示例用户      <- identifier 开关
+       Group name: 示例群聊                        <- group_name_display 开关
+       Current datetime: 2026-11-11 10:30 (CST), Weekday: Sunday
+
+   另外 astrbot_message.MessageMember.__str__ 产出的是【逗号紧贴】版本
+   （"User ID: N,Nickname: X"，逗号后没空格），两条路径都要认。
+
+   ★ 原来整段被压成一行小灰字 + 省略号，
+     而 Nickname 后面紧跟的就是 Current datetime ——
+     一行截断刚好把「群名」和「时间」全吃掉，只剩个名字孤零零挂着。
+     所以这里把身份提出来单独显示，剩下的（时间）才留给提醒行。 */
+const _RE_UID = /User ID:\s*([0-9]+)/i;
+const _RE_NICK = /Nickname:\s*([^,\n]+)/i;
+const _RE_GROUP = /Group name:\s*([^\n]+)/i;
+
+function parseIdentity(reminder) {
+  if (!reminder) return null;
+  const id = (_RE_UID.exec(reminder) || [])[1] || "";
+  const nick = (((_RE_NICK.exec(reminder) || [])[1]) || "").trim();
+  const group = (((_RE_GROUP.exec(reminder) || [])[1]) || "").trim();
+  if (!id && !nick && !group) return null;
+  return { id: id, nick: nick, group: group };
+}
+
+/* 身份已经单独显示了，就从提醒里删掉，避免同一行里重复两遍 */
+function stripIdentity(reminder) {
+  if (!reminder) return "";
+  return reminder
+    .replace(/User ID:\s*[0-9]+\s*,?/gi, "")
+    .replace(/Nickname:\s*[^,\n]+/gi, "")
+    .replace(/Group name:\s*[^\n]+/gi, "")
+    .replace(/^[\s,，·]+/gm, "")
+    .replace(/\n{2,}/g, "\n")
+    .trim();
+}
+
+/* 系统提醒：身份已被抽走，剩下的（时间等）压成一行小灰字，悬停看全文 */
+function renderReminder(r) {
+  if (!r) return "";
+  const rest = stripIdentity(r);
+  if (!rest) return "";
+  const one = rest.replace(/\s*\n\s*/g, " · ");
+  return '<div class="remind" title="' + esc(r) + '">📋 ' + esc(one) + "</div>";
+}
+
+/* ★ AstrBot 自动注入块（extra_user_content_parts）。
+   这一块【不属于 contexts】—— 是 AstrBot 在请求发出前自己塞进来的，
+   最终被并进这条消息一并发给模型。群聊上下文感知（group_icl_enable）走的就是这条路：
+   它把"机器人上次回复之后"的群消息攒在内存 deque 里，触发时整块塞进来。
+   ⚠️ 别和 m.reminder 混：reminder 是内嵌在正文里的 Identifier 提醒。 */
+function renderInject(s) {
+  if (!s) return "";
+  const one = s.replace(/\n{3,}/g, "\n\n").replace(/[ \t]+$/gm, "").trim();
+  if (!one) return "";
+  return (
+    '<details class="inject"><summary>🧩 AstrBot 自动注入 · ' + one.length +
+    " 字 · 并进这条消息发给模型</summary>" +
+    '<div class="inject-body">' + esc(one) + "</div></details>"
+  );
+}
+
+/* 身份标牌：👤 昵称 + QQ 号 */
+function idChip(nick, id) {
+  if (!nick && !id) return "";
+  return (
+    '<span class="idchip nick">👤 ' + esc(nick || "未知") +
+    (id ? '<span class="qq">' + esc(id) + "</span>" : "") +
+    "</span>"
+  );
+}
+
+/* 一条消息 = 平铺的一行，没有气泡、没有左右对齐。
+   ★ 模板里【绝对不能有换行和缩进】：正文所在的元素是 pre-wrap，
+     模板字面量里那些换行/空格会被当成真实文本渲染出来 ——
+     上一版那些大空隙就是这么来的。所以这里全部拼成一行。 */
+function renderOneMessage(m, kind, key) {
+  const text = m.content || "";
+  const role = m.role || "?";
+  const images = m.images || [];
+  const reminder = m.reminder || "";
+  const inject = m.inject || "";
+  const isOpen = _expanded.has(key);
+
+  // 压缩摘要标记 —— 单独样式，一眼看到
+  if (text.startsWith(SUMMARY_PREFIX)) {
+    const body = text.slice(SUMMARY_PREFIX.length).trim();
+    return (
+      '<div class="msg sum">' +
+      '<div class="msg-role">📌 上一轮对话的压缩摘要（模型看到的原文）</div>' +
+      '<div class="msg-body">' + esc(body) + "</div>" +
+      renderInject(inject) +
+      "</div>"
+    );
+  }
+
+  // 系统提示很长 —— 用原生 details，默认折叠
+  if (role === "system") {
+    const summary =
+      '<summary><span class="msg-role sys">' + esc(roleLabel(role, kind)) + "</span>" +
+      '<span class="len">' + text.length + " 字</span>" +
+      '<span class="hint">展开 / 收起</span></summary>';
+    return (
+      '<details class="msg sysblock" data-key="' + esc(key) + '" ' + (isOpen ? "open" : "") +
+      ' ontoggle="rememberToggle(this)">' + summary +
+      '<div class="msg-body">' + esc(text) + "</div></details>" +
+      renderInject(inject)
+    );
+  }
+
+  const isRight = role === "assistant";   // 只用来决定角色标签的颜色
+  const cls = isRight ? "bot" : "user";
+
+  let body;
+  if (!text) {
+    body = "";
+  } else if (text.length > 1200) {
+    body =
+      '<details data-key="' + esc(key) + '" ' + (isOpen ? "open" : "") +
+      ' ontoggle="rememberToggle(this)"><summary>展开全文（' + text.length + ' 字）</summary>' +
+      '<div class="msg-body">' + esc(text) + "</div></details>";
+  } else {
+    body = '<div class="msg-body">' + esc(text) + "</div>";
+  }
+
+  // 用户消息：把身份从提醒里提出来，挂到角色标签右边，一眼认人
+  const who = cls === "user" ? parseIdentity(reminder) : null;
+  const nameChip = who ? idChip(who.nick, who.id) : "";
+
+  return (
+    '<div class="msg ' + cls + '">' +
+    '<div class="msg-role">' + esc(roleLabel(role, kind)) + nameChip + "</div>" +
+    renderImages(images) +
+    body +
+    renderInject(inject) +
+    renderReminder(reminder) +
+    "</div>"
+  );
+}
+
+function renderContexts(items) {
+  _ctxItems = items || [];
+  const box = document.getElementById("contexts");
+  if (!_ctxItems.length) {
+    box.innerHTML = `<div class="ctx-empty">还没有抓到请求 —— 给机器人发条消息就会出现。</div>`;
+    return;
+  }
+
+  // 侧栏是聊天式的：时间【正序】显示，最新的在最下面。
+  // 后端给的是倒序（最新在前），所以先取最新 15 条，再翻回正序。
+  const shown = _ctxItems.slice(0, 15).reverse();
+
+  // 滚动位置处理：
+  //   · 第一次拿到数据            -> 直接滚到底部（看最新）
+  //   · 你本来就贴在底部（看最新）-> 刷新后继续贴底
+  //   · 你往上翻了（在看历史）    -> 保持你当前的位置，不打扰
+  const el = box;
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  const keepScroll = el.scrollTop;
+
+  box.innerHTML = shown.map((it) => {
+    const isC = it.kind === "compress";
+    // 「谁在哪个群」—— 群聊必须带上群名（群名没解析出来就退化成群号）
+    const isGroup = !!(it.group_id || it.group_name);
+    const who =
+      (isGroup
+        ? '<span class="idchip group">🏠 ' +
+          esc(it.group_name || "群 " + (it.group_id || "?")) +
+          "</span>"
+        : '<span class="idchip dm">💬 私聊</span>') +
+      idChip(it.sender_name, it.sender_id);
+    const tools = (it.tools || []).map((t) => `<span class="pill tool">${esc(t)}</span>`).join(" ");
+    const body = it.messages
+      .map((m, i) => renderOneMessage(m, it.kind, `${it.id}:${i}`))
+      .join("");
+
+    const summaryOut = it.summary
+      ? `<div class="sumblock"><b>📝 压缩器产出的摘要：</b>
+${esc(it.summary)}</div>`
+      : "";
+    const resp = it.response || {};
+    const respLine = (!isC && resp.text)
+      ? `<div class="out">↳ 回复：${esc(resp.text.slice(0, 90))}${resp.text.length > 90 ? "…" : ""}</div>`
+      : "";
+    // ★ 思考过程也留在请求历史里（默认收起）—— 实时那块会被下一次生成覆盖，
+    //   想回看"它当时是怎么想的"就得靠这里。
+    const think = (resp.reasoning || "").trim();
+    const thinkLine = think
+      ? `<details class="req-think"><summary>🧠 思考过程 ${think.length} 字</summary>` +
+        `<div class="think-body">${esc(think)}</div></details>`
+      : "";
+
+    return `<div class="req ${isC ? "compress" : ""}">
+      <div class="req-head">
+        <span class="idx">#${it.id}</span>
+        <span>${fmtTime(it.time)}</span>
+        ${isC ? '<span class="pill active">🔻 上下文压缩请求</span>' : ""}
+        <span class="grow"></span>
+        <span class="who">${who}</span>
+        <span>${it.message_count} 条</span>
+        ${it.image_count ? `<span class="pill img">🖼 ${it.image_count} 张图</span>` : ""}
+        <span>${fmtNum(resp.input_tokens != null ? resp.input_tokens : it.estimated_tokens)} token</span>
+        ${tools}
+      </div>
+      <div class="req-body">${body}${summaryOut}</div>
+      <div class="req-foot">
+        ${thinkLine}
+        ${respLine}
+        ${resp.output_tokens != null ? `<span>输出 ${fmtNum(resp.output_tokens)}</span>` : ""}
+        ${resp.cached_tokens ? `<span>缓存 ${fmtNum(resp.cached_tokens)}</span>` : ""}
+        ${resp.tool_calls && resp.tool_calls.length ? `<span>工具 ${esc(resp.tool_calls.join(", "))}</span>` : ""}
+        ${it.error ? `<span style="color:var(--bad)">${esc(it.error)}</span>` : ""}
+        ${it.has_summary ? '<span class="pill tool">上下文里含压缩摘要</span>' : ""}
+      </div>
+    </div>`;
+  }).join("");
+
+  // 贴底的话就跟着滚到最新；否则保持原位
+  const wasFirst = _ctxFirstPaint;
+  if (atBottom || wasFirst) {
+    el.scrollTop = el.scrollHeight;
+  } else {
+    el.scrollTop = keepScroll;
+  }
+
+  // ★ 这里原本还有一段"让 .col-side 整体滚到底"的逻辑。
+  //   现在右栏改成了 flex + overflow:hidden（为了把实时输出钉在底部），
+  //   列表由 #contexts 自己滚，aside 已经滚不动了 —— 那段成了死代码，删掉。
+  _ctxFirstPaint = false;
+
+  // 缩略图：新出现的才去取，已缓存的直接贴上去
+  collectThumbs();
+}
+
+async function refreshContexts() {
+  try {
+    const r = await P.apiGet("/ncd-monitor/contexts");
+    renderContexts(r.items);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+/* ---------- 主循环 ---------- */
+async function tick() {
+  try {
+    const [ov, hi, sm] = await Promise.all([
+      P.apiGet("/ncd-monitor/overview"),
+      P.apiGet("/ncd-monitor/history"),
+      P.apiGet("/ncd-monitor/summaries"),
+    ]);
+    renderLinks(ov);
+    renderContext(ov);
+    renderModel(ov);
+    // 资源卡不在这里渲染 —— 它走 1 秒的 refreshSys()，
+    // 这里再写一次 #resBox 会把它的趋势图和数据一起冲掉
+    renderSL(ov);
+    renderSessions(ov);
+    renderSummaries(sm.items, ov);
+    renderCalls(hi.llm_calls);
+    renderStats(ov);
+    window.__maxCtx = (ov.context || {}).max || 32768;
+    _ctxSeries = hi.context_series || [];
+    drawChart();
+
+    // 上下文快照单独拉（数据大）
+    await refreshContexts();
+
+    document.getElementById("meta").textContent =
+      `更新于 ${fmtTime(ov.server_time)} · 每 5 秒自动刷新`;
+    document.getElementById("liveDot").style.background = "var(--ok)";
+    first = false;
+  } catch (e) {
+    console.error(e);
+    document.getElementById("meta").textContent = "拉取失败：" + (e && e.message ? e.message : e);
+    document.getElementById("liveDot").style.background = "var(--bad)";
+  }
+}
+
+/* ---------- 启动 ---------- */
+/* 不依赖 ready()：万一 context 一直没到，也要能跑起来。
+   ready() 到达后再补一次（拿主题/语言）。 */
+if (window.AstrBotPluginPage) {
+  tick();
+  setInterval(tick, 5000);
+  // 资源卡单独 1 秒一次（只读后端内存，很便宜）
+  refreshSys();
+  setInterval(refreshSys, 1000);
+  P.ready()
+    .then(() => tick())
+    .catch((e) => console.warn("bridge ready 失败:", e));
+} else {
+  document.getElementById("meta").textContent =
+    "桥接 SDK 未加载（检查 /api/plugin/page/bridge-sdk.js 是否可达）";
+  document.getElementById("liveDot").style.background = "var(--bad)";
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+diff --git a/core/tools/cron_tools.py b/core/tools/cron_tools.py
+--- a/core/tools/cron_tools.py
++++ b/core/tools/cron_tools.py
+@@ -106,6 +106,14 @@
+             return "error: cron manager is not available."
+ 
+         action = str(kwargs.get("action") or "").strip().lower()
++        # [本地修改 2026-10-10] 小模型（如 gemma-4-e4b）调用本工具时常漏传必填的
++        # action，导致返回 "action must be one of ..." 而建不成任务。当 action 缺失、
++        # 但参数明显表示要建任务时（给了 note / cron_expression / run_at），
++        # 按 create 处理。AstrBot 升级会覆盖本文件，升级后需重新应用此修改。
++        if not action and (
++            kwargs.get("note") or kwargs.get("cron_expression") or kwargs.get("run_at")
++        ):
++            action = "create"
+         if action == "create":
+             cron_expression = kwargs.get("cron_expression")
+             run_at = kwargs.get("run_at")
