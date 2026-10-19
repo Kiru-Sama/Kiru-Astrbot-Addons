@@ -13,7 +13,7 @@
     python group_admin_commands.py              # 打补丁（幂等，重复跑不会叠加）
     python group_admin_commands.py --revert     # 撤掉补丁
 
-    python group_admin_commands.py --root "F:\\NapCatDesk\\ASTRBOT"
+    python group_admin_commands.py --root "D:\\AstrBot"
         # 显式指定 AstrBot 根目录（默认自动往上找 site-packages/astrbot）
 
 ★ AstrBot 升级会覆盖 site-packages，升级后重跑一次即可；`--check` 适合放进启动脚本。
