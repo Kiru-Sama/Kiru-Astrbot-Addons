@@ -1,0 +1,6 @@
+name: astrbot_plugin_ncd_session
+display_name: 链路会话
+desc: 补上聊天里的对话管理：/会话 列表、/切换、/命名、/删除（AstrBot 原生只有 /new）。
+author: 本地自用
+version: 1.0.0
+repo: ""

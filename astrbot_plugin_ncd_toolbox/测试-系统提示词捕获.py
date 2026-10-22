@@ -43,7 +43,7 @@ def make_plugin(conf=None):
     return inst
 
 
-def make_req(sp="你是丝瓜，说话简短。"):
+def make_req(sp="你是测试人格，说话简短。"):
     return types.SimpleNamespace(
         system_prompt=sp,
         func_tool=None,
@@ -72,7 +72,7 @@ if inst._prompt_log:
           "★提示不在捕获到的系统提示词里")
     check("用例1", rec["chars"] == len(req.system_prompt), "字符数记错了")
     check("用例1", rec["umo"] == "x:FriendMessage:1", "会话没记对")
-    check("用例1", rec["prompt"].startswith("你是丝瓜"), "原文被破坏（必须完整保留）")
+    check("用例1", rec["prompt"].startswith("你是测试人格"), "原文被破坏（必须完整保留）")
 
 # =====================================================================
 #  用例 2：没有提示时 has_hint 必须是 False
@@ -84,7 +84,7 @@ asyncio.run(inst2._tune_request(make_event(), req2))
 rec2 = inst2._prompt_log[0]
 print(f"  has_hint = {rec2['has_hint']}  chars = {rec2['chars']}")
 check("用例2", rec2["has_hint"] is False, "★没注入却报 has_hint=True（标志没意义）")
-check("用例2", rec2["prompt"] == "你是丝瓜，说话简短。", "留空时不该往提示词里加东西")
+check("用例2", rec2["prompt"] == "你是测试人格，说话简短。", "留空时不该往提示词里加东西")
 
 # =====================================================================
 #  用例 3：关掉菜单时也不注入

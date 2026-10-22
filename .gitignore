@@ -15,5 +15,5 @@ Thumbs.db
 kb/core/
 kb/full/
 !kb/README.md
-*.zip
-
+*.zip
+kb/docs/

@@ -1,0 +1,146 @@
+{
+  "66": {
+    "inputs": {
+      "seed": 6231890156980,
+      "steps": 10,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "73",
+        0
+      ],
+      "positive": [
+        "80",
+        0
+      ],
+      "negative": [
+        "81",
+        0
+      ],
+      "latent_image": [
+        "82",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器",
+      "cnr_id": "comfy-core",
+      "ver": "0.34.0"
+    }
+  },
+  "73": {
+    "inputs": {
+      "unet_name": "Krea2\\Krea2-MuseByStable_v30Turbo_fp8.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器",
+      "cnr_id": "comfy-core",
+      "ver": "0.25.0"
+    }
+  },
+  "75": {
+    "inputs": {
+      "samples": [
+        "66",
+        0
+      ],
+      "vae": [
+        "77",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码",
+      "cnr_id": "comfy-core",
+      "ver": "0.34.0"
+    }
+  },
+  "76": {
+    "inputs": {
+      "clip_name": "qwen3vl_4b_fp8_scaled.safetensors",
+      "type": "krea2",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP",
+      "cnr_id": "comfy-core",
+      "ver": "0.25.0"
+    }
+  },
+  "77": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.25.0"
+    }
+  },
+  "79": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "75",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "80": {
+    "inputs": {
+      "text": "A gentle anime-style illustration of Suzuran from Arknights in her “Ode to Spring” outfit, a simple and practical countryside dress. She wears a blue frilled hairband, a small red ribbon tied at her neck, a white shirt under an open brown cardigan, and a high-waisted cyan skirt. Her fox ears and nine tails are soft and fluffy, and her expression is bright and relaxed. She is strolling along a sunlit woodland path, with dappled light filtering through the leaves. The mood is warm, everyday, and quietly joyful, as if she is enjoying a leisurely spring outing with a friend.",
+      "clip": [
+        "76",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "正面",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "81": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "76",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "负面",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "82": {
+    "inputs": {
+      "width": 720,
+      "height": 960,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  }
+}

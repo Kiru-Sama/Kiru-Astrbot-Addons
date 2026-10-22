@@ -1,0 +1,56 @@
+{
+  "tooldisplay": {
+    "type": "bool",
+    "default": false,
+    "description": "发送工具调用气泡（🔨 调用工具: xxx）",
+    "hint": "开启后，模型每调用一次工具，先在会话里发一条气泡，再继续。默认关闭。\n\n★ 这条不用重启、不用重载：改完下一轮立即生效。\n★ 实现方式是自己挂 hook 发消息，不去改 AstrBot 的 provider_settings.show_tool_use_status（那个值在 pipeline 初始化时就被拷走了，运行时改不生效，只能重启）。\n★ 如果哪天你在 WebUI 里把原生「显示工具调用状态」打开了，本插件会自动让路，不会重复发两条。\n★ 它也能用 /tooldisplay on|off 直接切，切完值会写回这里。"
+  },
+  "tooldisplay_show_args": {
+    "type": "bool",
+    "default": true,
+    "description": "气泡里是否带上工具参数",
+    "hint": "默认带上（截断到 90 字）。关掉就只显示工具名。\n参数里常含长提示词（画图那种几百字），嫌刷屏就关掉这一项。"
+  },
+  "tooldisplay_show_result": {
+    "type": "bool",
+    "default": false,
+    "description": "工具返回后再补一条带结果摘要的气泡",
+    "hint": "默认关闭。开启后变成「调用时先不发，等结果回来发一条（工具名 + 结果前 N 字）」，和 AstrBot 原生的「显示工具调用结果」行为一致。\n结果会截断，不会把整段工具输出刷到群里。"
+  },
+  "tooldisplay_result_chars": {
+    "type": "int",
+    "default": 70,
+    "description": "结果气泡里保留多少字",
+    "hint": "默认 70 字，和 AstrBot 原生一致。调大能看到更多，但群聊里容易被刷屏。"
+  },
+  "compact_keep_rounds": {
+    "type": "int",
+    "default": 5,
+    "description": "/compact 默认保留最近几轮原文",
+    "hint": "默认 5 轮（一轮 = 你问 + 它答 + 中间的工具调用）。\n早于这几轮的内容会被模型压成一段摘要，放在历史开头。\n临时换别的轮数：/compact 8。"
+  },
+  "compact_min_rounds": {
+    "type": "int",
+    "default": 8,
+    "description": "对话少于这么多轮时不做压缩",
+    "hint": "默认 8 轮。轮数太少时压缩收益抵不上一次摘要请求的开销，还会白白浪费一次模型调用。\n拦下来时会告诉你当前多少轮、以及真想压该敲哪个数字。"
+  },
+  "compact_chunk_chars": {
+    "type": "int",
+    "default": 12000,
+    "description": "单次摘要请求最多喂多少字符",
+    "hint": "默认 12000 字符。历史比这长就分批摘要，再对分批结果做一次合并压缩（最多两级）。\n调小更省单次上下文，但请求次数变多；调太大可能超过模型上下文窗口直接报错。"
+  },
+  "compact_summary_chars": {
+    "type": "int",
+    "default": 1200,
+    "description": "摘要目标字数（写进提示词约束）",
+    "hint": "默认 1200 字。这是「要求模型压到多少」，不是硬截断。\n压太短会丢细节（尤其名字、型号、路径这类关键事实）；压太长等于没压。"
+  },
+  "time_inject": {
+    "type": "bool",
+    "default": false,
+    "description": "把真实时间注入给模型（/get time 的开关状态）",
+    "hint": "开启后每轮在系统提示词末尾追加：\n<system_reminder>当前时间：2026-10-21 12:31:05（周三，Asia/Shanghai）</system_reminder>\n\n★ 时区取 AstrBot 主配置里的 timezone（当前是 Asia/Shanghai），配错会退回本机时区。\n★ 同样不用重启：下一轮立即生效。\n★ AstrBot 自己也有个 datetime_system_prompt 开关，开了的话本插件会自动让路，不会注入两次。\n★ 也能用 /get time on|off 切，切完值会写回这里。"
+  }
+}

@@ -48,9 +48,11 @@
     min-width: 0;          /* 关键：允许 flex 子项收缩，不然宽表格会把布局撑破 */
   }
   .col-side {
-    flex: 0 0 25%;
-    min-width: 300px;
-    max-width: 520px;
+    /* ★ 2026-10-21：并发会话要并排看 → 右栏加宽（左边相应窄一点）。
+       34% 在 1920 宽下约 650px，能并排放下两路正文；再窄就退回单列。 */
+    flex: 0 0 34%;
+    min-width: 380px;
+    max-width: 780px;
     position: sticky;
     top: 14px;
     max-height: calc(100vh - 28px);
@@ -324,12 +326,44 @@
     background: color-mix(in srgb, var(--accent) 8%, var(--track));
     border-left: 3px solid var(--accent);
   }
+  /* ★ 多路并排时这块要彻底让位（[hidden] 会被同优先级的 display 规则顶掉，
+     这里显式钉死；JS 里另外还会设一次 style.display，双保险） */
+  .live-body[hidden] { display: none !important; }
   .live-body.done { border-left-color: var(--ok); }
   /* 提前结束用 warn 不用 bad：多数是消费者提前关闭，属正常收尾，不该看着像报错 */
   .live-body.fail { border-left-color: var(--warn); }
   .live-body .live-empty { color: var(--muted); font-style: italic; }
 
-  /* ---- 并发 / 排队两个状态胶囊 ----
+  /* ---- 并发时的其它会话：主卡只显示聚焦那路，其余在这里并列 ---- */
+.live-stack {
+  display: flex; flex-direction: row; gap: 8px; margin-top: 8px;
+  overflow-x: auto; align-items: stretch;
+}
+.live-stack .st-row {
+  flex: 1 1 0; min-width: 220px; max-width: 50%;
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px;
+  cursor: pointer; background: rgba(127, 127, 127, 0.04);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.live-stack .st-row:hover { border-color: var(--accent); }
+.live-stack .st-row.done { opacity: 0.72; }
+.live-stack .st-head {
+  display: flex; gap: 8px; font-size: 12px; color: var(--muted);
+  justify-content: space-between; flex: none; min-width: 0;
+}
+.live-stack .st-head b {
+  color: var(--text); font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; flex: 1 1 auto;
+}
+.live-stack .st-head span { white-space: nowrap; flex: none; }
+.live-stack .st-text {
+  margin-top: 4px; font-size: 12px; color: var(--text);
+  white-space: pre-wrap; word-break: break-word;
+  overflow: auto; max-height: 42vh; flex: 1 1 auto; line-height: 1.45;
+}
+
+/* ---- 并发 / 排队两个状态胶囊 ----
      只在真的发生时才由 renderGateChips() 渲染出来，平时这两个元素是空的。
      ★ 用胶囊而不是大按钮：它属于"标题行的附加状态"，不该长得比标题还重。 */
   .gate-chips { display: inline-flex; gap: 5px; align-items: center; }
@@ -609,6 +643,12 @@
 
   <!-- 发给模型的完整上下文（已移到右侧栏）-->
 
+  <!-- 搜索 / 抓取统计（来自链路工具箱） -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>搜索 / 抓取 <span class="h2sub">来自链路工具箱</span></h2>
+    <div id="searchBox" class="empty">还没有搜索记录。</div>
+  </div>
+
   <!-- 模型 + 资源 -->
   <div class="grid g2" style="margin-bottom:14px">
     <div class="card">
@@ -691,6 +731,7 @@
         <span class="h2sub" id="liveSub"></span>
       </h2>
       <div class="live-body" id="liveBody"></div>
+      <div class="live-stack" id="liveStack" hidden></div>
       <div class="gate-queue" id="queueBox" hidden></div>
     </div>
   </aside>
@@ -1184,6 +1225,61 @@ function renderQueueBox() {
       .join("");
 }
 
+/* 并发时把【其它正在生成的会话】也列出来（主卡显示当前聚焦那路）。
+   ★ 为什么不在主卡里画多份：主卡每秒被 innerHTML 重建，多份会把思考块的
+     展开状态、滚动位置全搅乱；这里只做"缩略 + 点一下切过去"。 */
+function renderLiveStack() {
+  const box = document.getElementById("liveStack");
+  if (!box) return;
+  // ★ 只有一路时这块【不显示】——单栏已经把它画了，再画一遍就是重复。
+  //   （2026-10-21 实测踩过：去掉这条判断后，单路也会冒出一张重复的小卡）
+  if (_lastLives.length < 2) {
+    box.hidden = true;
+    box.innerHTML = "";
+    return;
+  }
+  // ★ 多路时【全部】并排显示（包括主卡正在显示的那路）。
+  const others = _lastLives;
+  box.hidden = false;
+  // ★ 每秒重绘：先把每路读到哪儿记下来，重绘后还回去（否则会跳回顶部）
+  const keepScroll = {};
+  box.querySelectorAll(".st-row").forEach((el) => {
+    const pane = el.querySelector(".st-text");
+    if (pane) keepScroll[el.dataset.key] = pane.scrollTop;
+  });
+  box.innerHTML = others
+    .map((x) => {
+      const who = x.group_name
+        ? "🏠 " + x.group_name
+        : (x.sender_name ? "👤 " + x.sender_name : (x.label || x.key));
+      const state = x.done
+        ? (x.ok === false ? "提前结束" : (x.sent ? "已发出" : "已生成完"))
+        : "生成中…";
+      // ★ 并排展示要看得到正文，不能只给一句摘要：留最近 800 字，
+      //   面板里这块自己滚（新内容在底部）。
+      const snippet = String(x.text || "").slice(-800);
+      return '<div class="st-row' + (x.done ? " done" : "") +
+        '" data-key="' + esc(x.key) + '">' +
+        '<div class="st-head"><b>' + esc(who) + "</b><span>" + esc(state) +
+        " · " + x.elapsed + "s · " + x.chars + " 字</span></div>" +
+        '<div class="st-text">' + esc(snippet || "…") + "</div></div>";
+    })
+    .join("");
+  box.querySelectorAll(".st-row").forEach((el) => {
+    // 生成中的这路跟着最新内容走；已结束的保持原位不打扰阅读
+    const pane = el.querySelector(".st-text");
+    if (pane) {
+      if (!el.classList.contains("done")) pane.scrollTop = pane.scrollHeight;
+      else if (el.dataset.key in keepScroll) pane.scrollTop = keepScroll[el.dataset.key];
+    }
+    el.onclick = () => {
+      _liveSelKey = el.dataset.key;
+      _liveFollow = true;
+      paintLive();
+    };
+  });
+}
+
 function renderLive(live, lives, gate) {
   _lastLives = Array.isArray(lives) ? lives : (live ? [live] : []);
   _lastGate = gate || null;
@@ -1199,6 +1295,8 @@ function paintLive() {
 
   renderGateChips();
   renderQueueBox();
+  // ★ 防御：离线单测会把 paintLive 单独抽出来跑，那里可能没有这个函数
+  if (typeof renderLiveStack === 'function') renderLiveStack();
 
   const live = currentLive();
 
@@ -1206,6 +1304,8 @@ function paintLive() {
   if (!live) {
     card.hidden = true;
     _livePrevDone = true;
+    body.hidden = false;
+    renderLiveStack();          // 没有在生成的了 → 把并列的小卡也收掉
     return;
   }
 
@@ -1233,6 +1333,12 @@ function paintLive() {
   body.classList.toggle("done", nowDone);
   body.classList.toggle("fail", nowDone && live.ok === false);
 
+  /* ★ 多路并发 → 正文交给下面的并列区（每路一列），单卡这里让位。
+     只有一路时保持原样（单栏大字，跟着光标滚动）。 */
+  const multiView = _lastLives.length > 1;
+  body.hidden = multiView;
+  body.style.display = multiView ? "none" : "";
+
   const who = live.group_name
     ? "🏠 " + live.group_name
     : (live.sender_name ? "👤 " + live.sender_name : (live.label || ""));
@@ -1248,7 +1354,8 @@ function paintLive() {
             ? "提前结束"
             : (live.sent ? "已发出 " + live.sent : "已生成完")));
   if (title) {
-    if (compressing) title.textContent = "⛏ 正在压缩中";
+    if (multiView) title.textContent = "并发输出（" + _lastLives.length + " 路）";
+    else if (compressing) title.textContent = "⛏ 正在压缩中";
     else if (isCompress && nowDone) title.textContent = "压缩已完成";
     else title.textContent = nowDone ? "最近一次输出" : "模型正在输出";
   }
@@ -2049,6 +2156,45 @@ async function refreshContexts() {
   }
 }
 
+/* ---------- 搜索 / 抓取统计（工具箱落盘的数据） ---------- */
+function renderSearchBox(d) {
+  const box = document.getElementById("searchBox");
+  if (!box) return;
+  if (!d || d.ok === false) {
+    box.className = "empty";
+    box.textContent = "工具箱统计不可用" + (d && d.error ? "：" + d.error : "");
+    return;
+  }
+  if (d.empty) {
+    box.className = "empty";
+    box.textContent = "还没有搜索记录。";
+    return;
+  }
+  const n = (v) => Number(v || 0).toLocaleString();
+  const ms = (v) => (v >= 1000 ? (v / 1000).toFixed(2) + " 秒" : Math.round(v) + " ms");
+  const rows = [
+    ["搜索次数", n(d.search)],
+    ["平均耗时", ms(d.avg_search_ms || 0)],
+    ["平均结果数", Number(d.avg_results || 0).toFixed(1)],
+    ["抓正文次数", n(d.fetch)],
+    ["平均抓取耗时", ms(d.avg_fetch_ms || 0)],
+    ["平均正文长度", n(d.avg_fetch_chars) + " 字"],
+    ["总结 / 缓存命中 / 批量读", `${n(d.summarize)} / ${n(d.cache_hit)} / ${n(d.read_many)}`],
+  ];
+  box.className = "";
+  box.innerHTML = rows
+    .map(([k, v]) => `<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`)
+    .join("");
+}
+
+async function refreshSearchBox() {
+  try {
+    renderSearchBox(await P.apiGet("/ncd-monitor/search-stats"));
+  } catch (e) {
+    /* 统计拿不到不影响主面板 */
+  }
+}
+
 /* ---------- 主循环 ---------- */
 async function tick() {
   try {
@@ -2067,6 +2213,7 @@ async function tick() {
     renderSummaries(sm.items, ov);
     renderCalls(hi.llm_calls);
     renderStats(ov);
+    refreshSearchBox();
     window.__maxCtx = (ov.context || {}).max || 32768;
     _ctxSeries = hi.context_series || [];
     drawChart();

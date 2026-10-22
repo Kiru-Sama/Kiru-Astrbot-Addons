@@ -135,7 +135,7 @@ print("\n===== 用例 4：开关与接线 =====")
 
 def make_req():
     return types.SimpleNamespace(
-        system_prompt="你是丝瓜。",
+        system_prompt="你是测试人格。",
         func_tool=FakeToolSet(ALL),
         extra_user_content_parts=[],
     )
@@ -177,7 +177,7 @@ req5 = make_req()
 inst5._inject_menu_hint(req5)
 print(f"  注入后 system_prompt 长度 {len(req5.system_prompt)}")
 check("用例5", "ncd_tools" in req5.system_prompt, "★ 默认提示里没提到 ncd_tools")
-check("用例5", req5.system_prompt.startswith("你是丝瓜。"), "不该破坏原系统提示词")
+check("用例5", req5.system_prompt.startswith("你是测试人格。"), "不该破坏原系统提示词")
 
 # 幂等：再来一次不应变长
 before_len = len(req5.system_prompt)
@@ -196,7 +196,7 @@ inst5c = make_plugin({"tool_menu_hint": "   "})
 req5c = make_req()
 inst5c._inject_menu_hint(req5c)
 print(f"  留空时 system_prompt = {req5c.system_prompt!r}")
-check("用例5", req5c.system_prompt == "你是丝瓜。", "★ 留空仍注入了")
+check("用例5", req5c.system_prompt == "你是测试人格。", "★ 留空仍注入了")
 check("用例5", inst5c._menu_hint_text() == "", "留空时 _menu_hint_text 应返回空串")
 
 # 关掉菜单时不该注入（只在 tool_menu 开时注入）

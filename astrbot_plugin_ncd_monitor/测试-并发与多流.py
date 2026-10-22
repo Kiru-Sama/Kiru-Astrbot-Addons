@@ -111,20 +111,21 @@ async def main() -> int:
 
     evs = [FakeEvent(U(n)) for n in (1, 2, 3)]
 
-    # ══════════════ 用例 0：默认值必须是 1 ══════════════
-    # ★ 这是一条"防呆"断言：默认值 2 会让两个会话同时把请求压给 LM Studio，
-    #   而它以 kv_unified=true 加载时 KV 池是【共享】的 —— 实测两个各带几千
-    #   token 的请求同时进去会直接报 "Context size has been exceeded"。
-    #   所以默认必须是 1（串行 + 排队）。要改大，请连同这条断言一起改，
-    #   并且先确认上下文窗口真的够。
-    print("===== 用例 0：默认并发上限应为 1 =====")
+    # ══════════════ 用例 0：默认不排队（limit = 0）══════════════
+    # ★ 2026-10-21 需求变更：用户要求「对话不排队，生图才排队」——
+    #   生图的串行由绘图插件自己的渲染锁负责，对话这边不再串行。
+    #   默认值从 1 改成 0（0 = 不限制）。
+    # ★ 但"显式配成 1 就串行"这条行为【没有变】，下面用例 3/5/6/7 用的都是
+    #   max_concurrent_replies=1 或 2，仍然在钉 FIFO 与排队超时。
+    #   想改回默认串行：把 _conf_gate_limit 的默认改回 1，并把这条断言改回 1。
+    print("===== 用例 0：默认不排队（limit = 0）=====")
     probe = cls.__new__(cls)
     probe._conf = {}
     got_default = probe._conf_gate_limit()
     print(f"  空配置时的默认 limit = {got_default}")
-    if got_default != 1:
+    if got_default != 0:
         bad.append(
-            f"用例0：默认并发上限应为 1（共享 KV 池会顶穿），实际 {got_default}"
+            f"用例0：默认应为 0（对话不排队），实际 {got_default}"
         )
 
     # ══════════════ 用例 1：最多 2 并发，第 3 个排队 ══════════════

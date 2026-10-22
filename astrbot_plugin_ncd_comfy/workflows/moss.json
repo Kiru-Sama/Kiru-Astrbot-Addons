@@ -1,0 +1,163 @@
+{
+  "1": {
+    "inputs": {
+      "vae_name": "flux2-vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.9.2"
+    }
+  },
+  "2": {
+    "inputs": {
+      "clip_name": "mossImage_sft_txt_int8.safetensors",
+      "type": "moss_image",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP",
+      "cnr_id": "comfy-core",
+      "ver": "0.9.2"
+    }
+  },
+  "3": {
+    "inputs": {
+      "seed": 335647348923049,
+      "steps": 50,
+      "cfg": 4.5,
+      "sampler_name": "er_sde",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "30",
+        0
+      ],
+      "positive": [
+        "21",
+        0
+      ],
+      "negative": [
+        "31",
+        0
+      ],
+      "latent_image": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器",
+      "cnr_id": "comfy-core",
+      "ver": "0.9.2"
+    }
+  },
+  "5": {
+    "inputs": {
+      "width": 720,
+      "height": 960,
+      "batch_size": 1
+    },
+    "class_type": "EmptyFlux2LatentImage",
+    "_meta": {
+      "title": "空Latent图像（Flux2）",
+      "cnr_id": "comfy-core",
+      "ver": "0.9.2"
+    }
+  },
+  "8": {
+    "inputs": {
+      "samples": [
+        "3",
+        0
+      ],
+      "vae": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码",
+      "cnr_id": "comfy-core",
+      "ver": "0.9.2"
+    }
+  },
+  "18": {
+    "inputs": {
+      "images": [
+        "8",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "预览图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.17.0"
+    }
+  },
+  "21": {
+    "inputs": {
+      "text": "A gentle anime-style illustration of Suzuran from Arknights in her “Ode to Spring” outfit, a simple and practical countryside dress. She wears a blue frilled hairband, a small red ribbon tied at her neck, a white shirt under an open brown cardigan, and a high-waisted cyan skirt. Her fox ears and nine tails are soft and fluffy, and her expression is bright and relaxed. She is strolling along a sunlit woodland path, with dappled light filtering through the leaves. The mood is warm, everyday, and quietly joyful, as if she is enjoying a leisurely spring outing with a friend.",
+      "clip": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "正面",
+      "cnr_id": "comfy-core",
+      "ver": "0.9.2"
+    }
+  },
+  "23": {
+    "inputs": {
+      "unet_name": "MOSS\\mossImage_sft_pruned_int8.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器",
+      "cnr_id": "comfy-core",
+      "ver": "0.9.2"
+    }
+  },
+  "30": {
+    "inputs": {
+      "double_layers": "0",
+      "single_layers": "22",
+      "start_percent": 0.01,
+      "end_percent": 1,
+      "model": [
+        "23",
+        0
+      ]
+    },
+    "class_type": "SkipLayerGuidanceDiTSimple",
+    "_meta": {
+      "title": "跳过层引导（DiT简化）",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  },
+  "31": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "2",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "负面",
+      "cnr_id": "comfy-core",
+      "ver": "0.9.2"
+    }
+  }
+}

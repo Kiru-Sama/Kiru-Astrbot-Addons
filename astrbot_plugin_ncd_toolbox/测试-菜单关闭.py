@@ -68,7 +68,7 @@ def make_inst(conf: dict):
 def make_req(names) -> types.SimpleNamespace:
     return types.SimpleNamespace(
         func_tool=FakeToolSet(names),
-        system_prompt="你是丝瓜。",
+        system_prompt="你是测试人格。",
     )
 
 

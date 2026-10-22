@@ -1,0 +1,146 @@
+{
+  "30": {
+    "inputs": {
+      "samples": [
+        "83",
+        0
+      ],
+      "vae": [
+        "31",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码",
+      "cnr_id": "comfy-core",
+      "ver": "0.27.0"
+    }
+  },
+  "31": {
+    "inputs": {
+      "vae_name": "qwen_image_vae.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.40"
+    }
+  },
+  "38": {
+    "inputs": {
+      "width": 720,
+      "height": 960,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.40"
+    }
+  },
+  "43": {
+    "inputs": {
+      "clip_name": "qwen_3_06b_base.safetensors",
+      "type": "stable_diffusion",
+      "device": "default"
+    },
+    "class_type": "CLIPLoader",
+    "_meta": {
+      "title": "加载CLIP",
+      "cnr_id": "comfy-core",
+      "ver": "0.11.0"
+    }
+  },
+  "80": {
+    "inputs": {
+      "unet_name": "anima\\novaAnimeAM_v6029B.safetensors",
+      "weight_dtype": "default"
+    },
+    "class_type": "UNETLoader",
+    "_meta": {
+      "title": "UNet加载器",
+      "cnr_id": "comfy-core",
+      "ver": "0.11.0"
+    }
+  },
+  "81": {
+    "inputs": {
+      "text": "A gentle anime-style illustration of Suzuran from Arknights in her “Ode to Spring” outfit, a simple and practical countryside dress. She wears a blue frilled hairband, a small red ribbon tied at her neck, a white shirt under an open brown cardigan, and a high-waisted cyan skirt. Her fox ears and nine tails are soft and fluffy, and her expression is bright and relaxed. She is strolling along a sunlit woodland path, with dappled light filtering through the leaves. The mood is warm, everyday, and quietly joyful, as if she is enjoying a leisurely spring outing with a friend.",
+      "clip": [
+        "43",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "正面",
+      "cnr_id": "comfy-core",
+      "ver": "0.34.0"
+    }
+  },
+  "82": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "43",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "负面",
+      "cnr_id": "comfy-core",
+      "ver": "0.34.0"
+    }
+  },
+  "83": {
+    "inputs": {
+      "seed": 1040258226610984,
+      "steps": 22,
+      "cfg": 5.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "80",
+        0
+      ],
+      "positive": [
+        "81",
+        0
+      ],
+      "negative": [
+        "82",
+        0
+      ],
+      "latent_image": [
+        "38",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器",
+      "cnr_id": "comfy-core",
+      "ver": "0.34.0"
+    }
+  },
+  "84": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "30",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.34.0"
+    }
+  }
+}

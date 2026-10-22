@@ -1,4 +1,4 @@
-﻿"""链路工具箱：自建网页检索 + QQ 收藏表情发送 + 本机 SDXL 画图。
+"""链路工具箱：自建网页检索 + QQ 收藏表情发送 + 本机 SDXL 画图。
 
 这几件事都刻意不走 AstrBot 的内置工具：
   · 内置的 web_search_* 全部依赖第三方付费 API key，且只回 URL + 摘要，抓不到正文；
@@ -186,6 +186,46 @@ def _domain_of(url: str) -> str:
         return ""
 
 
+_STATS_PATH = Path(ASTRBOT_ROOT) / "data" / "plugin_data" / "ncd_toolbox" / "search_stats.json"
+_STATS: dict[str, float] = {
+    "search": 0, "search_ms": 0, "search_results": 0,
+    "fetch": 0, "fetch_ms": 0, "fetch_chars": 0,
+    "summarize": 0, "cache_hit": 0, "read_many": 0,
+}
+_STOPWORDS = {"什么", "怎么", "为什么", "如何", "哪些", "可以", "一下", "帮我", "搜", "查", "的", "了", "是", "和", "吗"}
+
+
+def keywords_of(text: str, limit: int = 8) -> list[str]:
+    """从一句话里挑关键词（去掉疑问词/虚词），给正文取窗口用。"""
+    src = str(text or "")
+    # ★ 中文没有空格：先把疑问词/虚词当子串删掉，否则「帮我搜一下」会整句变成一个"关键词"
+    for w in sorted(_STOPWORDS, key=len, reverse=True):
+        if len(w) >= 2:
+            src = src.replace(w, " ")
+    words = re.findall(r"[\w\u4e00-\u9fff]{2,}", src)
+    out: list[str] = []
+    for w in words:
+        if w in _STOPWORDS or w.lower() in _STOPWORDS:
+            continue
+        if w not in out:
+            out.append(w)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def stats_add(**fields: float) -> None:
+    """累加统计并落盘（失败不影响主流程）。"""
+    try:
+        for k, v in fields.items():
+            _STATS[k] = _STATS.get(k, 0) + v
+        _STATS["updated"] = time.time()
+        _STATS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _STATS_PATH.write_text(json.dumps(_STATS, ensure_ascii=False), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def dedupe_results(items: list[dict], per_domain: int = MAX_PER_DOMAIN) -> list[dict]:
     """按网址去重 + 限制单站点条数，保持原顺序。
 
@@ -285,12 +325,16 @@ MENU_TOOL = "ncd_tools"
 #   「沉浸模式只保留本插件工具」那条过滤不能再一刀切 —— 它会把姊妹插件的
 #   三个画图工具也删掉，实测表现为：每轮只有 7 个工具，模型直接说“我不会画图”。
 #   这里显式放行，别的插件以后再加工具也照这个写法加进来。
-FOREIGN_KEEP = ("drawing_tools", "generate_image", "switch_model", "draw_kb_search")
+FOREIGN_KEEP = ("drawing_tools", "generate_image", "switch_model", "draw_kb_search",
+                "comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say",
+                "comfy_output",
+                "extend_turns", "read_attachment")
 
 TOOL_NAMES = (
     MENU_TOOL,
     "web_search_bing",
     "fetch_page",
+    "web_read_many",
     "list_stickers",
     "preview_sticker",
     "send_sticker",
@@ -312,7 +356,9 @@ TOOL_NAMES = (
 #   但那样模型容易填错参数，所以还是补上更好。
 TOOL_SUMMARY: dict[str, str] = {
     "web_search_bing": "web_search_bing(query, count) —— 用本机浏览器搜网页，只给标题和网址",
-    "fetch_page": "fetch_page(url) —— 打开一个网页，把正文总结成要点",
+    "fetch_page": "fetch_page(url, query) —— 打开一个网页，按关键词取相关段落并总结",
+    "web_read_many": "web_read_many(urls, query) —— 一次并发读最多 4 个网页，各取相关段落"
+    "（比一条条 fetch_page 快，适合比较多个来源）",
     "list_stickers": "list_stickers(page) —— 列出收藏表情包（只给序号和备注）",
     "preview_sticker": "preview_sticker(index) —— 看第 index 张表情的实际图片",
     "send_sticker": "send_sticker(index) —— 把第 index 张表情发到当前会话",
@@ -556,32 +602,37 @@ class NcdToolboxPlugin(star.Star):
     #  消息合并（同一个人连发几条 → 合成一条再回一次）
     # ------------------------------------------------------------------
 
-    @filter.on_llm_request()
-    async def _merge_incoming(
-        self, event: AstrMessageEvent, req: ProviderRequest
-    ) -> None:
+    @filter.on_waiting_llm_request()
+    async def _merge_waiting(self, event: AstrMessageEvent) -> None:
         """把同一用户 merge_window 秒内连发的消息合并成一条，只回一次。
 
-        规则（2026-10-19 用户定）：
-          · 第 1 条消息当"队长"，等 merge_window 秒（默认 3）再交给模型；
-          · 这期间同一个用户再发的消息全部被拦下（不单独回），追加到队长身上；
-          · 第一条等待结束就合并发送，之后收到的算新的一轮、重新计 3 秒；
-          · 拦下别人的消息时给一句「正在排队，请稍等」（每次合并只提示一次）。
+        ★ 为什么挂在 OnWaitingLLMRequestEvent（而不是 OnLLMRequestEvent）：
+          AstrBot 在 OnLLMRequestEvent 之前就拿了一把【会话级锁】
+          （internal.py: acquire_lock(umo)），第二条消息的整条管线会排队等
+          第一条跑完（含出图几十秒）。也就是说旧实现里第二条根本进不了钩子，
+          永远合并不了 —— 2026-10-20 用日志确认：3 秒内连发只会各回各的。
+          而这个 waiting 钩子在拿锁之前触发，且 stop_event() 能让事件直接返回，
+          正好用来「先拦下、等窗口、合成一条再放行」。
 
-        ★ 只动插件、不改 AstrBot 源码：这里用 on_llm_request 钩子。
-          `event.stop_event()` 能让 AstrBot 直接放弃这条消息的 LLM 调用
-          （internal.py 会检查 call_event_hook 的返回值）。
-        ★ 指令（/ 开头）、带图的消息不参与合并：前者要立刻执行，
-          后者合并会丢图。
+        规则：
+          · 第 1 条当队长，等 merge_window 秒后把合并文本写回 event.message_str，
+            后续 build 请求时 req.prompt 就是它（astr_main_agent.py:1371 读的就是这个字段）；
+          · 窗口内同一个用户再发的消息：拦下（stop_event）、追加、不单独回；
+          · 第一条放行后缓冲清空，之后的消息重新计时；
+          · 指令（/ 开头）和带图的消息不参与合并。
         """
         try:
             if not self._conf_bool("merge_enabled", True):
                 return
-            text = str(getattr(req, "prompt", "") or "").strip()
+            text = str(getattr(event, "message_str", "") or "").strip()
             if not text or text.startswith("/"):
                 return
-            if getattr(req, "image_urls", None):
-                return
+            try:
+                if any(isinstance(c, Comp.Image) for c in event.get_messages() or []):
+                    return
+            except Exception:  # noqa: BLE001
+                pass
+
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             key = (umo, str(event.get_sender_id()))
             window = float(self._conf_int("merge_window", 3) or 3)
@@ -601,7 +652,6 @@ class NcdToolboxPlugin(star.Star):
                         notify = True
 
             if not leader:
-                # 这条不再单独回；等队长把合并后的内容交给模型
                 event.stop_event()
                 logger.info(f"[toolbox] 消息合并中（共 {len(st['texts'])} 条），本条不单独回复")
                 if notify:
@@ -618,18 +668,20 @@ class NcdToolboxPlugin(star.Star):
                     )
                 return
 
-            # —— 队长：等够窗口时间，再把所有消息拼起来 ——
             wait = window - (time.time() - float(st["first"]))
             if wait > 0:
                 await asyncio.sleep(wait)
             async with self._merge_lock:
                 texts = list(st["texts"])
                 self._merge_buf.pop(key, None)
+
             limit = max(1, self._conf_int("merge_max_messages", 10))
             texts = texts[:limit]
             if len(texts) > 1:
-                req.prompt = "\n".join(texts)
-                logger.info(f"[toolbox] 已合并 {len(texts)} 条消息交给模型：{req.prompt[:80]!r}")
+                merged = "\n".join(texts)
+                event.message_str = merged
+                event.set_extra("ncd_merged_text", merged)
+                logger.info(f"[toolbox] 已合并 {len(texts)} 条消息交给模型：{merged[:80]!r}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -658,6 +710,16 @@ class NcdToolboxPlugin(star.Star):
           语气类对角色扮演人格干扰明显；但行为约束类是【模型真干活的推力】，
           整段剥掉会把它们一起带走 —— 详见 _immersion_level()。
         """
+        # 消息合并的兜底：waiting 阶段把合并文本写进了 event.message_str，
+        # 正常情况 build 会照抄；这里再兜一次，防止别处在中间改了它。
+        try:
+            merged = event.get_extra("ncd_merged_text")
+            if merged and str(getattr(req, "prompt", "") or "") != str(merged):
+                req.prompt = str(merged)
+                logger.info("[toolbox] 合并文本已回填到 req.prompt")
+        except Exception:  # noqa: BLE001
+            pass
+
         level = self._immersion_level()
         if level != "off":
             for text in _tool_prompt_variants():
@@ -991,11 +1053,13 @@ class NcdToolboxPlugin(star.Star):
         )
         cached = self._cache_get(cache_key)
         if cached is not None:
+            stats_add(cache_hit=1)
             logger.info(f"[toolbox] 搜索命中缓存：{query}")
             return cached
 
         try:
             browser = await self._get_browser()
+            t0 = time.time()
             items = await browser.search(query, min(count, 10), time_filter=time_filter)
             # 一页只给 10 条；要更多就再抓第二页（默认 8 条，走不到这里）
             if count > 10:
@@ -1023,6 +1087,7 @@ class NcdToolboxPlugin(star.Star):
         #   （知乎/CSDN/百家号），10 条里 6 条同源，看着像"搜到很多"其实一个来源。
         before = len(items)
         items = dedupe_results(items)[:count]
+        stats_add(search=1, search_ms=(time.time() - t0) * 1000, search_results=len(items))
         if len(items) != before:
             logger.info(f"[toolbox] 搜索结果去重/限站：{before} → {len(items)} 条")
 
@@ -1063,11 +1128,13 @@ class NcdToolboxPlugin(star.Star):
         return payload
 
     @filter.llm_tool(name="fetch_page")
-    async def fetch_page(self, event: AstrMessageEvent, url: str) -> str:
+    async def fetch_page(self, event: AstrMessageEvent, url: str, query: str = "") -> str:
         """打开一个网页，把正文总结成要点后返回。搜索结果里的标题看着相关就用它读内容。
 
         Args:
             url(string): 要打开的完整网址，必须以 http:// 或 https:// 开头。
+            query(string): 你想从这一页找什么（关键词）。填了会只返回相关段落，
+                比整页正文更准也更省；不填就用用户当前这句话里的关键词。
         """
         url = str(url or "").strip()
         guard_on = self._conf_bool("block_private_urls", True)
@@ -1083,18 +1150,26 @@ class NcdToolboxPlugin(star.Star):
             )
 
         try:
-            browser = await self._get_browser()
             fetch_chars = self._conf_int("fetch_max_chars", 4000)
+            # ★ PDF 直接解析，别塞给浏览器渲染（渲染出来是阅读器界面，抽不到正文）。
+            if url.split("?")[0].lower().endswith(".pdf"):
+                return await self._read_pdf(url, fetch_chars)
+            browser = await self._get_browser()
             # ★ 缓存键只含影响读取结果的参数：网址 + 字数上限。
             #   放在这里（而不是函数开头）：上面的内网地址检查必须每次都跑，
             #   被拒的地址不应该进缓存。
             page_key = f"p|{_norm_url(url)}|{fetch_chars}"
             cached_page = self._cache_get(page_key)
             if cached_page is not None:
+                stats_add(cache_hit=1)
                 logger.info(f"[toolbox] 抓正文命中缓存：{url}")
                 page = json.loads(cached_page)
             else:
-                page = await browser.fetch_text(url, fetch_chars)
+                kws = keywords_of(query or self._event_text(event))
+                t0 = time.time()
+                page = await browser.fetch_text(url, fetch_chars, kws)
+                stats_add(fetch=1, fetch_ms=(time.time() - t0) * 1000,
+                          fetch_chars=len(page.get("text") or ""))
                 self._cache_put(page_key, json.dumps(page, ensure_ascii=False))
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[toolbox] 抓正文失败 {url}: {exc}", exc_info=True)
@@ -1137,6 +1212,7 @@ class NcdToolboxPlugin(star.Star):
         if self._conf_bool("summarize_page", True) and len(page["text"]) >= threshold:
             summary = await self._summarize_page(event, page["text"])
             if summary:
+                stats_add(summarize=1)
                 return json.dumps(
                     {
                         "url": page["url"],
@@ -1152,6 +1228,107 @@ class NcdToolboxPlugin(star.Star):
             logger.warning("[toolbox] 总结失败，退回截断原文")
 
         return json.dumps(page, ensure_ascii=False)
+
+    async def _event_text(self, event: AstrMessageEvent) -> str:
+        try:
+            return (event.get_message_str() or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def _read_pdf(self, url: str, max_chars: int) -> str:
+        """PDF 走 pypdf，不进浏览器。"""
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            data = await asyncio.to_thread(
+                lambda: urllib.request.urlopen(req, timeout=30).read(30 * 1024 * 1024)
+            )
+            tmp = Path(tempfile.gettempdir()) / f"ncd_pdf_{abs(hash(url)) % 10**10}.pdf"
+            tmp.write_bytes(data)
+            from pypdf import PdfReader
+
+            reader = PdfReader(str(tmp))
+            parts = [(p.extract_text() or "") for p in reader.pages[:8]]
+            text = "\n".join(x for x in parts if x.strip())
+            stats_add(fetch=1, fetch_chars=len(text))
+            if not text.strip():
+                return json.dumps(
+                    {"url": url, "error": "这个 PDF 里抽不到文字（可能是扫描件/图片版）。"},
+                    ensure_ascii=False,
+                )
+            return json.dumps(
+                {"url": url, "title": "", "text": text[:max_chars], "total_chars": len(text),
+                 "note": "PDF 直接解析的正文（前 8 页）。"},
+                ensure_ascii=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[toolbox] PDF 解析失败 {url}: {exc}")
+            return json.dumps(
+                {"url": url, "error": f"PDF 解析失败：{type(exc).__name__}: {exc}"},
+                ensure_ascii=False,
+            )
+
+    @filter.llm_tool(name="web_read_many")
+    async def web_read_many(
+        self,
+        event: AstrMessageEvent,
+        urls: str,
+        query: str = "",
+        per_page_chars: int = 1200,
+    ) -> str:
+        """一次并发读多个网页（最多 4 个），每个只取相关段落。
+
+        比一条条 fetch_page 快得多：研究类问题先用 web_search_bing 拿到网址，
+        再用这里把前 3 条一起读了，一轮就能比较。
+
+        Args:
+            urls(string): 网址列表，逗号或换行分隔，最多 4 个。
+            query(string): 要重点找的内容（关键词）；不填就用用户当前这句话。
+            per_page_chars(number): 每个页面最多返回多少字，默认 1200，上限 2500。
+        """
+        raw = re.split(r"[\s,，;；]+", str(urls or ""))
+        cand = [u.strip() for u in raw if u.strip().startswith("http")]
+        seen: list[str] = []
+        for u in cand:
+            if u not in seen:
+                seen.append(u)
+        seen = seen[:4]
+        if not seen:
+            return json.dumps({"error": "没有有效的 http(s) 网址。"}, ensure_ascii=False)
+
+        guard_on = self._conf_bool("block_private_urls", True)
+        good = [u for u in seen if not (guard_on and public_url_error(u))]
+        if not good:
+            return json.dumps({"error": "这些网址都不允许访问（内网/本机地址）。"}, ensure_ascii=False)
+
+        chars = max(400, min(2500, int(per_page_chars or 1200)))
+        kws = keywords_of(query or self._event_text(event))
+        browser = await self._get_browser()
+        sem = asyncio.Semaphore(3)
+
+        async def one(u: str) -> dict:
+            async with sem:
+                try:
+                    page = await browser.fetch_text(u, chars, kws)
+                    return {
+                        "url": page.get("url") or u,
+                        "title": page.get("title") or "",
+                        "status": page.get("status") or 0,
+                        "text": (page.get("text") or "")[:chars],
+                        "total_chars": page.get("total_chars") or 0,
+                    }
+                except Exception as exc:  # noqa: BLE001
+                    return {"url": u, "error": f"{type(exc).__name__}: {exc}"}
+
+        t0 = time.time()
+        items = await asyncio.gather(*(one(u) for u in good))
+        stats_add(read_many=1, fetch=len(good), fetch_ms=(time.time() - t0) * 1000)
+        return json.dumps(
+            {"query": query, "count": len(items), "elapsed_ms": int((time.time() - t0) * 1000),
+             "results": items},
+            ensure_ascii=False,
+        )
 
     async def _summarize_page(self, event: AstrMessageEvent, text: str) -> str | None:
         """把网页正文总结成与「用户当前问题」相关的要点。失败返回 None（调用方退回原文）。"""
@@ -1577,7 +1754,7 @@ class NcdToolboxPlugin(star.Star):
             _ = want  # 仅用于类型提示，实际档位由 format_transcript 归一化
 
     @filter.llm_tool(name="view_avatar")
-    async def view_avatar(self, event: AstrMessageEvent, who: str = "") -> str:
+    async def view_avatar(self, event: AstrMessageEvent, who: str = "", refresh: bool = False) -> str:
         """看头像。**图只给你自己看，不会发给用户。**
 
         ★★ 你【也能看自己的形象】—— 填 "me" 就是你自己。
@@ -1596,6 +1773,8 @@ class NcdToolboxPlugin(star.Star):
           看自己填 "me"；看群头像填 "group"。
 
         Args:
+            refresh(bool): 强制重新拉取（忽略缓存）。用户说"我刚换头像"、
+                或你觉得看到的不像最新的，就填 True。
             who(string): 看谁的头像，不确定就留空。
                 · 留空 → 当前正在跟你说话的人（最常用）
                 · "me" → 你自己（机器人）
@@ -1616,7 +1795,7 @@ class NcdToolboxPlugin(star.Star):
                 key=key,
                 size=self._conf_int("avatar_size", 640),
                 cache_dir=Path(ASTRBOT_ROOT) / "data" / "plugin_data" / "ncd_toolbox" / "avatars",
-                ttl=float(self._conf_int("avatar_cache_ttl", 21600) or 0),
+                ttl=0.0 if refresh else float(self._conf_int("avatar_cache_ttl", 600) or 0),
             )
         except AvatarError as exc:
             return f"看头像失败：{exc}"
@@ -1689,7 +1868,7 @@ class NcdToolboxPlugin(star.Star):
             lines.append("· " + TOOL_SUMMARY.get(name, f"{name}（新增工具，参数见工具定义）"))
         lines += [
             "",
-            "画图在另一个插件（链路绘图）：让模型调 drawing_tools 进入。",
+            "画图在另一个插件（链路出图 · ComfyUI）：让模型调 comfy_tools 进入，四个工作流 sdxl / krea2 / anima / moss。",
         ]
         return "\n".join(lines)
 

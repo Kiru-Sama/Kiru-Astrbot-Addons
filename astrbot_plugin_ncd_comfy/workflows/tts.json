@@ -1,0 +1,52 @@
+{
+  "1": {
+    "class_type": "easy downloadIndexTTSAndLoadModel",
+    "inputs": {
+      "model": "IndexTTS-2",
+      "download_from": "modelscope"
+    }
+  },
+  "2": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "参考音频.wav"
+    }
+  },
+  "3": {
+    "class_type": "easy indexTTSGenerate",
+    "inputs": {
+      "indextts_model": [
+        "1",
+        0
+      ],
+      "reference_audio": [
+        "2",
+        0
+      ],
+      "text": "你好呀。",
+      "unload_model": false,
+      "do_sample": true,
+      "temperature": 0.8,
+      "top_p": 0.9,
+      "top_k": 30,
+      "num_beams": 1,
+      "repetition_penalty": 10.0,
+      "length_penalty": 0.0,
+      "max_mel_tokens": 1815,
+      "max_tokens_per_sentence": 120,
+      "speech_speed": 1.0,
+      "seed": 0
+    }
+  },
+  "4": {
+    "class_type": "SaveAudioMP3",
+    "inputs": {
+      "audio": [
+        "3",
+        0
+      ],
+      "filename_prefix": "tts/sigua",
+      "quality": "V0"
+    }
+  }
+}

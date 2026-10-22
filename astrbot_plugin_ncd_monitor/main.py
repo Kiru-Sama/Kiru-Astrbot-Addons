@@ -850,8 +850,14 @@ class Main(star.Star):
                 ["GET"],
                 "宿主机资源（CPU/GPU/显存/内存）1 秒采样 + 趋势",
             )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/search-stats",
+                self.api_search_stats,
+                ["GET"],
+                "搜索 / 抓取统计（来自链路工具箱）",
+            )
             logger.info(
-                f"[ncd-monitor] 已注册 6 个 Web API，路由前缀 /{PLUGIN_DIR_NAME}/ncd-monitor/"
+                f"[ncd-monitor] 已注册 7 个 Web API，路由前缀 /{PLUGIN_DIR_NAME}/ncd-monitor/"
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[ncd-monitor] 注册 Web API 失败: {exc}")
@@ -3223,6 +3229,7 @@ class Main(star.Star):
 
     @filter.on_waiting_llm_request()
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
+        await self._wait_comfy_idle()
         """在 AstrBot 拿会话锁【之前】插一道全局并发闸。
 
         插入点：internal.py:217（`OnWaitingLLMRequestEvent`，注释写着
@@ -3278,17 +3285,18 @@ class Main(star.Star):
     def _conf_gate_limit(self) -> int:
         """并发上限。0 或负数 = 不限制。
 
-        ★ 默认 1（串行 + 排队），不是 2。原因见 README「并发与排队」那节：
-          LM Studio 以 kv_unified=true 加载时 KV 池是【共享】的
-          （实测 `n_slots = 4, n_ctx_slot = 8192`），两个请求各带几千 token
-          同时进去会直接顶穿 —— 报 "Context size has been exceeded"。
-          上下文窗口够大（或换了不共享 KV 的推理后端）时才适合调大。
+        ★ 默认 0（不排队）：对话各走各的，谁也不用等人。
+          2026-10-21 用户要求「对话不排队，生图才排队」——生图的串行由
+          astrbot_plugin_ncd_comfy 自己的渲染锁负责（同一块 GPU 一次一张图）。
+          ★ 想恢复串行就把它设成 1：LM Studio 以 kv_unified=true 加载时 KV 池
+          是【共享】的，两个请求各带几千 token 同时进去会顶穿、报
+          "Context size has been exceeded"（README「并发与排队」有实测记录）。
         """
         raw = (self._conf or {}).get("max_concurrent_replies")
         try:
-            return int(raw) if raw not in (None, "") else 1
+            return int(raw) if raw not in (None, "") else 0
         except (TypeError, ValueError):
-            return 1
+            return 0
 
     def _conf_gate_hold_timeout(self) -> float:
         raw = (self._conf or {}).get("gate_hold_timeout")
@@ -3936,6 +3944,60 @@ class Main(star.Star):
 
     async def api_summaries(self):
         return json_response({"items": list(reversed(self.summaries))})
+
+    async def api_search_stats(self):
+        """搜索/抓取统计：直接读工具箱落盘的 JSON，不跨插件调用。"""
+        path = os.path.join(
+            ASTRBOT_ROOT, "data", "plugin_data", "ncd_toolbox", "search_stats.json"
+        )
+        if not os.path.exists(path):
+            return json_response({"ok": True, "empty": True})
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:  # noqa: BLE001
+            return json_response({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
+
+        def avg(total: float, count: float) -> float:
+            return round(total / count, 1) if count else 0
+
+        data["ok"] = True
+        data["avg_search_ms"] = avg(data.get("search_ms", 0), data.get("search", 0))
+        data["avg_results"] = avg(data.get("search_results", 0), data.get("search", 0))
+        data["avg_fetch_ms"] = avg(data.get("fetch_ms", 0), data.get("fetch", 0))
+        data["avg_fetch_chars"] = avg(data.get("fetch_chars", 0), data.get("fetch", 0))
+        return json_response(data)
+
+    # ---- 本地模型 / ComfyUI 互斥（共享状态文件） ----
+    GPU_GATE = os.path.join(ASTRBOT_ROOT, "data", "plugin_data", "ncd_gpu_gate.json")
+
+    def _gpu_read(self) -> dict:
+        try:
+            with open(self.GPU_GATE, encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _gpu_write(self, **fields) -> None:
+        try:
+            data = self._gpu_read()
+            data.update(fields)
+            os.makedirs(os.path.dirname(self.GPU_GATE), exist_ok=True)
+            with open(self.GPU_GATE, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _comfy_active(self) -> bool:
+        data = self._gpu_read()
+        return bool(data.get("comfy")) and (time.time() - float(data.get("comfy_ts") or 0) < 900)
+
+    async def _wait_comfy_idle(self, timeout: float = 600.0) -> None:
+        """ComfyUI 在出图时，等它结束再让 LLM 发请求（本地模型抢显存会 OOM）。"""
+        deadline = time.time() + timeout
+        while self._comfy_active() and time.time() < deadline:
+            await asyncio.sleep(1.0)
 
     async def api_sysinfo(self):
         """宿主机资源的最新值 + 趋势序列（前端 1 秒拉一次）。

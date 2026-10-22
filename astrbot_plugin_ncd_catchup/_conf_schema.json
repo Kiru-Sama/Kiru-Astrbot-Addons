@@ -1,0 +1,44 @@
+{
+  "catchup_enable": {
+    "type": "bool",
+    "description": "开启私聊补台",
+    "hint": "服务重开后，把关闭期间没被回复的私聊消息补回来。\n关闭期间没人发消息 → 什么都不做（不会主动找人聊）。",
+    "default": true
+  },
+  "catchup_delay": {
+    "type": "int",
+    "description": "启动后等多少秒再检查",
+    "hint": "等 QQ 协议端连上、AstrBot 平台就绪。默认 20 秒，太短会拉不到好友列表。",
+    "default": 20
+  },
+  "catchup_max_friends": {
+    "type": "int",
+    "description": "一次最多检查多少个好友",
+    "hint": "按好友列表顺序取前 N 个。默认 30，避免好友很多时启动拖太久。",
+    "default": 30
+  },
+  "catchup_count": {
+    "type": "int",
+    "description": "每个好友拉多少条历史",
+    "hint": "默认 20 条，够覆盖关闭期间的消息了。",
+    "default": 20
+  },
+  "catchup_gap_ms": {
+    "type": "int",
+    "description": "补消息之间的间隔（毫秒）",
+    "hint": "默认 1500。串行灌入，留点间隔避免触发风控；同一好友多条也会按这个间隔。",
+    "default": 1500
+  },
+  "catchup_first_minutes": {
+    "type": "int",
+    "description": "首次运行只看最近几分钟",
+    "hint": "还没有处理点记录时（全新安装）只看最近 N 分钟，默认 10。\n★ 不会回溯半天——那是 v1 重复回复的原因。之后都靠运行期心跳推进处理点。",
+    "default": 10
+  },
+  "catchup_max_rounds": {
+    "type": "int",
+    "description": "一次最多补几个私聊",
+    "hint": "默认 10。超过就停下，剩下的下次启动再补，避免一次性连珠炮。",
+    "default": 10
+  }
+}

@@ -1,0 +1,121 @@
+{
+  "4": {
+    "inputs": {
+      "seed": 43935015791739,
+      "steps": 30,
+      "cfg": 5.5,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "11",
+        0
+      ],
+      "positive": [
+        "5",
+        0
+      ],
+      "negative": [
+        "10",
+        0
+      ],
+      "latent_image": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器",
+      "cnr_id": "comfy-core",
+      "ver": "0.33.0"
+    }
+  },
+  "5": {
+    "inputs": {
+      "text": "A gentle anime-style illustration of Suzuran from Arknights in her “Ode to Spring” outfit, a simple and practical countryside dress. She wears a blue frilled hairband, a small red ribbon tied at her neck, a white shirt under an open brown cardigan, and a high-waisted cyan skirt. Her fox ears and nine tails are soft and fluffy, and her expression is bright and relaxed. She is strolling along a sunlit woodland path, with dappled light filtering through the leaves. The mood is warm, everyday, and quietly joyful, as if she is enjoying a leisurely spring outing with a friend.",
+      "clip": [
+        "11",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "正面",
+      "cnr_id": "comfy-core",
+      "ver": "0.33.0"
+    }
+  },
+  "7": {
+    "inputs": {
+      "filename_prefix": "sdxl_simple",
+      "images": [
+        "9",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.33.0"
+    }
+  },
+  "9": {
+    "inputs": {
+      "samples": [
+        "4",
+        0
+      ],
+      "vae": [
+        "11",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码",
+      "cnr_id": "comfy-core",
+      "ver": "0.33.0"
+    }
+  },
+  "10": {
+    "inputs": {
+      "text": "",
+      "clip": [
+        "11",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "负面",
+      "cnr_id": "comfy-core",
+      "ver": "0.33.0"
+    }
+  },
+  "11": {
+    "inputs": {
+      "ckpt_name": "SDXL\\illustriousSnow25DHaremStyle_v10.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Checkpoint加载器（简易）",
+      "cnr_id": "comfy-core",
+      "ver": "0.33.0"
+    }
+  },
+  "13": {
+    "inputs": {
+      "width": 720,
+      "height": 960,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.42.0"
+    }
+  }
+}

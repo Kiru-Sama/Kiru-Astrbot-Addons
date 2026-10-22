@@ -1,6 +1,0 @@
-﻿name: astrbot_plugin_ncd_draw
-display_name: 链路绘图
-desc: 独立的 SDXL 绘图后端（不依赖 ComfyUI）：多底模热切换、画风叠加、两档采样器、画幅上限、图生图、生图页面。
-author: 本地自用
-version: 1.3.0
-repo: ""
