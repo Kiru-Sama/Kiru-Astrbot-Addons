@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>对话提示注入</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --border:#e6e8ec; --text:#1f2329; --muted:#8a919b; --accent:#3b82f6; --ok:#16a34a; --bad:#dc2626; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:14px; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:12px; margin-bottom:14px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  select, textarea, button { font:inherit; }
+  select, textarea { width:100%; border:1px solid var(--border); border-radius:8px; padding:8px 10px; background:#fff; color:var(--text); }
+  textarea { min-height:72px; resize:vertical; }
+  button { border:none; border-radius:8px; padding:8px 16px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.ghost { background:transparent; color:var(--bad); padding:2px 8px; }
+  .row { display:flex; gap:10px; align-items:center; }
+  .hint { color:var(--muted); font-size:12px; margin-top:6px; }
+  .item { border-bottom:1px dashed var(--border); padding:8px 0; display:flex; justify-content:space-between; gap:10px; }
+  .item:last-child { border-bottom:none; }
+  .tag { font-size:12px; color:var(--muted); white-space:nowrap; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  pre { white-space:pre-wrap; margin:0; font:inherit; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>对话提示注入</h1>
+    <div class="sub">只在按下注入后的<b>下一轮回复</b>里生效；加到系统提示词末尾，不写进聊天记录。</div>
+
+    <label>目标会话</label>
+    <select id="sessionSelect"><option value="">加载中…</option></select>
+
+    <label>提示内容（会拼成：嗯，或许我可以…）</label>
+    <textarea id="textInput" placeholder="例如：把画幅拉大一点，再试一次"></textarea>
+
+    <div class="row" style="margin-top:10px">
+      <button id="injectBtn">注入</button>
+      <span id="status" class="hint"></span>
+    </div>
+    <div class="hint">注入后的实际文本：<span id="preview">嗯，或许我可以…</span></div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between">
+      <h1 style="font-size:15px;margin:0">队列</h1>
+      <span class="tag" id="pendingSub"></span>
+    </div>
+    <div id="pendingBox"><div class="hint">加载中…</div></div>
+  </div>
+
+<script>
+const P = window.AstrBotPluginPage;
+let sessions = [];
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+function setStatus(text, ok) {
+  const el = document.getElementById("status");
+  el.textContent = text || "";
+  el.className = "hint " + (ok === true ? "ok" : ok === false ? "bad" : "");
+}
+
+async function loadSessions() {
+  try {
+    const d = await P.apiGet("/inject/sessions");
+    sessions = (d && d.items) || [];
+    const sel = document.getElementById("sessionSelect");
+    if (!sessions.length) {
+      sel.innerHTML = '<option value="">还没有记录到会话，先在目标会话里说句话</option>';
+      return;
+    }
+    const keep = sel.value;
+    sel.innerHTML = sessions.map(function (s) {
+      return '<option value="' + esc(s.umo) + '">' + esc(s.label || s.umo) + "</option>";
+    }).join("");
+    if (keep) sel.value = keep;
+  } catch (e) {
+    setStatus("会话列表加载失败：" + e, false);
+  }
+}
+
+async function loadPending() {
+  try {
+    const d = await P.apiGet("/inject/pending");
+    const items = (d && d.items) || [];
+    const box = document.getElementById("pendingBox");
+    document.getElementById("pendingSub").textContent = "共 " + items.length + " 条";
+    if (!items.length) { box.innerHTML = '<div class="hint">队列是空的。</div>'; return; }
+    box.innerHTML = items.map(function (it) {
+      const state = it.injected
+        ? '<span class="tag ok">已注入·等回复</span>'
+        : '<span class="tag">待注入 · ' + Math.round(it.expires_in / 60) + " 分钟后过期</span>";
+      return '<div class="item"><div><div>' + esc(it.text) + "</div>" +
+        '<div class="tag">' + esc(it.label || it.umo) + " · " + state + "</div></div>" +
+        '<button class="ghost" data-id="' + esc(it.id) + '">撤回</button></div>';
+    }).join("");
+    box.querySelectorAll("button[data-id]").forEach(function (btn) {
+      btn.onclick = async function () {
+        btn.disabled = true;
+        try { await P.apiPost("/inject/cancel", { id: btn.getAttribute("data-id") }); }
+        catch (e) { setStatus("撤回失败：" + e, false); }
+        loadPending();
+      };
+    });
+  } catch (e) {
+    setStatus("队列加载失败：" + e, false);
+  }
+}
+
+async function inject() {
+  const umo = document.getElementById("sessionSelect").value;
+  const text = document.getElementById("textInput").value.trim();
+  if (!umo) { setStatus("先选一个会话", false); return; }
+  if (!text) { setStatus("提示内容不能为空", false); return; }
+  const btn = document.getElementById("injectBtn");
+  btn.disabled = true;
+  try {
+    const r = await P.apiPost("/inject/inject", { umo: umo, text: text });
+    if (r && r.ok) {
+      setStatus("已入队（第 " + r.queued + " 条），下一条消息生效", true);
+      document.getElementById("textInput").value = "";
+      loadPending();
+    } else {
+      setStatus("注入失败：" + ((r && r.error) || "未知原因"), false);
+    }
+  } catch (e) {
+    setStatus("注入失败：" + e, false);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById("injectBtn").onclick = inject;
+document.getElementById("textInput").addEventListener("input", function () {
+  const t = this.value.trim();
+  document.getElementById("preview").textContent = "嗯，或许我可以" + (t || "…");
+});
+
+(async function () {
+  try { await P.ready(); } catch (e) { /* 独立打开时没有父页面 */ }
+  loadSessions();
+  loadPending();
+  setInterval(loadPending, 5000);
+  setInterval(loadSessions, 30000);
+})();
+</script>
+</body>
+</html>

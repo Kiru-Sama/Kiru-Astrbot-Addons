@@ -355,7 +355,7 @@ class ComfyClient:
     # ------------------------------------------------------------------
     #  出图
     # ------------------------------------------------------------------
-    async def generate(self, graph: dict, on_sampler_start=None) -> dict:
+    async def generate(self, graph: dict, on_sampler_start=None, on_progress=None) -> dict:
         """提交工作流并等结果。返回 {"images": [{filename, subfolder, type}], "seconds": float}。"""
         await self.ensure_server()
         self._last_used = time.time()
@@ -363,25 +363,46 @@ class ComfyClient:
         self._model_loaded = True  # 提交就意味着要把模型搬进显存
         try:
             started = time.time()
-            prompt_id = await asyncio.to_thread(self._submit_sync, graph)
-            logger.info(f"[comfy] 已提交 prompt_id={prompt_id}")
-            # ★ 只听一件事：采样器节点第一次开始执行 → 通知调用方。
-            #   权重加载（UNET/VAE）发生在采样之前，靠提交时的提示告知；
-            #   这里用 ComfyUI 的 WS 事件判断，比轮询准。
+            client_id = uuid.uuid4().hex
+            holder = {"prompt_id": ""}
+            ready = asyncio.Event()
             watch = None
-            if on_sampler_start is not None:
-                samplers = {
-                    str(nid)
-                    for nid, node in (graph or {}).items()
-                    if str((node or {}).get("class_type") or "")
-                    in ("KSampler", "KSamplerAdvanced")
-                }
-                if samplers:
-                    watch = asyncio.create_task(
-                        self._watch_sampler(prompt_id, samplers, on_sampler_start)
+            # ★ 先连上 WS 再提交：快任务（缓存命中/少步数）会在连接完成前跑完，
+            #   晚连就一个节点事件都收不到，进度条只能停在 0。
+            if on_progress is not None or on_sampler_start is not None:
+                watch = asyncio.create_task(
+                    self._watch_progress(
+                        graph,
+                        holder,
+                        on_progress,
+                        on_sampler_start,
+                        client_id=client_id,
+                        ready=ready,
                     )
+                )
+                try:
+                    await asyncio.wait_for(ready.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    logger.debug("[comfy] 进度监听连接超时（继续出图）")
+            prompt_id = await asyncio.to_thread(self._submit_sync, graph, client_id)
+            holder["prompt_id"] = prompt_id
+            self.last_prompt_id = prompt_id
+            logger.info(f"[comfy] 已提交 prompt_id={prompt_id}")
             try:
                 outputs = await self._wait_history(prompt_id)
+                # ★ 收尾补一发 100%：WS 事件可能比 /history 晚到，监听任务会被取消
+                if on_progress is not None:
+                    try:
+                        await on_progress(
+                            {
+                                "overall": 1.0,
+                                "phase": "done",
+                                "label": "完成",
+                                "elapsed": round(time.time() - started, 1),
+                            }
+                        )
+                    except Exception:  # noqa: BLE001
+                        pass
             finally:
                 if watch is not None:
                     watch.cancel()
@@ -399,14 +420,119 @@ class ComfyClient:
             self._busy = False
             self._last_used = time.time()
 
-    async def _watch_sampler(self, prompt_id: str, sampler_ids: set[str], callback) -> None:
-        """盯 ComfyUI 的 WS：第一次进到采样器节点就回调一次，然后退出。"""
+    async def _watch_progress(
+        self,
+        graph: dict,
+        holder: dict,
+        on_progress=None,
+        on_sampler_start=None,
+        client_id: str = "",
+        ready=None,
+    ) -> None:
+        """盯 ComfyUI WS，把节点事件折算成总进度，回调给上层。"""
+        nodes = {
+            str(nid): str((node or {}).get("class_type") or "")
+            for nid, node in (graph or {}).items()
+            if not str(nid).startswith("_")
+        }
+        total = len(nodes)
+        samplers = {nid for nid, cls in nodes.items() if cls in ("KSampler", "KSamplerAdvanced")}
+        cached: set[str] = set()
+        done: set[str] = set()
+        current = ""
+        cur_val = 0
+        cur_max = 0
+        started = time.time()
+        last_emit = 0.0
+        last_phase = ""
+        sampler_hit = False
+        max_overall = 0.0
+
+        phase_cn = {
+            "queue": "排队",
+            "loading": "加载权重",
+            "sampling": "采样",
+            "decoding": "解码",
+            "saving": "保存",
+            "running": "执行",
+        }
+
+        def classify(cls: str) -> str:
+            low = cls.lower()
+            if cls in ("KSampler", "KSamplerAdvanced"):
+                return "sampling"
+            if "vae" in low and "decode" in low:
+                return "decoding"
+            if low.startswith("save"):
+                return "saving"
+            if any(k in low for k in ("loader", "checkpoint", "unet", "clip", "lora")):
+                return "loading"
+            return "running"
+
+        def weight_of(cls: str) -> float:
+            if cls in ("KSampler", "KSamplerAdvanced"):
+                return 4.0  # 采样通常占大头，权重给高
+            low = cls.lower()
+            if any(k in low for k in ("loader", "checkpoint", "unet", "clip", "lora")):
+                return 2.0
+            return 1.0
+
+        weights = {nid: weight_of(cls) for nid, cls in nodes.items()}
+        total_w = sum(weights.values()) or 1.0
+
+        async def emit(force: bool = False) -> None:
+            nonlocal last_emit, last_phase, max_overall
+            if on_progress is None:
+                return
+            eff = max(0.001, total_w - sum(weights.get(n, 1.0) for n in cached))
+            frac = 0.0
+            if cur_max and current and current not in done:
+                frac = max(0.0, min(1.0, cur_val / cur_max))
+            done_w = sum(weights.get(n, 1.0) for n in done)
+            overall = min(1.0, (done_w + weights.get(current, 1.0) * frac) / eff)
+            # 节点切换会把“当前节点分数”清零，总体不能因此回退
+            max_overall = max(max_overall, overall)
+            overall = max_overall
+            phase = classify(nodes.get(current, ""))
+            now = time.time()
+            if not force and now - last_emit < 0.25 and phase == last_phase:
+                return
+            last_emit = now
+            last_phase = phase
+            label = phase_cn.get(phase, "执行")
+            if phase == "sampling" and cur_max:
+                label = f"采样 {cur_val}/{cur_max}"
+            elif current:
+                label = f"{label}（{nodes.get(current) or '节点'}）"
+            try:
+                await on_progress(
+                    {
+                        "overall": round(overall, 4),
+                        "phase": phase,
+                        "label": label,
+                        "node": current,
+                        "class_type": nodes.get(current, ""),
+                        "step": cur_val or None,
+                        "total_steps": cur_max or None,
+                        "nodes_done": len(done),
+                        "nodes_total": eff,
+                        "elapsed": round(now - started, 1),
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[comfy] 进度回调失败: {exc}")
+
         try:
             import websockets
 
-            url = f"ws://127.0.0.1:{self.port}/ws?clientId={uuid.uuid4().hex}"
-            deadline = time.time() + max(30.0, self.gen_timeout)
+            if on_progress is not None:
+                await emit(force=True)
+            # ★ 必须和 /prompt 用同一个 clientId：ComfyUI 只把执行事件发给提交者
+            url = f"ws://127.0.0.1:{self.port}/ws?clientId={client_id or uuid.uuid4().hex}"
+            deadline = time.time() + max(60.0, self.gen_timeout)
             async with websockets.connect(url, max_size=8 * 1024 * 1024) as ws:
+                if ready is not None:
+                    ready.set()
                 while time.time() < deadline:
                     try:
                         raw = await asyncio.wait_for(ws.recv(), timeout=2.0)
@@ -416,23 +542,50 @@ class ComfyClient:
                         msg = json.loads(raw)
                     except Exception:  # noqa: BLE001
                         continue
-                    if msg.get("type") != "executing":
-                        continue
+                    kind = msg.get("type")
                     data = msg.get("data") or {}
-                    if str(data.get("prompt_id") or "") != prompt_id:
+                    pid = str(data.get("prompt_id") or "")
+                    expected = str((holder or {}).get("prompt_id") or "")
+                    if expected and pid and pid != expected:
                         continue
-                    if str(data.get("node") or "") in sampler_ids:
-                        await callback()
-                        return
+                    if kind == "execution_cached":
+                        cached |= {str(x) for x in (data.get("nodes") or [])}
+                        await emit()
+                    elif kind == "executing":
+                        node = data.get("node")
+                        if node is None:
+                            await emit(force=True)
+                            break
+                        current = str(node)
+                        cur_val, cur_max = 0, 0
+                        if current in samplers and not sampler_hit:
+                            sampler_hit = True
+                            if on_sampler_start is not None:
+                                try:
+                                    await on_sampler_start()
+                                except Exception as exc:  # noqa: BLE001
+                                    logger.debug(f"[comfy] 采样开始回调失败: {exc}")
+                        await emit(force=True)
+                    elif kind == "progress":
+                        cur_val = int(data.get("value") or 0)
+                        cur_max = int(data.get("max") or 0)
+                        await emit()
+                    elif kind == "executed":
+                        done.add(str(data.get("node") or ""))
+                        cur_val, cur_max = 0, 0
+                        await emit()
+                    elif kind == "execution_error":
+                        await emit(force=True)
+                        break
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
-            logger.debug(f"[comfy] 采样监听失败（忽略）: {exc}")
+            logger.debug(f"[comfy] 进度监听失败（忽略）: {exc}")
 
-    def _submit_sync(self, graph: dict) -> str:
+    def _submit_sync(self, graph: dict, client_id: str = "") -> str:
         data = self._post_json_sync(
             "/prompt",
-            {"prompt": graph, "client_id": uuid.uuid4().hex},
+            {"prompt": graph, "client_id": client_id or uuid.uuid4().hex},
             timeout=max(30.0, self.gen_timeout),
         )
         if not isinstance(data, dict):
@@ -550,6 +703,22 @@ class ComfyClient:
         running = len(data.get("queue_running") or [])
         pending = len(data.get("queue_pending") or [])
         return {"running": running, "pending": pending}
+
+    async def queue_position(self, prompt_id: str) -> int | None:
+        """0 = 正在跑；N = 前面还有 N 个；None = 不在队列里。"""
+        if not prompt_id:
+            return None
+        try:
+            data = await asyncio.to_thread(self._get_json_sync, "/queue", 3.0)
+        except Exception:  # noqa: BLE001
+            return None
+        for item in data.get("queue_running") or []:
+            if len(item) > 1 and str(item[1]) == str(prompt_id):
+                return 0
+        for idx, item in enumerate(data.get("queue_pending") or []):
+            if len(item) > 1 and str(item[1]) == str(prompt_id):
+                return idx + 1
+        return None
 
     async def free_models(self) -> bool:
         """让 ComfyUI 把模型卸掉（显存还回去），但进程留在端口上。

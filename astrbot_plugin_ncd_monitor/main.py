@@ -23,6 +23,9 @@ LLMSummaryCompressor 包一层（插件卸载即恢复）。
 from __future__ import annotations
 
 import asyncio
+import hmac
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import base64
 import contextvars
 import copy
@@ -31,6 +34,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -738,6 +742,10 @@ class Main(star.Star):
         # 思考剥离的累计账（面板上用来量化"思考到底吃了多少上下文"）
         self.reasoning_stripped_segments = 0
         self.reasoning_stripped_chars = 0
+        # 最近几次思考原文（只给面板看；模型下一轮看不到）
+        self._thinkings: deque[dict[str, Any]] = deque(maxlen=20)
+        # 事件流：对话/工具/生成的关键节点（面板时间线）
+        self._timeline: deque[dict[str, Any]] = deque(maxlen=200)
 
         self.started_at = time.time()
 
@@ -807,6 +815,10 @@ class Main(star.Star):
         #   它每秒自己吐一行，我们读 stdout 就行。
         # psutil 那侧只有约 0.9ms，随便调。
         self.sys_samples: deque[dict[str, Any]] = deque(maxlen=self.SYS_SAMPLE_KEEP)
+        # 工具调用：最近事件 + 汇总统计（面板用，不进模型）
+        self._tool_events: deque[dict[str, Any]] = deque(maxlen=120)
+        self._tool_stats: dict[str, dict[str, float]] = {}
+        self._tool_start: dict[str, float] = {}
         self._sys_task: Any = None      # asyncio.Task，惰性启动
         self._gpu_proc: Any = None      # 常驻 nvidia-smi 进程
         self._gpu_latest: dict[str, Any] | None = None
@@ -856,8 +868,50 @@ class Main(star.Star):
                 ["GET"],
                 "搜索 / 抓取统计（来自链路工具箱）",
             )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/state/<name>",
+                self.api_state,
+                ["GET"],
+                "插件发布到总线的状态快照（ncd_bus/state/<name>.json）",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/tools",
+                self.api_tools,
+                ["GET"],
+                "工具调用：最近事件 + 汇总",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/thinking",
+                self.api_thinking,
+                ["GET"],
+                "最近几次思考内容（仅面板）",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/gen-thumb/<idx>",
+                self.api_gen_thumb,
+                ["GET"],
+                "本地生成卡片的缩略图（按 recent 下标）",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/timeline",
+                self.api_timeline,
+                ["GET"],
+                "事件流：对话请求/响应 + 工具调用",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/gen-full/<idx>",
+                self.api_gen_full,
+                ["GET"],
+                "点开大图：按 recent 下标返回原图 base64",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/audit-thumb/<idx>",
+                self.api_audit_thumb,
+                ["GET"],
+                "审核明细缩略图（被拦的小图）",
+            )
             logger.info(
-                f"[ncd-monitor] 已注册 7 个 Web API，路由前缀 /{PLUGIN_DIR_NAME}/ncd-monitor/"
+                f"[ncd-monitor] 已注册 14 个 Web API，路由前缀 /{PLUGIN_DIR_NAME}/ncd-monitor/"
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[ncd-monitor] 注册 Web API 失败: {exc}")
@@ -3229,7 +3283,9 @@ class Main(star.Star):
 
     @filter.on_waiting_llm_request()
     async def on_waiting_llm_request(self, event: AstrMessageEvent) -> None:
-        await self._wait_comfy_idle()
+        # ★ 只有本地模型才需要等 ComfyUI（抢显存）；云端 API 不该被拦
+        if (await self._llm_runtime()).get("local", True):
+            await self._wait_comfy_idle()
         """在 AstrBot 拿会话锁【之前】插一道全局并发闸。
 
         插入点：internal.py:217（`OnWaitingLLMRequestEvent`，注释写着
@@ -3309,6 +3365,9 @@ class Main(star.Star):
     async def on_llm_request(
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
+        # 只有本地模型才记「刚活动过」，云端 API 不需要出图前让路
+        if (await self._llm_runtime()).get("local", True):
+            self._gpu_write(llm_ts=time.time())
         try:
             # ★ 惰性补包：插件加载时 provider source 可能还没导入，
             #   这里每次请求前补一遍（幂等、很便宜）。
@@ -3374,6 +3433,14 @@ class Main(star.Star):
             for stale in [k for k, v in self._pending.items() if v.get("time", 0) < cutoff]:
                 self._pending.pop(stale, None)
 
+            self._timeline.append(
+                {
+                    "ts": time.time(),
+                    "kind": "llm.request",
+                    "umo": umo,
+                    "text": f"请求 · 约 {estimated} tok · {self._count_nonempty(all_msgs)} 条",
+                }
+            )
             # 按 umo 分开存，等 on_llm_response 拿到真实 usage 后再落盘
             self._pending[umo] = {
                 "time": time.time(),
@@ -3397,6 +3464,16 @@ class Main(star.Star):
         self, event: AstrMessageEvent, response: LLMResponse
     ) -> None:
         try:
+            think = getattr(response, "reasoning_content", None) or ""
+            if str(think).strip():
+                self._thinkings.append(
+                    {
+                        "ts": time.time(),
+                        "umo": str(getattr(event, "unified_msg_origin", "") or ""),
+                        "chars": len(str(think)),
+                        "text": str(think)[:4000],
+                    }
+                )
             usage = getattr(response, "usage", None)
             # ★ TokenUsage 的字段是 input_other / input_cached / output，
             #   以及两个 property：input(=other+cached) 和 total。
@@ -3466,6 +3543,20 @@ class Main(star.Star):
                     getattr(response, "completion_text", "") or "", 50
                 ),
             }
+            self._timeline.append(
+                {
+                    "ts": now,
+                    "kind": "llm.response",
+                    "umo": umo_ev,
+                    "text": f"回复 · {record.get('latency_ms') or 0}ms · "
+                    f"{record.get('input_tokens') or 0}→{record.get('output_tokens') or 0} tok"
+                    + (
+                        f" · 工具 {len(record.get('tool_calls') or [])}"
+                        if record.get("tool_calls")
+                        else ""
+                    ),
+                }
+            )
             self.llm_calls.append(record)
             # ★ 释放点之一：拿到模型回复（正常路径）。
             #   注意【模型报错时这里不会执行】，所以还有 after_message_sent 那一路。
@@ -3920,6 +4011,7 @@ class Main(star.Star):
             "snowluma": sl,
             "live_context": live_context,
             "stats": self._stats(),
+            "llm_runtime": await self._llm_runtime(),
             "sessions": self._session_usage(max_ctx),
             "context": {
                 "used": used,
@@ -3944,6 +4036,345 @@ class Main(star.Star):
 
     async def api_summaries(self):
         return json_response({"items": list(reversed(self.summaries))})
+
+    @staticmethod
+    def _short_args(args: Any, limit: int = 220) -> str:
+        try:
+            text = json.dumps(args or {}, ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            text = str(args)
+        return text[:limit] + ("…" if len(text) > limit else "")
+
+    @filter.on_using_llm_tool()
+    async def on_tool_use(self, event: AstrMessageEvent, tool: Any, tool_args: Any) -> None:
+        try:
+            name = str(getattr(tool, "name", "") or "?")
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            self._tool_start[f"{umo}|{name}"] = time.time()
+        except Exception:  # noqa: BLE001
+            pass
+
+    @filter.on_llm_tool_respond()
+    async def on_tool_respond(
+        self, event: AstrMessageEvent, tool: Any, tool_args: Any, tool_result: Any
+    ) -> None:
+        try:
+            name = str(getattr(tool, "name", "") or "?")
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            started = self._tool_start.pop(f"{umo}|{name}", None)
+            dur_ms = round((time.time() - started) * 1000) if started else None
+            texts = []
+            for item in (getattr(tool_result, "content", None) or []):
+                text = getattr(item, "text", None)
+                if text:
+                    texts.append(str(text))
+            result = "\n".join(texts)
+            is_err = bool(getattr(tool_result, "isError", False))
+            stat = self._tool_stats.setdefault(
+                name, {"calls": 0, "errors": 0, "total_ms": 0, "last_ts": 0}
+            )
+            stat["calls"] += 1
+            stat["errors"] += 1 if is_err else 0
+            stat["total_ms"] += dur_ms or 0
+            stat["last_ts"] = time.time()
+            self._timeline.append(
+                {
+                    "ts": time.time(),
+                    "kind": "tool",
+                    "umo": umo,
+                    "text": f"{name} · {dur_ms or 0}ms · {len(result)}B"
+                    + (" · 错误" if is_err else ""),
+                }
+            )
+            self._tool_events.append(
+                {
+                    "ts": time.time(),
+                    "umo": umo,
+                    "tool": name,
+                    "args": self._short_args(tool_args),
+                    "dur_ms": dur_ms,
+                    "result_len": len(result),
+                    "result_head": result[:400],
+                    "error": is_err,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 记录工具调用失败: {exc}")
+
+    async def api_timeline(self):
+        """最近事件：对话请求/响应 + 工具调用。"""
+        return json_response({"items": list(self._timeline)[-120:]})
+
+    async def api_gen_full(self, idx: str = "0"):
+        """点开大图：按 recent 下标读原图，返回 base64（不暴露任意路径）。"""
+        try:
+            i = int(idx)
+        except (TypeError, ValueError):
+            i = 0
+        recent = self._comfy_state_recent()
+        if i < 0 or i >= len(recent):
+            return json_response({"error": "out of range"}, status_code=404)
+        path = str(recent[i].get("path") or "")
+        if not path or not os.path.isfile(path):
+            return json_response({"error": "no file"}, status_code=404)
+        low = path.lower()
+        mime = "image/jpeg" if low.endswith((".jpg", ".jpeg")) else (
+            "image/webp" if low.endswith(".webp") else "image/png"
+        )
+        try:
+            if os.path.getsize(path) > 25 * 1024 * 1024:
+                return json_response({"error": "too large"}, status_code=413)
+        except OSError:
+            return json_response({"error": "gone"}, status_code=404)
+
+        # ★ 大图先压到 1280px 再回传：桥接层要搬 base64，原图 1~2MB 容易出问题，
+        #   压缩后一般 100~300KB，查看够清晰。
+        data_url = self._display_image(path)
+        if not data_url:
+            return json_response({"error": "image decode failed"}, status_code=500)
+        return json_response({"url": data_url})
+
+    def _display_image(self, path: str) -> str:
+        """生成/读取 1280px 显示图（base64 data URL），缓存到 thumbcache。"""
+        try:
+            key = hashlib.sha1(
+                f"{path}|{os.path.getmtime(path)}|view1280".encode()
+            ).hexdigest()[:16]
+            cache = os.path.join(self._thumb_dir, f"{key}_view.jpg")
+            if os.path.exists(cache):
+                with open(cache, "rb") as fh:
+                    raw = fh.read()
+            else:
+                from PIL import Image
+
+                img = Image.open(path).convert("RGB")
+                img.thumbnail((1280, 1280))
+                os.makedirs(self._thumb_dir, exist_ok=True)
+                img.save(cache, "JPEG", quality=82)
+                with open(cache, "rb") as fh:
+                    raw = fh.read()
+            return "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[ncd-monitor] 显示图生成失败: {exc}")
+            try:
+                with open(path, "rb") as fh:
+                    raw = fh.read()
+                return "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+            except OSError:
+                return ""
+
+    async def api_audit_thumb(self, idx: str = "0"):
+        """审核明细的小缩略图（只有被拦的才存了 96px 小图）。"""
+        try:
+            i = int(idx)
+        except (TypeError, ValueError):
+            i = 0
+        recent = self._comfy_state_audit()
+        if i < 0 or i >= len(recent):
+            return json_response({"error": "out of range"}, status_code=404)
+        path = str(recent[i].get("thumb") or "")
+        if not path or not os.path.isfile(path):
+            return json_response({"error": "no thumb"}, status_code=404)
+        key = hashlib.sha1(f"{path}|{os.path.getmtime(path)}".encode()).hexdigest()[:16]
+        url = self._make_thumb(key, path)
+        if not url:
+            return json_response({"error": "thumb failed"}, status_code=404)
+        return json_response({"url": url, "k": key})
+
+    def _comfy_state_recent(self) -> list:
+        return self._comfy_state().get("recent") or []
+
+    def _comfy_state_audit(self) -> list:
+        return self._comfy_state().get("audit_recent") or []
+
+    @staticmethod
+    def _comfy_state() -> dict:
+        path = os.path.join(
+            ASTRBOT_ROOT, "data", "plugin_data", "ncd_bus", "state", "comfy.json"
+        )
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh) or {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    async def api_gen_thumb(self, idx: str = "0"):
+        """本地生成卡片的缩略图：按 recent 下标取，路径只来自状态文件。"""
+        try:
+            i = int(idx)
+        except (TypeError, ValueError):
+            i = 0
+        state = os.path.join(
+            ASTRBOT_ROOT, "data", "plugin_data", "ncd_bus", "state", "comfy.json"
+        )
+        try:
+            with open(state, encoding="utf-8") as fh:
+                recent = (json.load(fh) or {}).get("recent") or []
+        except Exception:  # noqa: BLE001
+            recent = []
+        if i < 0 or i >= len(recent):
+            return json_response({"error": "out of range"}, status_code=404)
+        path = str(recent[i].get("path") or "")
+        if not path or not os.path.isfile(path):
+            return json_response({"error": "no file"}, status_code=404)
+        if not path.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            return json_response({"error": "not image"}, status_code=404)
+        try:
+            key = hashlib.sha1(
+                f"{path}|{os.path.getmtime(path)}".encode()
+            ).hexdigest()[:16]
+        except OSError:
+            return json_response({"error": "gone"}, status_code=404)
+        url = self._make_thumb(key, path)
+        if not url:
+            return json_response({"error": "thumb failed"}, status_code=404)
+        return json_response({"url": url, "k": key})
+
+    async def api_thinking(self):
+        """最近几次思考（只读内存，仅面板可见）。"""
+        return json_response({"items": list(self._thinkings)[-10:]})
+
+    async def api_tools(self):
+        """工具调用：最近事件 + 按工具汇总（只读内存）。"""
+        stats = {}
+        for name, s in self._tool_stats.items():
+            calls = int(s.get("calls") or 0)
+            stats[name] = {
+                "calls": calls,
+                "errors": int(s.get("errors") or 0),
+                "avg_ms": round((s.get("total_ms") or 0) / calls) if calls else None,
+                "last_ts": s.get("last_ts"),
+            }
+        return json_response(
+            {"recent": list(self._tool_events)[-40:], "stats": stats}
+        )
+
+    async def api_state(self, name: str = "", **kwargs):
+        """读某个插件发布的状态快照（只允许字母数字下划线，防路径穿越）。"""
+        safe = "".join(ch for ch in str(name or "") if ch.isalnum() or ch in "_-")
+        if not safe:
+            return json_response({"empty": True, "error": "缺少状态名"})
+        path = os.path.join(
+            ASTRBOT_ROOT, "data", "plugin_data", "ncd_bus", "state", f"{safe}.json"
+        )
+        if not os.path.exists(path):
+            return json_response({"empty": True})
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            if safe == "comfy":
+                self._enrich_comfy(data)
+            return json_response(data)
+        except Exception as exc:  # noqa: BLE001
+            return json_response({"empty": True, "error": f"{type(exc).__name__}: {exc}"})
+
+    def _ensure_file_server(self) -> int:
+        """启动本地图片服务（127.0.0.1 随机端口，签名校验，只读临时目录里的图）。"""
+        srv = getattr(self, "_file_srv", None)
+        if srv is not None:
+            return srv.server_address[1]
+        secret = getattr(self, "_file_secret", "") or os.urandom(16).hex()
+        self._file_secret = secret
+        roots = [os.path.realpath(os.path.join(ASTRBOT_ROOT, "data", "temp"))]
+        try:
+            from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
+
+            roots.append(os.path.realpath(str(get_astrbot_temp_path())))
+        except Exception:  # noqa: BLE001
+            pass
+        roots.append(os.path.realpath(tempfile.gettempdir()))
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):  # noqa: D401
+                pass
+
+            def do_GET(self):
+                try:
+                    from urllib.parse import parse_qs, unquote, urlparse
+
+                    q = parse_qs(urlparse(self.path).query)
+                    p = unquote((q.get("p") or [""])[0])
+                    s = (q.get("s") or [""])[0]
+                    want = hmac.new(
+                        secret.encode(), p.encode(), hashlib.sha256
+                    ).hexdigest()[:16]
+                    if not p or not hmac.compare_digest(s, want):
+                        self.send_error(403)
+                        return
+                    real = os.path.realpath(p)
+                    if not any(
+                        real.startswith(r + os.sep) for r in roots
+                    ):
+                        self.send_error(403)
+                        return
+                    if not real.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+                        self.send_error(403)
+                        return
+                    with open(real, "rb") as fh:
+                        raw = fh.read()
+                    ctype = "image/jpeg" if real.lower().endswith((".jpg", ".jpeg")) else (
+                        "image/webp" if real.lower().endswith(".webp") else "image/png"
+                    )
+                    self.send_response(200)
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(raw)
+                except Exception:  # noqa: BLE001
+                    try:
+                        self.send_error(404)
+                    except Exception:  # noqa: BLE001
+                        pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        srv.daemon_threads = True
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self._file_srv = srv
+        logger.info(f"[ncd-monitor] 本地图片服务已启动: 127.0.0.1:{srv.server_address[1]}")
+        return srv.server_address[1]
+
+    def _view_url(self, path: str) -> str:
+        """给面板用的直链（带签名）。"""
+        try:
+            from urllib.parse import quote
+
+            port = self._ensure_file_server()
+            sig = hmac.new(
+                self._file_secret.encode(), path.encode(), hashlib.sha256
+            ).hexdigest()[:16]
+            return f"http://127.0.0.1:{port}/i?p={quote(path)}&s={sig}"
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _enrich_comfy(self, data: dict) -> None:
+        """给 comfy 状态附上内联缩略图：面板一次请求就够，不再二次取图。"""
+        try:
+            for item in data.get("recent") or []:
+                path = str(item.get("path") or "")
+                if not path or not os.path.isfile(path):
+                    continue
+                key = hashlib.sha1(
+                    f"{path}|{os.path.getmtime(path)}".encode()
+                ).hexdigest()[:16]
+                url = self._make_thumb(key, path)
+                if url:
+                    item["thumb"] = url
+                view = self._view_url(path)
+                if view:
+                    item["view"] = view
+            for item in data.get("audit_recent") or []:
+                path = str(item.get("thumb") or "")
+                if not path or not os.path.isfile(path):
+                    continue
+                key = hashlib.sha1(
+                    f"{path}|{os.path.getmtime(path)}".encode()
+                ).hexdigest()[:16]
+                url = self._make_thumb(key, path)
+                if url:
+                    item["thumb_data"] = url
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 状态缩略图失败: {exc}")
 
     async def api_search_stats(self):
         """搜索/抓取统计：直接读工具箱落盘的 JSON，不跨插件调用。"""
@@ -3992,6 +4423,51 @@ class Main(star.Star):
     def _comfy_active(self) -> bool:
         data = self._gpu_read()
         return bool(data.get("comfy")) and (time.time() - float(data.get("comfy_ts") or 0) < 900)
+
+    @staticmethod
+    def _is_local_base(url: str) -> bool:
+        """api_base 是不是本机地址（本地模型才需要和出图抢显卡）。"""
+        try:
+            from urllib.parse import urlsplit
+
+            host = (urlsplit(str(url or "")).hostname or "").lower()
+        except Exception:  # noqa: BLE001
+            return True
+        if not host:
+            return True
+        if host in ("localhost", "127.0.0.1", "::1"):
+            return True
+        if host.startswith(("10.", "192.168.", "169.254.")):
+            return True
+        if host.startswith("172."):
+            try:
+                second = int(host.split(".")[1])
+                if 16 <= second <= 31:
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        return False
+
+    async def _llm_runtime(self) -> dict:
+        """当前 LLM provider 的来源（id/type/base/是否本地），带 30 秒缓存。"""
+        cached = getattr(self, "_llm_rt", None)
+        if cached and time.time() - cached[0] < 30:
+            return cached[1]
+        info = {"id": "", "type": "", "base": "", "local": True}
+        try:
+            provider = await self.context.get_using_provider_async()
+            cfg = dict(getattr(provider, "provider_config", {}) or {})
+            base = str(cfg.get("api_base") or cfg.get("base_url") or "")
+            info.update(
+                id=str(cfg.get("id") or ""),
+                type=str(cfg.get("type") or ""),
+                base=base,
+                local=self._is_local_base(base) if base else True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 读取 provider 失败（按本地处理）: {exc}")
+        self._llm_rt = (time.time(), info)
+        return info
 
     async def _wait_comfy_idle(self, timeout: float = 600.0) -> None:
         """ComfyUI 在出图时，等它结束再让 LLM 发请求（本地模型抢显存会 OOM）。"""

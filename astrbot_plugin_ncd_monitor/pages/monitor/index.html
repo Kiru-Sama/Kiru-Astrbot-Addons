@@ -643,6 +643,36 @@
 
   <!-- 发给模型的完整上下文（已移到右侧栏）-->
 
+  <!-- 事件流：对话 / 工具 -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>事件流 <span class="h2sub">请求 · 回复 · 工具</span></h2>
+    <div id="timelineBox"><div class="empty">加载中…</div></div>
+  </div>
+
+  <!-- 本地生成（ComfyUI 进度，来自 ncd_bus） -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>本地生成 <span class="h2sub">ComfyUI · 节点进度 · 面板 v5</span></h2>
+    <div id="comfyBox"><div class="empty">加载中…</div></div>
+  </div>
+
+  <!-- 思考内容（仅后台可见） -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>思考内容 <span class="h2sub">仅后台 · 模型下一轮看不到</span></h2>
+    <div id="thinkBox"><div class="empty">加载中…</div></div>
+  </div>
+
+  <!-- 审核明细（群聊 NSFW） -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>审核明细 <span class="h2sub">只有露三点才拒 · 被拦的留 96px 小图</span></h2>
+    <div id="auditBox"><div class="empty">加载中…</div></div>
+  </div>
+
+  <!-- 工具调用（参数/结果/耗时，来自 monitor 钩子） -->
+  <div class="card" style="margin-bottom:14px">
+    <h2>工具调用 <span class="h2sub">结果对模型可见 · 耗时/大小为后台字段</span></h2>
+    <div id="toolsBox"><div class="empty">加载中…</div></div>
+  </div>
+
   <!-- 搜索 / 抓取统计（来自链路工具箱） -->
   <div class="card" style="margin-bottom:14px">
     <h2>搜索 / 抓取 <span class="h2sub">来自链路工具箱</span></h2>
@@ -913,6 +943,13 @@ function renderModel(d) {
   const ceb = a.custom_extra_body || {};
   const rows = [
     ["当前模型", a.model || "—"],
+    ["模型来源", (() => {
+      const rt = d.llm_runtime || {};
+      if (!rt.base) return "未知（按本地处理）";
+      return rt.local
+        ? `本地 ${rt.base} · 出图时互斥`
+        : `云端 ${rt.base} · 不参与显存互斥`;
+    })()],
     ["模型能力", mods],
     ["上下文上限", fmtNum(a.max_context_tokens) + " token"],
     ["关闭思考", ceb.reasoning_effort === "none" ? "已开启（reasoning_effort=none）" : "未设置"],
@@ -2195,6 +2232,314 @@ async function refreshSearchBox() {
   }
 }
 
+/* ---------- 本地生成（ComfyUI 节点进度） ---------- */
+function comfyBar(pct, label) {
+  const p = Math.max(0, Math.min(100, pct || 0));
+  return '<div class="bar"><div class="fill" style="width:' + p + '%"></div>' +
+         '<div class="label">' + esc(label || '') + '</div></div>';
+}
+
+/* data URL → Blob URL：某些环境下 <img> 直接吃 data: 会失败，转 blob 兜底 */
+function dataUrlToBlobUrl(u) {
+  const i = u.indexOf(",");
+  const meta = u.slice(5, i);
+  const bin = atob(u.slice(i + 1));
+  const arr = new Uint8Array(bin.length);
+  for (let k = 0; k < bin.length; k++) arr[k] = bin.charCodeAt(k);
+  return URL.createObjectURL(new Blob([arr], { type: meta.split(";")[0] }));
+}
+
+const _thumbBlobCache = new Map();
+function blobFor(u) {
+  if (!u) return "";
+  if (String(u).indexOf("data:") !== 0) return u;
+  let b = _thumbBlobCache.get(u);
+  if (!b) {
+    try { b = dataUrlToBlobUrl(u); _thumbBlobCache.set(u, b); }
+    catch (e) { return u; }
+  }
+  return b;
+}
+
+function thumbErr(img) {
+  const u = img.getAttribute("data-thumb") || "";
+  if (u && !img.getAttribute("data-blob-tried")) {
+    img.setAttribute("data-blob-tried", "1");
+    try { img.src = dataUrlToBlobUrl(u); return; } catch (e) { /* 落到下面 */ }
+  }
+  img.style.display = "none";
+  const dbg = img.getAttribute("data-dbg") || "";
+  if (img.parentNode) img.parentNode.insertAdjacentText("beforeend", "取图失败:" + dbg);
+}
+
+let _comfySig = "";
+function renderComfy(d) {
+  const box = document.getElementById("comfyBox");
+  if (!box) return;
+  if (!d || d.empty) {
+    if (_comfySig !== "empty") { _comfySig = "empty"; box.innerHTML = '<div class="empty">还没有生成记录。</div>'; }
+    return;
+  }
+  // 数据没变就不重绘：每秒重建 innerHTML 会把还在解码的 <img> 掐断，触发 error
+  const sig = JSON.stringify(d);
+  if (sig === _comfySig) return;
+  _comfySig = sig;
+  const st = d.status || {}, pr = d.progress || {}, au = d.audit || {};
+  const running = !!st.running;
+  const pct = Math.round((pr.overall || 0) * 100);
+  let html = comfyBar(running ? pct : 100, running ? (pr.label || '执行中') + ' · ' + pct + '%' : '空闲');
+  html += '<div class="grid g2" style="margin-top:10px"><div>';
+  html += '<div class="kv"><span class="k">工作流</span><span class="v">' + esc(st.preset || '—') + '</span></div>';
+  html += '<div class="kv"><span class="k">底模</span><span class="v">' + esc(st.model || '—') + '</span></div>';
+  html += '</div><div>';
+  const pos = (st.position === 0) ? '进行中' : (st.position == null ? '—' : '第 ' + st.position + ' 位');
+  html += '<div class="kv"><span class="k">队列</span><span class="v">跑 ' + (st.queue_running || 0) + ' · 等 ' + (st.queue_pending || 0) + ' · ' + pos + '</span></div>';
+  html += '<div class="kv"><span class="k">审核 通过/拦截</span><span class="v">' + (au.pass || 0) + ' / ' + (au.reject || 0) + '</span></div>';
+  html += '</div></div>';
+  const all = d.recent || [];
+  const rows = all.slice().reverse();
+  if (rows.length) {
+    html += '<div style="margin-top:10px;max-height:320px;overflow-y:auto;padding-right:4px">';
+    rows.forEach(function (r, di) {
+      const orig = all.length - 1 - di;
+      const audit = r.audit === 'reject'
+        ? '<span style="color:var(--bad)">已拦</span>'
+        : (r.audit === 'pass' ? '通过' : '—');
+      const meta = (r.preset || '—') + ' · ' +
+        (r.seconds != null ? r.seconds + 's' : '—') + ' · ' +
+        fmtNum(r.size) + 'B · ' + audit;
+      const thumb = r.thumb
+        ? '<span style="cursor:zoom-in;flex:0 0 auto;display:inline-flex;width:52px;min-width:52px;margin-right:8px" data-view="' + esc(r.view || '') + '" data-i="' + orig + '" onclick="openGenView(this)">' +
+          '<img width="52" height="52" class="inlineThumb" data-thumb="' + esc(r.thumb) + '" ' +
+          'data-dbg="' + esc(String(r.thumb).length + '|' + String(r.thumb).slice(0, 28)) + '" ' +
+          'onerror="thumbErr(this)" ' +
+          'style="width:52px;height:52px;object-fit:cover;border-radius:6px;vertical-align:middle;flex:0 0 auto"></span>'
+        : (r.path
+          ? '<span style="cursor:zoom-in" onclick="openGenFull(' + orig + ')">' +
+            '<img class="genThumb" data-i="' + orig + '" data-path="' + esc(r.path) + '" ' +
+            'width="52" height="52" style="object-fit:cover;border-radius:6px;margin-right:8px;vertical-align:middle"></span>'
+          : '');
+      html += '<div class="kv"><span class="k" title="' + esc(r.prompt || '') + '">' +
+        thumb + esc(r.name || '') + '</span><span class="v">' + meta + '</span></div>';
+    });
+    html += '</div>';
+  }
+  box.innerHTML = html;
+  document.querySelectorAll("#comfyBox img.inlineThumb").forEach(function (img) {
+    img.src = blobFor(img.getAttribute("data-thumb") || "");
+  });
+  loadGenThumbs();
+}
+
+
+/* 生成缩略图：按路径缓存，1 秒重绘不会重复请求 */
+const _genThumbCache = new Map();
+async function loadGenThumbs() {
+  const imgs = document.querySelectorAll("img.genThumb");
+  for (const img of imgs) {
+    const path = img.getAttribute("data-path") || "";
+    if (!path) continue;
+    if (_genThumbCache.has(path)) { img.src = _genThumbCache.get(path); continue; }
+    if (img.src && img.src.indexOf("data:") === 0) continue;
+    try {
+      const r = await P.apiGet("/ncd-monitor/gen-thumb/" + img.getAttribute("data-i"));
+      const u = (typeof r === "string") ? r : (r && (r.url || r.data));
+      if (u) { _genThumbCache.set(path, u); img.src = u; }
+    } catch (e) { /* 单张失败忽略 */ }
+  }
+}
+
+async function refreshComfy() {
+  try {
+    const d = await P.apiGet("/ncd-monitor/state/comfy");
+    renderComfy(d);
+    renderAudit(d);
+  } catch (e) {
+    /* 单卡失败不影响其他卡 */
+  }
+}
+
+/* ---------- 工具调用（monitor 钩子记录） ---------- */
+function renderTools(d) {
+  const box = document.getElementById("toolsBox");
+  if (!box) return;
+  if (!d || !d.recent || !d.recent.length) {
+    box.innerHTML = '<div class="empty">还没有工具调用。</div>';
+    return;
+  }
+  const stats = d.stats || {};
+  const names = Object.keys(stats).sort(function (a, b) {
+    return (stats[b].calls || 0) - (stats[a].calls || 0);
+  }).slice(0, 8);
+  let html = '<div class="kv"><span class="k">按工具</span><span class="v">' +
+    names.map(function (n) {
+      return esc(n) + '×' + (stats[n].calls || 0) +
+        (stats[n].errors ? '(' + stats[n].errors + '错)' : '');
+    }).join(' · ') + '</span></div>';
+  html += '<div style="max-height:260px;overflow-y:auto;padding-right:4px">';
+  const rows = d.recent.slice().reverse();
+  rows.forEach(function (r) {
+    const ms = r.dur_ms != null ? r.dur_ms + 'ms' : '—';
+    const flag = (r.error ? ' <span style="color:var(--bad)">错误</span>' : '') +
+      ' · ' + fmtNum(r.result_len) + 'B';
+    html += '<div class="kv" title="' + esc(r.result_head || '') + '">' +
+      '<span class="k">' + esc(r.tool) + ' <span class="h2sub">' + ms + '</span></span>' +
+      '<span class="v">' + esc(String(r.args || '').slice(0, 80)) + flag + '</span></div>';
+  });
+  box.innerHTML = html + "</div>";
+}
+
+async function refreshTools() {
+  try { renderTools(await P.apiGet("/ncd-monitor/tools")); }
+  catch (e) { /* 单卡失败不影响其它卡 */ }
+}
+
+/* ---------- 思考内容（仅后台） ---------- */
+function renderThinking(d) {
+  const box = document.getElementById("thinkBox");
+  if (!box) return;
+  const items = (d && d.items) || [];
+  if (!items.length) { box.innerHTML = '<div class="empty">这次还没有思考内容。</div>'; return; }
+  const rows = items.slice().reverse();
+  let html = "";
+  rows.forEach(function (it, i) {
+    const when = new Date((it.ts || 0) * 1000).toLocaleTimeString();
+    html += "<details class=\"card\" style=\"margin:6px 0;padding:8px\">" +
+      "<summary style=\"cursor:pointer\">" + when + " · " + fmtNum(it.chars) + " 字</summary>" +
+      "<pre style=\"white-space:pre-wrap;margin:8px 0 0;max-height:260px;overflow:auto\">" +
+      esc(it.text || "") + "</pre></details>";
+  });
+  box.innerHTML = html;
+}
+
+async function refreshThinking() {
+  try { renderThinking(await P.apiGet("/ncd-monitor/thinking")); }
+  catch (e) { /* 单卡失败不影响其它卡 */ }
+}
+
+/* ---------- 事件流 ---------- */
+function renderTimeline(d) {
+  const box = document.getElementById("timelineBox");
+  if (!box) return;
+  const items = (d && d.items) || [];
+  if (!items.length) { box.innerHTML = '<div class="empty">还没有事件。</div>'; return; }
+  const color = { "llm.request": "var(--accent)", "llm.response": "var(--ok)", "tool": "var(--warn)" };
+  const rows = items.slice().reverse();
+  let html = '<div style="max-height:300px;overflow-y:auto;padding-right:4px">';
+  rows.forEach(function (it) {
+    const when = new Date((it.ts || 0) * 1000).toLocaleTimeString();
+    const c = color[it.kind] || "var(--muted)";
+    html += '<div class="kv"><span class="k" style="white-space:nowrap">' + when + '</span>' +
+      '<span class="v"><span style="color:' + c + '">' + esc(it.kind) + '</span> · ' +
+      esc(it.text || "") + '</span></div>';
+  });
+  box.innerHTML = html + "</div>";
+}
+
+async function refreshTimeline() {
+  try { renderTimeline(await P.apiGet("/ncd-monitor/timeline")); }
+  catch (e) { /* 单卡失败不影响其它卡 */ }
+}
+
+/* ---------- 审核明细 + 点开大图 ---------- */
+let _auditSig = "";
+function renderAudit(d) {
+  const box = document.getElementById("auditBox");
+  if (!box) return;
+  const all = (d && d.audit_recent) || [];
+  const sig = JSON.stringify(all);
+  if (sig === _auditSig) return;
+  _auditSig = sig;
+  if (!all.length) { box.innerHTML = '<div class="empty">还没有审核记录。</div>'; return; }
+  let html = "";
+  all.slice().reverse().forEach(function (r, di) {
+    const orig = all.length - 1 - di;
+    const when = new Date((r.ts || 0) * 1000).toLocaleTimeString();
+    const mark = r.verdict === "reject"
+      ? '<span style="color:var(--bad)">拒绝</span>'
+      : '<span style="color:var(--ok)">通过</span>';
+    const thumb = r.thumb_data
+      ? '<img width="40" height="40" src="' + r.thumb_data + '" ' +
+        'style="object-fit:cover;border-radius:4px;margin-right:6px;vertical-align:middle">'
+      : (r.thumb
+        ? '<img class="auditThumb" data-i="' + orig + '" data-path="' + esc(r.thumb) +
+          '" width="40" height="40" style="object-fit:cover;border-radius:4px;margin-right:6px;vertical-align:middle">'
+        : '');
+    html += '<div class="kv"><span class="k" style="white-space:nowrap">' + when + '</span>' +
+      '<span class="v">' + thumb + mark + ' · ' + esc(r.provider || '') + ' · ' +
+      esc(String(r.prompt || '').slice(0, 60)) + '</span></div>';
+  });
+  box.innerHTML = html;
+  loadAuditThumbs();
+}
+
+const _auditThumbCache = new Map();
+async function loadAuditThumbs() {
+  for (const img of document.querySelectorAll("img.auditThumb")) {
+    const path = img.getAttribute("data-path") || "";
+    if (!path) continue;
+    if (_auditThumbCache.has(path)) { img.src = _auditThumbCache.get(path); continue; }
+    try {
+      const r = await P.apiGet("/ncd-monitor/audit-thumb/" + img.getAttribute("data-i"));
+      const u = (typeof r === "string") ? r : (r && (r.url || r.data));
+      if (u) { _auditThumbCache.set(path, u); img.src = u; }
+    } catch (e) { /* 单张忽略 */ }
+  }
+}
+
+function openGenView(el) {
+  const view = el.getAttribute("data-view") || "";
+  const i = el.getAttribute("data-i");
+  if (!view) { openGenFull(i); return; }
+  let mask = document.getElementById("imgMask");
+  if (!mask) {
+    mask = document.createElement("div");
+    mask.id = "imgMask";
+    mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;" +
+      "display:flex;align-items:center;justify-content:center;cursor:zoom-out";
+    mask.onclick = function () { mask.remove(); };
+    document.body.appendChild(mask);
+  }
+  mask.innerHTML = '<div style="color:#fff;font:14px/1.6 sans-serif">加载中…</div>';
+  const img = new Image();
+  img.style.cssText = "max-width:92vw;max-height:92vh;border-radius:8px";
+  img.onload = function () { mask.innerHTML = ""; mask.appendChild(img); };
+  img.onerror = function () {
+    mask.innerHTML = '<div style="color:#fff;font:14px/1.6 sans-serif">大图加载失败（本地图片服务）</div>';
+  };
+  img.src = view;
+}
+
+function openGenFull(i) {
+  let mask = document.getElementById("imgMask");
+  if (!mask) {
+    mask = document.createElement("div");
+    mask.id = "imgMask";
+    mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:9999;" +
+      "display:flex;align-items:center;justify-content:center;cursor:zoom-out";
+    mask.onclick = function () { mask.remove(); };
+    document.body.appendChild(mask);
+  }
+  mask.innerHTML = '<div style="color:#fff;font:14px/1.6 sans-serif">加载中…</div>';
+  P.apiGet("/ncd-monitor/gen-full/" + i).then(function (r) {
+    const u = (typeof r === "string") ? r : (r && (r.url || r.data));
+    if (!u) {
+      mask.innerHTML = '<div style="color:#fff;font:14px/1.6 sans-serif">取图失败：接口没返回图片</div>';
+      return;
+    }
+    const img = new Image();
+    img.style.cssText = "max-width:92vw;max-height:92vh;border-radius:8px";
+    img.onload = function () { mask.innerHTML = ""; mask.appendChild(img); };
+    img.onerror = function () {
+      mask.innerHTML = '<div style="color:#fff;font:14px/1.6 sans-serif">取图失败：图片解码失败</div>';
+    };
+    img.src = blobFor(u);
+  }).catch(function (e) {
+    mask.innerHTML = '<div style="color:#fff;font:14px/1.6 sans-serif">取图失败：' +
+      esc(String(e && e.message || e)) + '</div>';
+  });
+}
+
 /* ---------- 主循环 ---------- */
 async function tick() {
   try {
@@ -2213,6 +2558,9 @@ async function tick() {
     renderSummaries(sm.items, ov);
     renderCalls(hi.llm_calls);
     renderStats(ov);
+    refreshTools();
+    refreshThinking();
+    refreshTimeline();
     refreshSearchBox();
     window.__maxCtx = (ov.context || {}).max || 32768;
     _ctxSeries = hi.context_series || [];
@@ -2241,6 +2589,8 @@ if (window.AstrBotPluginPage) {
   // 资源卡单独 1 秒一次（只读后端内存，很便宜）
   refreshSys();
   setInterval(refreshSys, 1000);
+  refreshComfy();
+  setInterval(refreshComfy, 1000);
   P.ready()
     .then(() => tick())
     .catch((e) => console.warn("bridge ready 失败:", e));

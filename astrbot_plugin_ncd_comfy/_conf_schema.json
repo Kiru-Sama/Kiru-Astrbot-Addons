@@ -176,7 +176,7 @@
   "comfy_handoff": {
     "type": "bool",
     "description": "出图前卸载本地模型（显存换手）",
-    "hint": "开（默认）：出图/发语音前用 `lms unload --all` 卸掉 LM Studio 的模型，\n腾出显存；生成结束后再释放 ComfyUI 显存。本地模型下次请求会自动重载。\n关：只做时间互斥（等空闲、挡新请求），不卸载模型 —— 显存够大才建议关。",
+    "hint": "开（默认）：自动判断模型来源 ——\n  · 本地模型（LM Studio 等 127.0.0.1）：出图前 lms unload，生成后 /free 释放，避免抢显存；下次对话自动重载。\n  · 云端 API（deepseek 等）：完全不换手，ComfyUI 模型常驻，连画更快。\n关：无论本地/云端都不换手。",
     "default": true
   },
   "lmstudio_lms": {
@@ -184,5 +184,65 @@
     "description": "lms 命令路径（留空自动找）",
     "hint": "默认找 %USERPROFILE%\\.lmstudio\\bin\\lms.exe；找不到就调 PATH 里的 lms。",
     "default": ""
+  },
+  "comfy_group_guard": {
+    "type": "bool",
+    "description": "群聊生图先过内容审核",
+    "hint": "开（默认）：群聊里生成的图先让视觉模型判一次。\\n只拦「明确露出乳首/生殖器（三点）」；性暗示、情趣内衣、泳装、露沟、大腿都放行。\\n私聊不查。判断不了（模型不能读图/调用失败/回答含糊）时放行并记日志。",
+    "default": true
+  },
+  "comfy_group_guard_provider": {
+    "type": "string",
+    "description": "审核用的 provider id（留空=用当前会话的）",
+    "hint": "需要支持读图（provider 配置的 modalities 里要有 image）。\n留空就用当前对话模型；当前模型不支持读图时会跳过审核（放行）。\n例如填你本地跑 Qwen-VL 的那个 provider id。",
+    "default": ""
+  },
+  "comfy_self_view": {
+    "type": "bool",
+    "description": "出图后把图回传给模型自查",
+    "hint": "开（默认）：工具结果里附带生成图（压到 1024px），模型当轮能看见自己画的，方便自查脸/发色/服装。\n关：只回文字，省视觉 token，但模型只能靠文字猜画面。\n图不会写进对话历史，只在出图这一轮出现。",
+    "default": true
+  },
+  "comfy_send_jitter_min": {
+    "type": "float",
+    "description": "发送前随机延迟下限（秒）",
+    "hint": "发图/语音前的随机停顿下限，跟上限一起用；建议 0.3~1。",
+    "default": 0.4
+  },
+  "comfy_send_jitter_max": {
+    "type": "float",
+    "description": "发送前随机延迟上限（秒）",
+    "hint": "随机停顿上限；0.4~2.5 之间比较像真人，别设成固定值。",
+    "default": 2.0
+  },
+  "comfy_reply_min_gap": {
+    "type": "float",
+    "description": "同一会话两条回复的最小间隔（秒）",
+    "hint": "同一会话连续回复的最小间隔，防止一秒好几条。",
+    "default": 1.2
+  },
+  "comfy_pace_replies": {
+    "type": "bool",
+    "description": "给所有回复加随机延迟",
+    "hint": "开（默认）：所有回复先等一会儿再发（随机延迟 + 最小间隔）。关：只对图片/语音生效。",
+    "default": true
+  },
+  "comfy_image_interval": {
+    "type": "float",
+    "description": "同一会话两张图的最小间隔（秒）",
+    "hint": "反风控用：同一会话两张图至少隔这么久，超了直接不发并告诉模型原因。",
+    "default": 300.0
+  },
+  "comfy_voice_interval": {
+    "type": "float",
+    "description": "同一会话两条语音的最小间隔（秒）",
+    "hint": "同一会话两条语音的最小间隔。",
+    "default": 60.0
+  },
+  "comfy_image_interval_private": {
+    "type": "float",
+    "description": "私聊里两张图的最小间隔（秒）",
+    "hint": "私聊自用可以短一点（默认 30 秒）；群聊用上面那个 300 秒的。",
+    "default": 30.0
   }
 }

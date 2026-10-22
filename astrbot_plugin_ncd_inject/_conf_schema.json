@@ -1,0 +1,26 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "启用对话提示注入",
+    "hint": "关掉后即使有排队的注入也不会生效。",
+    "default": true
+  },
+  "ttl_minutes": {
+    "type": "int",
+    "description": "注入有效期（分钟）",
+    "hint": "超过这个时间还没被用掉就自动丢弃，默认 30 分钟。",
+    "default": 30
+  },
+  "max_pending": {
+    "type": "int",
+    "description": "每个会话最多排队几条",
+    "hint": "默认 5 条；多了会拒绝新注入，避免一句话里塞太多。",
+    "default": 5
+  },
+  "mode": {
+    "type": "string",
+    "description": "注入位置",
+    "hint": "assistant（默认）：作为一条独立的 assistant 上下文插入，模型会当成自己说过/想过的话，不会并进用户消息。\nuser：紧贴用户消息追加（会被并进用户那条，读起来像用户说的）。\nsystem：拼在系统提示词末尾。",
+    "default": "assistant"
+  }
+}
