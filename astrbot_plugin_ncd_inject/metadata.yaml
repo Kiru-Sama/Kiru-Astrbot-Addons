@@ -2,5 +2,5 @@ name: astrbot_plugin_ncd_inject
 display_name: 对话提示注入
 desc: 在面板里给指定会话塞一句“念头”，只在按下注入后的下一轮回复里生效，不写进聊天记录。
 author: 本地自用
-version: 1.0.0
+version: 1.0.1
 repo: ""

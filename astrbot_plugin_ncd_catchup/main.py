@@ -30,7 +30,9 @@ try:  # AstrBot 以包形式加载
 except ImportError:  # 离线单测
     from inject import build_message, extract_text
 
-STATE_PATH = Path(__file__).resolve().parent / "data" / "state.json"
+OLD_STATE_PATH = Path(__file__).resolve().parent / "data" / "state.json"
+# ★ 放 plugin_data：覆盖安装/从仓库同步插件时不会把处理点一起抹掉
+STATE_PATH = Path(__file__).resolve().parents[2] / "plugin_data" / "ncd_catchup" / "state.json"
 
 
 class NcdCatchupPlugin(star.Star):
@@ -40,6 +42,7 @@ class NcdCatchupPlugin(star.Star):
         self._conf: dict[str, Any] = config or {}
         self._task: asyncio.Task | None = None
         self._beat: asyncio.Task | None = None
+        self._catching_up = False
         self._self_id: str = ""
 
     # ------------------------------------------------------------------
@@ -60,8 +63,9 @@ class NcdCatchupPlugin(star.Star):
 
     def _load_state(self) -> dict:
         try:
-            if STATE_PATH.exists():
-                return json.loads(STATE_PATH.read_text(encoding="utf-8"))
+            for path in (STATE_PATH, OLD_STATE_PATH):
+                if path.exists():
+                    return json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[catchup] 读状态失败（按空处理）: {exc}")
         return {}
@@ -98,6 +102,8 @@ class NcdCatchupPlugin(star.Star):
         while True:
             try:
                 await asyncio.sleep(60)
+                if self._catching_up:
+                    continue  # 补台正在跑，别把处理点推过去
                 state = self._load_state()
                 state["last_ts"] = int(time.time())
                 self._save_state(state)
@@ -133,6 +139,13 @@ class NcdCatchupPlugin(star.Star):
         return run
 
     async def _catch_up(self) -> None:
+        self._catching_up = True
+        try:
+            await self._catch_up_inner()
+        finally:
+            self._catching_up = False
+
+    async def _catch_up_inner(self) -> None:
         platform = self.context.get_platform("aiocqhttp")
         if platform is None:
             logger.warning("[catchup] 没找到 aiocqhttp 平台，跳过")

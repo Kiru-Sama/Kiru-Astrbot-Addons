@@ -100,7 +100,11 @@ class NcdComfyPlugin(star.Star):
         self._last_preset: str | None = None
         self._last_model: str | None = None
         # 上一张生成的图（reference="last" 做图生图时用）
-        self._last_image_bytes: bytes | None = None
+        # 每个会话的“上一张图”（reference="last" 用；绝不能全局共用）
+        self._last_image_bytes: dict[str, bytes] = {}
+        # 视觉能力（由 modalities 决定）与“探测失败”分开缓存
+        self._vision_caps: dict[str, tuple[float, bool]] = {}
+        self._vision_probe_fail: dict[str, float] = {}
         # 模型清单缓存（目录扫一遍要几百毫秒，别每次出图都扫）
         self._scan_cache: dict[str, tuple[float, list[dict]]] = {}
         # 参考音频上传缓存（改了文件会自动重传）
@@ -608,20 +612,22 @@ class NcdComfyPlugin(star.Star):
             cfg = dict(getattr(provider, "provider_config", {}) or {})
             mods = [str(x).lower() for x in (cfg.get("modalities") or [])]
             pid = str(cfg.get("id") or "")
-            cache = getattr(self, "_vision_cache", None)
-            if cache is None:
-                cache = self._vision_cache = {}
-            cached = cache.get(pid)
-            if cached and time.time() - cached[0] < 600:
-                can_vision = cached[1]
-            elif mods:
-                can_vision = "image" in mods
-            else:
-                can_vision = True
+            # ★ 能力只看 modalities；某次“判断不了”不能当成“读不了图”，
+            #   否则一次含糊回答会让后续 10 分钟直接免审。
+            fails = getattr(self, "_vision_probe_fail", None)
+            if fails is None:
+                fails = self._vision_probe_fail = {}
+            can_vision = ("image" in mods) if mods else True
             if not can_vision:
                 logger.warning(
                     "[comfy] 群聊审核跳过：这个 provider 读不了图"
                     "（可把 modalities 配上 image，或指定 comfy_group_guard_provider）"
+                )
+                return False
+            last_fail = fails.get(pid) or 0
+            if time.time() - last_fail < 600:
+                logger.warning(
+                    "[comfy] 群聊审核跳过：上次调用视觉模型失败，10 分钟内不再试"
                 )
                 return False
 
@@ -638,10 +644,10 @@ class NcdComfyPlugin(star.Star):
                 image_prompt=image_prompt,
             )
             if verdict is None:
-                cache[pid] = (time.time(), False)
+                # 结论含糊：不动“能力”，也不记失败（下次照常再审）
                 logger.warning("[comfy] 审核没给出明确结论（按放行处理）")
                 return False
-            cache[pid] = (time.time(), True)
+            fails.pop(pid, None)
             if verdict:
                 self._audit_counts["reject"] += 1
             else:
@@ -662,10 +668,10 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 群聊审核失败（放行）: {exc}")
             if pid:
-                cache = getattr(self, "_vision_cache", None)
-                if cache is None:
-                    cache = self._vision_cache = {}
-                cache[pid] = (time.time(), False)
+                fails = getattr(self, "_vision_probe_fail", None)
+                if fails is None:
+                    fails = self._vision_probe_fail = {}
+                fails[pid] = time.time()
             return False
 
     async def _unload_llm(self) -> None:
@@ -706,7 +712,6 @@ class NcdComfyPlugin(star.Star):
         ★ 对话（LLM 回复）不排队 —— 这条只串行【出图】这一段。
         """
         self._gen_waiting += 1
-        position = self._gen_waiting
         try:
             async with self._render_lock:
                 # ★ 换手只在本地模型时做：云端 API 不占显卡，卸了反而白等重载
@@ -770,8 +775,10 @@ class NcdComfyPlugin(star.Star):
         """
         ref = str(reference or "").strip().lower()
         if ref in ("last", "previous", "上一张", "刚才那张"):
-            if self._last_image_bytes:
-                return self._last_image_bytes
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            data = self._last_image_bytes.get(umo)
+            if data:
+                return data
             return None
         if ref in ("message", "msg", "image", "图", "这张", "消息图"):
             data = self._component_image_bytes(event.get_messages() or [])
@@ -1178,7 +1185,7 @@ class NcdComfyPlugin(star.Star):
         await self._pace_send()
         self._last_image_at[umo_ev] = time.time()
         filename = str(image.get("filename") or "image.png")
-        path = self._save_generated(data, filename)
+        path = self._save_session_image(umo_ev, data, filename)
         try:
             await self.context.send_message(
                 event.unified_msg_origin,
@@ -1216,7 +1223,10 @@ class NcdComfyPlugin(star.Star):
         self._last_preset = preset_name
         self._last_model = used_model
         # 下一张要 reference="last" 的话就用它
-        self._last_image_bytes = data
+        self._last_image_bytes[umo] = data
+        # 只留最近 20 个会话，防内存涨
+        while len(self._last_image_bytes) > 20:
+            self._last_image_bytes.pop(next(iter(self._last_image_bytes)), None)
         logger.info(
             f"[comfy] 已发送 {path.name}（{len(data):,} 字节，{preset_name}"
             f"{'，图生图' if ref_name else ''}）→ {event.unified_msg_origin}"
@@ -1322,16 +1332,8 @@ class NcdComfyPlugin(star.Star):
                 "上一张还在画（ComfyUI 队列里），现在取只会拿到旧图。"
                 "等它画完再取，或者直接重新生成一张。"
             )
-        temp_root = self._temp_root()
-        roots = [d for d in (client.output_dir, client.temp_dir, temp_root) if d]
-        base = self._conf_str("comfy_dir")
-        if base:
-            roots.extend(
-                [
-                    os.path.join(base, "ComfyUI", "output"),
-                    os.path.join(base, "ComfyUI", "temp"),
-                ]
-            )
+        # ★ 只扫本会话目录：跨会话串图就是从“全局目录按时间取最新”来的
+        roots = [str(self._session_image_dir(umo))]
 
         cutoff = time.time() - window * 3600
         found: list[tuple[float, str]] = []
@@ -1346,9 +1348,6 @@ class NcdComfyPlugin(star.Star):
                     path = os.path.join(dirpath, name)
                     # AstrBot 的 temp 根目录里只认我们自己的 comfy_* 副本，
                     # 免得把聊天图片/表情缓存当成“画好的图”发出去
-                    if os.path.realpath(root) == os.path.realpath(temp_root):
-                        if not name.lower().startswith("comfy_"):
-                            continue
                     try:
                         mtime = os.path.getmtime(path)
                     except OSError:
@@ -1616,6 +1615,45 @@ class NcdComfyPlugin(star.Star):
     @staticmethod
     def _norm_text(text: str) -> str:
         return re.sub(r"[\s，。！？、,.!?～~…—\-（）()\[\]【】「」“”\"'：:；;]", "", text or "")
+
+    @staticmethod
+    def _session_image_dir(umo: str) -> Path:
+        """每个会话一个目录：data/plugin_data/ncd_comfy/out/<sha1(umo)[:16]>/"""
+        import hashlib
+
+        key = hashlib.sha1(str(umo or "").encode("utf-8")).hexdigest()[:16]
+        path = (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "out"
+            / key
+        )
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _save_session_image(self, umo: str, data: bytes, filename: str) -> Path:
+        """把生成图落到会话目录，顺手只留最近 60 张。"""
+        import re as _re
+        import uuid as _uuid
+
+        folder = self._session_image_dir(umo)
+        safe = _re.sub(r"[^A-Za-z0-9._-]", "_", filename) or "image.png"
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        path = folder / f"{stamp}-{_uuid.uuid4().hex[:6]}-{safe}"
+        path.write_bytes(data)
+        try:
+            files = sorted(
+                (p for p in folder.iterdir() if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for old in files[60:]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return path
 
     @staticmethod
     def _save_generated(data: bytes, filename: str) -> Path:

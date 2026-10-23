@@ -146,7 +146,9 @@ class Main(star.Star):
                 # 紧贴用户消息追加（会被并进用户那条，模型当成用户说的话）
                 if TextPart is None:
                     raise RuntimeError("拿不到 TextPart")
-                req.extra_user_content_parts.append(TextPart(text=text))
+                if not getattr(event, "_ncd_inject_user_done", False):
+                    req.extra_user_content_parts.append(TextPart(text=text))
+                    setattr(event, "_ncd_inject_user_done", True)
             else:
                 # assistant：作为一条独立的“她自己说过/想过”的上下文。
                 # ★ 先把历史里以前注入过的旧念头剔掉，避免一轮轮累积占 token。

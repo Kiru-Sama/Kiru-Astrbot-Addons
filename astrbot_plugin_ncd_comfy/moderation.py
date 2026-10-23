@@ -42,6 +42,25 @@ PROMPT_TEMPLATE = """你是图片合规审核员。先读上下文，再只看�
 """
 
 
+MAX_SIDE = 512
+
+
+def prepare_for_judge(data: bytes) -> tuple[bytes, str]:
+    """送审图缩到最长边 512：审核只要看个大概，省视觉 token。"""
+    try:
+        import io
+
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        img.thumbnail((MAX_SIDE, MAX_SIDE))
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=80)
+        return buf.getvalue(), "image/jpeg"
+    except Exception:  # noqa: BLE001
+        return data, "image/png"
+
+
 def build_prompt(user_text: str, image_prompt: str) -> str:
     return PROMPT_TEMPLATE.format(
         user_text=(user_text or "（没有文字，只有图）").strip()[:1500],
@@ -60,9 +79,11 @@ async def judge(
     """返回 True=通过 / False=拒绝 / None=判断不了（调用失败或回答含糊）。"""
     if not image_bytes:
         return None
-    tmp = pathlib.Path(__import__("tempfile").gettempdir()) / f"ncd_judge_{uuid.uuid4().hex[:8]}.png"
+    payload, suffix = prepare_for_judge(image_bytes)
+    ext = ".jpg" if suffix == "image/jpeg" else ".png"
+    tmp = pathlib.Path(__import__("tempfile").gettempdir()) / f"ncd_judge_{uuid.uuid4().hex[:8]}{ext}"
     try:
-        tmp.write_bytes(image_bytes)
+        tmp.write_bytes(payload)
         resp = await asyncio.wait_for(
             provider.text_chat(
                 prompt=build_prompt(user_text, image_prompt),

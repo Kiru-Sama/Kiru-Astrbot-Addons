@@ -43,6 +43,7 @@
 - **自查回图**：出图后把图压到 1024px 一起回传给模型，让她能看见自己画的东西
 - **群聊审核**：只在群聊里判，只有明确露三点才拦；被拦的图留 96px 小图在面板核对
 - **反风控**：发送随机延迟、全局回复间隔、群聊/私聊分档的图片限流
+- **按会话存图**：每会话一个目录，`comfy_output` 只取本会话，`reference=last` 也只认本会话
 - 工具：`comfy_tools` / `comfy_generate` / `comfy_models` / `comfy_status` / `comfy_say` / `comfy_output`
 - 命令：`/comfyui off|on|status`（只关自己拉起的进程）
 
