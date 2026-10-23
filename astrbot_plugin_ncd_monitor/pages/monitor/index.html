@@ -2273,6 +2273,26 @@ function thumbErr(img) {
 }
 
 let _comfySig = "";
+document.addEventListener("click", function (e) {
+  const btn = e.target.closest ? e.target.closest("button.copyBtn") : null;
+  if (!btn) return;
+  const url = btn.getAttribute("data-url") || "";
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = url;
+    ta.style.cssText = "position:fixed;opacity:0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+    const old = btn.textContent;
+    btn.textContent = "已复制";
+    setTimeout(function () { btn.textContent = old; }, 1200);
+  } catch (err) {
+    btn.textContent = url;
+  }
+});
+
 function renderComfy(d) {
   const box = document.getElementById("comfyBox");
   if (!box) return;
@@ -2288,6 +2308,16 @@ function renderComfy(d) {
   const running = !!st.running;
   const pct = Math.round((pr.overall || 0) * 100);
   let html = comfyBar(running ? pct : 100, running ? (pr.label || '执行中') + ' · ' + pct + '%' : '空闲');
+  const comfyPort = parseInt(st.port, 10) || 8199;
+  // ★ iframe 的 sandbox 没有 allow-popups，target=_blank 会被静默拦掉，
+  //   所以改成在当前面板内打开；另给一个复制地址的兜底。
+  const ext = d.external_comfy || {};
+  html += '<div class="row" style="margin-top:8px;gap:16px;font-size:12px">' +
+    '<span>Bot 8199：<b style="color:' + (running ? 'var(--ok)' : 'var(--muted)') + '">' +
+    (running ? '运行中' : '未运行') + '</b></span>' +
+    '<span>你的 8188：<b style="color:' + (ext.running ? 'var(--ok)' : 'var(--muted)') + '">' +
+    (ext.running ? '运行中' : '未运行') + '</b></span>' +
+    '</div>';
   html += '<div class="grid g2" style="margin-top:10px"><div>';
   html += '<div class="kv"><span class="k">工作流</span><span class="v">' + esc(st.preset || '—') + '</span></div>';
   html += '<div class="kv"><span class="k">底模</span><span class="v">' + esc(st.model || '—') + '</span></div>';

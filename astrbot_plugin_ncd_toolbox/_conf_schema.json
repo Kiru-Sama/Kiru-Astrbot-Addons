@@ -184,5 +184,35 @@
     "default": 21600,
     "description": "头像缓存有效期（秒），0 = 不缓存",
     "hint": "默认 21600 秒（6 小时）。头像很少变，缓存能省 CDN 请求，\n也能避免同一张图反复喂给模型（那一步最花钱）。\n★ 想看最新换的头像就调小，或设 0 强制每次都重新下载。"
+  },
+  "web_backend": {
+    "type": "string",
+    "description": "网页搜索/抓取走后端",
+    "hint": "deepseek（默认）：走 DeepSeek 官方 Search/Fetch API，按次计费；browser：本机 Edge 浏览器。官方失败会自动回退浏览器。",
+    "default": "deepseek"
+  },
+  "deepseek_api_key": {
+    "type": "string",
+    "description": "DeepSeek API Key（可留空）",
+    "hint": "留空自动从 AstrBot 的 deepseek 供应商配置里取；要单独计费/换号时再填。",
+    "default": ""
+  },
+  "deepseek_api_base": {
+    "type": "string",
+    "description": "DeepSeek API 地址",
+    "hint": "默认 https://api.deepseek.com，一般不用改。",
+    "default": "https://api.deepseek.com"
+  },
+  "web_fallback_browser": {
+    "type": "bool",
+    "description": "官方接口失败时回退本地浏览器",
+    "hint": "关（默认）：只走 DeepSeek 官方接口，失败直接报错，不会启动 Edge。\\n开：官方 429/超时/无 key 时才用本机浏览器兜底。",
+    "default": false
+  },
+  "merge_debug": {
+    "type": "bool",
+    "description": "合并调试日志",
+    "hint": "排查“3 秒合并”时不生效用：打开后每条进入合并钩子的消息都会打一行日志（含文本与组件类型），查完记得关。",
+    "default": false
   }
 }

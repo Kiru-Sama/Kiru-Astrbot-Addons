@@ -96,7 +96,7 @@
   },
   "11": {
     "inputs": {
-      "ckpt_name": "SDXL\\illustriousSnow25DHaremStyle_v10.safetensors"
+      "ckpt_name": "SDXL\\waiIllustriousSDXL_v170.safetensors"
     },
     "class_type": "CheckpointLoaderSimple",
     "_meta": {

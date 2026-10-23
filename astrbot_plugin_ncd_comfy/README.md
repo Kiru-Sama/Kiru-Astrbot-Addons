@@ -173,3 +173,4 @@ python 测试-出图.py --preset all --fast --img2img --free-test
 
 停用插件即可。`F:\ComfyUI_min` 是独立目录，删掉不影响原来那套 ComfyUI。
 旧的独立生图插件已移到 `AstrBot\data\plugins_disabled\astrbot_plugin_ncd_draw\`，随时可以搬回来。
+- `comfy_prompt_help(query, category=sfw|nsfw|all)`：在本地提示词法典里按关键词查 tag（只读，按需检索，不占常驻上下文）

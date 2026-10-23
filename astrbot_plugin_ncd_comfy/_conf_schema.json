@@ -158,8 +158,8 @@
   "comfy_default_lora": {
     "type": "string",
     "description": "sdxl 预设默认叠的 LoRA",
-    "hint": "只有 sdxl 预设、且模型没指定 lora 参数时自动加。写文件名或其中一段。\n默认 cunnyfunky；想换风格写 CunnyFunky_style_illu_v2。留空 = 不叠。",
-    "default": "cunnyfunky"
+    "hint": "留空（默认）= 不自动叠 LoRA；填名字才会在 sdxl 预设下自动加。",
+    "default": ""
   },
   "comfy_default_lora_strength": {
     "type": "float",
@@ -244,5 +244,23 @@
     "description": "私聊里两张图的最小间隔（秒）",
     "hint": "私聊自用可以短一点（默认 30 秒）；群聊用上面那个 300 秒的。",
     "default": 30.0
+  },
+  "comfy_codex_enabled": {
+    "type": "bool",
+    "description": "启用画图提示词法典检索",
+    "hint": "开（默认）：comfy_prompt_help 可以在本地法典里按关键词查 tag。关：工具直接返回关闭提示。",
+    "default": true
+  },
+  "comfy_codex_dir": {
+    "type": "string",
+    "description": "法典目录（留空=plugin_data/ncd_comfy/codex）",
+    "hint": "目录里放 sfw.txt / nsfw.txt；首次运行会从旧绘图插件的 kb/docs 自动复制一份。",
+    "default": ""
+  },
+  "comfy_codex_max_chars": {
+    "type": "int",
+    "description": "单次检索最多返回多少字",
+    "hint": "默认 1800；调小更省 token，调大能多给几条。",
+    "default": 1800
   }
 }

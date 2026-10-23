@@ -31,6 +31,8 @@ PRESETS: dict[str, dict] = {
         "label": "SDXL",
         "eta": 25,
         "model_kind": "checkpoint",
+        "model_dir": "SDXL",
+        "lora_dirs": ("sdxl",),
         "desc": "SDXL 单文件底模，最快",
     },
     "krea2": {
@@ -38,6 +40,8 @@ PRESETS: dict[str, dict] = {
         "label": "KREA2",
         "eta": 30,
         "model_kind": "unet",
+        "model_dir": "Krea2",
+        "lora_dirs": ("Krea2-风格", "Krea2-功能"),
         "desc": "KREA2（UNET + qwen3vl 文本编码器）",
     },
     "anima": {
@@ -45,6 +49,8 @@ PRESETS: dict[str, dict] = {
         "label": "ANIMA",
         "eta": 40,
         "model_kind": "unet",
+        "model_dir": "anima",
+        "lora_dirs": ("anima", "anima-bsk"),
         "desc": "Anima（UNET + Qwen3-0.6B 文本编码器）",
     },
     "moss": {
@@ -52,6 +58,8 @@ PRESETS: dict[str, dict] = {
         "label": "MOSS",
         "eta": 60,
         "model_kind": "unet",
+        "model_dir": "MOSS",
+        "lora_dirs": ("Moss",),
         "desc": "MOSS-Image（50 步，最慢但细节最好）",
     },
 }
@@ -360,4 +368,5 @@ def _insert_loras(graph: dict, roles: dict, loras: list[dict]) -> dict:
     graph[roles["sampler"]]["inputs"]["model"] = prev_model
     graph[roles["positive"]]["inputs"]["clip"] = prev_clip
     graph[roles["negative"]]["inputs"]["clip"] = prev_clip
+
     return graph

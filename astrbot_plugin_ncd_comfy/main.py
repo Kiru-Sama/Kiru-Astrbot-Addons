@@ -62,11 +62,11 @@ BUS_STATE = (
 
 # 出错时给模型的保底建议：别让它继续瞎试
 RECOMMENDED_HINT = (
-    "\n★ 非用户特别要求，直接用预设 sdxl + 默认 LoRA cunnyfunky（默认就是这套），"
+    "\n★ 非用户特别要求，直接用预设 sdxl（默认底模 waiIllustriousSDXL_v170，不叠 LoRA），"
     "不要手动指定 model / lora。"
 )
 
-TOOL_NAMES = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say", "comfy_output")
+TOOL_NAMES = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say", "comfy_output", "comfy_prompt_help")
 
 TOOL_SUMMARY = {
     "comfy_tools": "comfy_tools() —— 出图入口（必须先调）：四个工作流、参数范围、当前默认值",
@@ -74,6 +74,7 @@ TOOL_SUMMARY = {
     "comfy_models": "comfy_models(kind) —— 列底模 / 列 LoRA",
     "comfy_status": "comfy_status() —— ComfyUI 起没起来、显存、队列",
     "comfy_say": "comfy_say(text) —— 用参考音频的克隆音色合成一条语音发出去（慢，按需用）",
+    "comfy_prompt_help": "comfy_prompt_help(query, category=sfw|nsfw|all, limit) —— 按关键词查本地画图提示词法典",
 }
 
 GATE_ERROR = (
@@ -648,18 +649,19 @@ class NcdComfyPlugin(star.Star):
                 logger.warning("[comfy] 审核没给出明确结论（按放行处理）")
                 return False
             fails.pop(pid, None)
+            # verdict: True=通过 / False=拒绝
             if verdict:
-                self._audit_counts["reject"] += 1
-            else:
                 self._audit_counts["pass"] += 1
+            else:
+                self._audit_counts["reject"] += 1
             record = {
                 "ts": time.time(),
-                "verdict": "reject" if verdict else "pass",
+                "verdict": "pass" if verdict else "reject",
                 "provider": pid,
                 "prompt": (image_prompt or "")[:80],
                 "thumb": "",
             }
-            if verdict:
+            if not verdict:  # 只有被拦的才留 96px 小图
                 record["thumb"] = self._save_audit_thumb(data)
             self._audit_recent.append(record)
             del self._audit_recent[:-20]
@@ -844,6 +846,65 @@ class NcdComfyPlugin(star.Star):
         logger.info(f"[comfy] {tool} 被直接调用（未先调 comfy_tools），已返回指正")
         return GATE_ERROR.format(tool=tool)
 
+    # ------------------------------------------------------------------
+    #  提示词法典（本地只读检索）
+    # ------------------------------------------------------------------
+    def _codex_root(self) -> Path:
+        custom = self._conf_str("comfy_codex_dir")
+        if custom:
+            return Path(custom)
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "codex"
+        )
+
+    def _ensure_codex(self) -> dict[str, Path]:
+        """确保两份法典可用：优先配置目录，缺失时从旧绘图插件复制一次。"""
+        root = self._codex_root()
+        root.mkdir(parents=True, exist_ok=True)
+        files = {"sfw": root / "sfw.txt", "nsfw": root / "nsfw.txt"}
+        legacy = (
+            Path(PLUGIN_DIR).parents[1]
+            / "plugins_disabled"
+            / "astrbot_plugin_ncd_draw"
+            / "kb"
+            / "docs"
+        )
+        srcs = {
+            "sfw": legacy / "sfw" / "提示词常规法典.txt",
+            "nsfw": legacy / "nsfw" / "提示词色色法典.txt",
+        }
+        for cat, dst in files.items():
+            if dst.exists() and dst.stat().st_size > 0:
+                continue
+            src = srcs.get(cat)
+            if src and src.is_file():
+                try:
+                    dst.write_bytes(src.read_bytes())
+                    logger.info(f"[comfy] 法典已复制：{cat} → {dst}")
+                except OSError as exc:
+                    logger.warning(f"[comfy] 法典复制失败 {cat}: {exc}")
+        return files
+
+    def _codex_lines(self, cat: str) -> list[str]:
+        cache = getattr(self, "_codex_cache", None)
+        if cache is None:
+            cache = self._codex_cache = {}
+        if cat in cache:
+            return cache[cat]
+        path = self._ensure_codex().get(cat)
+        lines: list[str] = []
+        if path and path.is_file():
+            try:
+                lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+            except OSError as exc:
+                logger.warning(f"[comfy] 读法典失败 {cat}: {exc}")
+        cache[cat] = lines
+        return lines
+
     @filter.llm_tool(name="comfy_tools")
     async def comfy_tools(self, event: AstrMessageEvent) -> str:
         """出图入口（必须先调）：四个工作流、各自默认参数、当前可选底模。
@@ -882,10 +943,12 @@ class NcdComfyPlugin(star.Star):
             "",
             f"默认工作流：{default}（{presets.PRESETS[default]['label']}）",
             "",
+            "★ 写 prompt 前先调 comfy_prompt_help(query, category=sfw|nsfw|all) "
+            "—— 查本地法典，会返回匹配 tag + 一条示范成品提示词。",
             "另外：comfy_say(text) 可以用克隆音色说一句话、发成语音（约 6 秒一条）。",
             "超时兜底：comfy_output() 可以把 output 里已经画好的图直接发出来，不用重画。",
-            "默认风格：sdxl 预设会自动叠 cunnyfunky LoRA（强度 0.8）；要换就用 lora 参数覆盖。",
-            "推荐组合：sdxl + cunnyfunky（默认即此）。非用户特别要求，别手动指定 model / lora。",
+            "默认风格：sdxl 预设默认底模 waiIllustriousSDXL_v170，不自动叠 LoRA；要加风格用 lora 参数。",
+            "推荐组合：sdxl + waiIllustriousSDXL_v170（无 LoRA，默认即此）。非用户特别要求，别手动指定 model / lora。",
             "",
             "comfy_generate 参数（都能留空 = 用工作流里的默认值）：",
             "· prompt      英文标签式描述（10~15 个逗号分隔的短标签；中文会出废图）",
@@ -1254,6 +1317,117 @@ class NcdComfyPlugin(star.Star):
             "（脸、发色、服装、动作是否和用户要求一致），不对就调整描述重画；"
             "不要重复调用本工具，也不要声称看过图却描述不出细节。",
             data,
+        )
+
+    @filter.llm_tool(name="comfy_prompt_help")
+    async def comfy_prompt_help(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        category: str = "sfw",
+        limit: int = 5,
+    ) -> str:
+        """【写画图 prompt 前先调用】在本地提示词法典里按关键词查写法（只读）。
+
+        法典是长篇 tag 语料。返回匹配条目 + 一条可直接用的 suggested_prompt。
+        想要角色/服装/光影/画风 tags，先查它，别凭印象编标签。
+        例：comfy_prompt_help("silver hair, school uniform")
+
+        Args:
+            query(string): 关键词，多个用空格或逗号分隔（支持中英文）。
+            category(string): sfw（默认，常规）/ nsfw（涩涩）/ all（两个都查）。
+            limit(number): 返回几条，1~10，默认 5。
+        """
+        if not self._conf_bool("comfy_codex_enabled", True):
+            return json.dumps({"error": "法典检索已在配置里关闭"}, ensure_ascii=False)
+        q = str(query or "").strip()
+        if not q:
+            return json.dumps(
+                {"error": "给个关键词，比如：银发 红瞳 / school uniform / cinematic lighting"},
+                ensure_ascii=False,
+            )
+        cat = str(category or "sfw").strip().lower()
+        if cat not in ("sfw", "nsfw", "all"):
+            cat = "sfw"
+        cats = ["sfw", "nsfw"] if cat == "all" else [cat]
+        try:
+            n = max(1, min(10, int(limit or 5)))
+        except (TypeError, ValueError):
+            n = 5
+        terms = [x for x in re.split(r"[\s,，;；]+", q.lower()) if x]
+        if not terms:
+            terms = [q.lower()]
+
+        scored: list[tuple[int, str, int, str]] = []
+        for c in cats:
+            lines = self._codex_lines(c)
+            for i, line in enumerate(lines):
+                low = line.lower()
+                if not low.strip():
+                    continue
+                hits = sum(1 for term in terms if term in low)
+                if not hits:
+                    continue
+                score = hits * 10 + (5 if q.lower() in low else 0) - min(len(line) // 200, 3)
+                scored.append((score, c, i, line))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        if not scored:
+            return json.dumps(
+                {
+                    "query": q,
+                    "category": cat,
+                    "matches": [],
+                    "note": "法典里没查到这些关键词，换个说法或换 category=all。",
+                },
+                ensure_ascii=False,
+            )
+
+        max_chars = self._conf_int("comfy_codex_max_chars", 1800)
+        out: list[dict] = []
+        used = 0
+        for _score, c, i, line in scored:
+            text = line.strip()[:400]
+            entry = {"cat": c, "line": i + 1, "text": text}
+            cost = len(text) + 40
+            if out and used + cost > max_chars:
+                break
+            out.append(entry)
+            used += cost
+            if len(out) >= n:
+                break
+        # 从匹配条目里抽英文 tag，拼一条示范成品提示词
+        tags: list[str] = []
+        seen_low: set[str] = set()
+        for entry in out:
+            for part in re.split(r"[,，]", entry["text"]):
+                tag = part.strip().strip("【】{}（）()[]")
+                if not tag or len(tag) > 40:
+                    continue
+                if not re.fullmatch(r"[A-Za-z0-9 _\-:.']+", tag):
+                    continue
+                low = tag.lower()
+                if low in seen_low:
+                    continue
+                seen_low.add(low)
+                tags.append(tag)
+                if len(tags) >= 12:
+                    break
+            if len(tags) >= 12:
+                break
+        suggested = ""
+        if tags:
+            suggested = "masterpiece, best quality, " + ", ".join(tags)
+
+        return json.dumps(
+            {
+                "query": q,
+                "category": cat,
+                "matches": out,
+                "suggested_prompt": suggested,
+                "note": "suggested_prompt 是照着匹配条目拼的示范成品，可直接改；不够就换关键词再查。",
+            },
+            ensure_ascii=False,
         )
 
     @filter.llm_tool(name="comfy_models")

@@ -2,5 +2,5 @@ name: astrbot_plugin_ncd_toolbox
 display_name: 链路工具箱
 desc: 自建网页检索与正文抓取（走本机 Edge 真浏览器，不依赖第三方搜索 API）、把 QQ 账号自己的收藏表情发到会话里、看头像、回溯历史。
 author: 本地自用
-version: 2.16.0
+version: 2.17.2
 repo: ""

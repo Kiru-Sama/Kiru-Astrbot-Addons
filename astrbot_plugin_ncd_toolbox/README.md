@@ -1,5 +1,7 @@
 # 链路工具箱（astrbot_plugin_ncd_toolbox）
 
+- 网页搜索/抓取默认走 **DeepSeek 官方 Search/Fetch API**（`/v1/tools/search`、`/v1/tools/fetch`，按次计费），默认不回退（失败直接报错）；`web_fallback_browser=true` 才用本机 Edge 兜底，`web_backend=browser` 强制本地
+
 两个能力，都刻意**不走 AstrBot 的内置工具**：
 
 | 能力 | 为什么不用内置 |
@@ -26,13 +28,14 @@
 | `view_avatar` | 看某个人的头像 / 机器人自己的形象（图只给模型看） |
 | `recall_history` | 回溯最近 30/50/70/90 条历史 |
 
-### 画图已经拆出去了（`astrbot_plugin_ncd_draw`）
+### 画图 / 语音已经拆出去了（`astrbot_plugin_ncd_comfy`）
 
-2026-10-19 整理：SDXL 绘图（`drawing_tools` / `generate_image` / `switch_model`、生图页、worker、29 个 `sd_*` 配置）整体搬到独立插件 **链路绘图**。
+2026-10-22 起：绘图改走 ComfyUI，由 **链路本地生成**（`astrbot_plugin_ncd_comfy`）提供
+`comfy_tools` / `comfy_generate` / `comfy_models` / `comfy_status` / `comfy_say` / `comfy_output`。
 
-- 工具箱不再注册任何画图工具，`ncd_tools` 的清单里只提一句「画图在另一个插件」；
-- 画图参数、画幅上限、采样器、图生图文档都在那个插件的 README 里；
-- 旧配置已经自动迁移过去（原文件备份为 `*_config.json.bak-before-split`）。
+- 工具箱不注册任何画图工具；沉浸模式会用 `FOREIGN_KEEP` 放行这些外部工具；
+- 图形参数、工作流、显存换手说明都在那个插件的 README 里；
+- 更早的 diffusers 版独立绘图插件（`ncd_draw`）已经下线。
 
 ### 消息合并：同一人连发几条只回一次
 
@@ -542,3 +545,4 @@ python 测试-Markdown清洗.py   # QQ 里不显示 Markdown
 | `browser.py` | CDP 驱动 Edge：拉起/复用/导航/等待就绪/提取 |
 | `stickers.py` | SnowLuma 收藏表情：读取、分页渲染、缩略图、发送 |
 | `_conf_schema.json` | 面板配置项定义（绘图相关已迁到 ncd_draw） |
+- 合并支持**连续图片**：同一人 3 秒内连发多张图/图文混发，会并成一条交给模型（一次看到全部图），不再每张各回一句

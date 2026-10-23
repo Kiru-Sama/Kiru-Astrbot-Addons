@@ -60,6 +60,7 @@ try:  # AstrBot 以包的形式加载插件（data.plugins.<目录>.main）
     from .avatar import AvatarError, fetch_avatar, is_qq, parse_target
     from .history import ALLOWED_COUNTS, DEFAULT_COUNT, format_transcript
     from .browser import DEFAULT_SEARCH_URL, Browser, find_edge, public_url_error
+    from . import deepseek_web
     from .stickers import (
         StickerError,
         collection_key,
@@ -74,6 +75,7 @@ except ImportError:  # 直接以顶层模块导入时（离线单测）
     from avatar import AvatarError, fetch_avatar, is_qq, parse_target
     from history import ALLOWED_COUNTS, DEFAULT_COUNT, format_transcript
     from browser import DEFAULT_SEARCH_URL, Browser, find_edge, public_url_error
+    import deepseek_web  # type: ignore
     from stickers import (
         StickerError,
         collection_key,
@@ -321,13 +323,12 @@ MAX_STICKER_ORDERS = 64
 MENU_TOOL = "ncd_tools"
 
 # 本插件注册的工具名，用于自检日志
-# ★ 2026-10-19：绘图拆成独立插件（astrbot_plugin_ncd_draw）后，
-#   「沉浸模式只保留本插件工具」那条过滤不能再一刀切 —— 它会把姊妹插件的
-#   三个画图工具也删掉，实测表现为：每轮只有 7 个工具，模型直接说“我不会画图”。
-#   这里显式放行，别的插件以后再加工具也照这个写法加进来。
-FOREIGN_KEEP = ("drawing_tools", "generate_image", "switch_model", "draw_kb_search",
-                "comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say",
-                "comfy_output",
+# ★ 沉浸模式那条「只保留本插件工具」的过滤不能一刀切 —— 它会把姊妹插件的工具
+#   也删掉，实测表现为：工具少了一半，模型直接说“我不会画图/不会读文件”。
+#   这里显式放行别的插件提供的工具；以后谁再加工具，记得同步加到这一行。
+#   （2026-10-22：清掉已下线的独立绘图插件 ncd_draw 的四个旧工具名，避免误导）
+FOREIGN_KEEP = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status",
+                "comfy_say", "comfy_output", "comfy_prompt_help",
                 "extend_turns", "read_attachment")
 
 TOOL_NAMES = (
@@ -380,7 +381,7 @@ DEFAULT_MENU_HINT = (
     "以及看某个人的头像（图只给你自己看，不会发给用户）。\n"
     "要查东西 / 想发表情包 / 想画图之前，先调用工具： ncd_tools "
     "拿到当轮可用的工具清单，再按清单里的名字去调用具体工具。不要凭印象编工具名。\n"
-    "画图/换画图底模是另一个独立插件（链路绘图）的事：那边先调 drawing_tools。\n"
+    "画图 / 发语音是另一个插件（链路本地生成）的事：直接调 comfy_tools 看参数，再调 comfy_generate / comfy_say。\n"
     "调用方式：这是「工具调用」，不是聊天 —— 要真的把工具调起来、"
     "参数按工具定义里的字段填，不要只用文字说「我去搜一下」。\n"
     "一次只调一个，等结果回来再决定下一步；ncd_tools 返回的清单里写了每个工具要哪些参数，照着填。\n"
@@ -606,46 +607,52 @@ class NcdToolboxPlugin(star.Star):
     async def _merge_waiting(self, event: AstrMessageEvent) -> None:
         """把同一用户 merge_window 秒内连发的消息合并成一条，只回一次。
 
-        ★ 为什么挂在 OnWaitingLLMRequestEvent（而不是 OnLLMRequestEvent）：
-          AstrBot 在 OnLLMRequestEvent 之前就拿了一把【会话级锁】
-          （internal.py: acquire_lock(umo)），第二条消息的整条管线会排队等
-          第一条跑完（含出图几十秒）。也就是说旧实现里第二条根本进不了钩子，
-          永远合并不了 —— 2026-10-20 用日志确认：3 秒内连发只会各回各的。
-          而这个 waiting 钩子在拿锁之前触发，且 stop_event() 能让事件直接返回，
-          正好用来「先拦下、等窗口、合成一条再放行」。
-
-        规则：
-          · 第 1 条当队长，等 merge_window 秒后把合并文本写回 event.message_str，
-            后续 build 请求时 req.prompt 就是它（astr_main_agent.py:1371 读的就是这个字段）；
-          · 窗口内同一个用户再发的消息：拦下（stop_event）、追加、不单独回；
-          · 第一条放行后缓冲清空，之后的消息重新计时；
-          · 指令（/ 开头）和带图的消息不参与合并。
+        支持**连续图片**：图片/表情包不再被跳过，而是把后续消息里的
+        Image 组件并进第一条事件，模型一次就能看到全部图片。
+        纯文字、图文混发、多图连发都走同一套窗口。
         """
         try:
             if not self._conf_bool("merge_enabled", True):
                 return
             text = str(getattr(event, "message_str", "") or "").strip()
-            if not text or text.startswith("/"):
-                return
             try:
-                if any(isinstance(c, Comp.Image) for c in event.get_messages() or []):
-                    return
+                comps = list(event.get_messages() or [])
             except Exception:  # noqa: BLE001
-                pass
+                comps = []
+            images = [c for c in comps if isinstance(c, Comp.Image)]
+            # 既没文字也没图片（戳一戳、空消息）不参与合并
+            if not text and not images:
+                return
+            # 指令不合并（带图也一样）
+            if text.startswith("/"):
+                return
 
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             key = (umo, str(event.get_sender_id()))
             window = float(self._conf_int("merge_window", 3) or 3)
 
+            if self._conf_bool("merge_debug", False):
+                logger.info(
+                    f"[merge-debug] umo={umo[-14:]} sender={key[1]} "
+                    f"text={text[:30]!r} comps={[type(c).__name__ for c in comps]}"
+                )
+
             notify = False
             async with self._merge_lock:
                 st = self._merge_buf.get(key)
                 if st is None:
-                    st = {"texts": [text], "first": time.time(), "notified": False}
+                    st = {
+                        "texts": [text] if text else [],
+                        "images": list(images),
+                        "first": time.time(),
+                        "notified": False,
+                    }
                     self._merge_buf[key] = st
                     leader = True
                 else:
-                    st["texts"].append(text)
+                    if text:
+                        st["texts"].append(text)
+                    st["images"].extend(images)
                     leader = False
                     if self._conf_bool("merge_notice", True) and not st["notified"]:
                         st["notified"] = True
@@ -653,7 +660,9 @@ class NcdToolboxPlugin(star.Star):
 
             if not leader:
                 event.stop_event()
-                logger.info(f"[toolbox] 消息合并中（共 {len(st['texts'])} 条），本条不单独回复")
+                logger.info(
+                    f"[toolbox] 消息合并中（文字 {len(st['texts'])} 条 / 图 {len(st['images'])} 张），本条不单独回复"
+                )
                 if notify:
                     await self.context.send_message(
                         event.unified_msg_origin,
@@ -673,15 +682,32 @@ class NcdToolboxPlugin(star.Star):
                 await asyncio.sleep(wait)
             async with self._merge_lock:
                 texts = list(st["texts"])
+                images_all = list(st["images"])
                 self._merge_buf.pop(key, None)
 
             limit = max(1, self._conf_int("merge_max_messages", 10))
             texts = texts[:limit]
+
+            # ★ 领头事件自己已经带着自己的图；只把「别人」的图补进来
+            own_ids = {id(c) for c in (event.get_messages() or [])}
+            extra_images = [c for c in images_all if id(c) not in own_ids]
+            if extra_images:
+                try:
+                    base = list(getattr(event.message_obj, "message", []) or [])
+                    event.message_obj.message = base + extra_images
+                    logger.info(f"[toolbox] 合并图片：追加 {len(extra_images)} 张")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[toolbox] 合并图片失败（保留文字合并）: {exc}")
+
             if len(texts) > 1:
                 merged = "\n".join(texts)
                 event.message_str = merged
                 event.set_extra("ncd_merged_text", merged)
                 logger.info(f"[toolbox] 已合并 {len(texts)} 条消息交给模型：{merged[:80]!r}")
+            elif not texts and extra_images:
+                # 纯图片连发：文字留空，让模型直接看图
+                event.message_str = ""
+                logger.info(f"[toolbox] 已合并 {len(extra_images) + 1} 张图片（无文字）")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -1012,11 +1038,118 @@ class NcdToolboxPlugin(star.Star):
     #  工具 1/2：浏览器搜索与抓正文
     # ------------------------------------------------------------------
 
+    def _web_backend(self) -> str:
+        """deepseek（默认，官方接口） / browser（本机 Edge）。"""
+        raw = (self._conf_str("web_backend") or "deepseek").strip().lower()
+        return "browser" if raw in ("browser", "local", "edge", "bing") else "deepseek"
+
+    def _deepseek_base(self) -> str:
+        return self._conf_str("deepseek_api_base") or "https://api.deepseek.com"
+
+    def _deepseek_key(self) -> str:
+        key = self._conf_str("deepseek_api_key")
+        if key:
+            return key
+        try:
+            provider = self.context.get_provider_by_id("deepseek")
+            cfg = dict(getattr(provider, "provider_config", {}) or {})
+            raw = cfg.get("key")
+            if isinstance(raw, (list, tuple)) and raw:
+                return str(raw[0])
+            if isinstance(raw, str) and raw:
+                return raw
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            path = Path(__file__).resolve().parents[3] / "data" / "cmd_config.json"
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            for src in data.get("provider_sources") or []:
+                if str(src.get("id") or "") == "deepseek":
+                    raw = src.get("key")
+                    if isinstance(raw, (list, tuple)) and raw:
+                        return str(raw[0])
+                    if isinstance(raw, str) and raw:
+                        return raw
+        except Exception:  # noqa: BLE001
+            pass
+        return ""
+
+    async def _official_search(
+        self, query: str, count: int, with_snippet: bool, cache_key: str,
+        ori_question: str = "",
+    ):
+        """返回给模型的 JSON 字符串；None 表示应回退本地浏览器。"""
+        key = self._deepseek_key()
+        if not key:
+            logger.warning("[toolbox] 官方搜索缺少 DeepSeek key")
+            if self._conf_bool("web_fallback_browser", False):
+                return None
+            return json.dumps(
+                {"error": "官方搜索缺少 DeepSeek API key（可在插件配置里填，或检查 deepseek 供应商）"},
+                ensure_ascii=False,
+            )
+        t0 = time.time()
+        try:
+            items = await deepseek_web.search(
+                self._deepseek_base(), key, query,
+                count=count, ori_question=ori_question,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[toolbox] 官方搜索失败，尝试回退: {exc}")
+            if not self._conf_bool("web_fallback_browser", False):
+                return json.dumps({"error": f"官方搜索失败：{exc}"}, ensure_ascii=False)
+            return None
+
+        rows = []
+        for i, item in enumerate(items[:count], 1):
+            row = {
+                "i": i,
+                "title": str(item.get("title") or ""),
+                "url": str(item.get("url") or ""),
+            }
+            if with_snippet:
+                row["snippet"] = str(item.get("snippet") or "")
+            rows.append(row)
+        stats_add(search=1, search_ms=(time.time() - t0) * 1000, search_results=len(rows))
+        payload = json.dumps(
+            {
+                "query": query,
+                "engine": "deepseek",
+                "results": rows,
+                "note": (
+                    "以上来自 DeepSeek 官方搜索。要看某一页正文，用 fetch_page(url=...)。"
+                    "结果不对题就换更具体的关键词再搜。"
+                ),
+            },
+            ensure_ascii=False,
+        )
+        self._cache_put(cache_key, payload)
+        return payload
+
+    async def _official_fetch(self, url: str, max_chars: int):
+        key = self._deepseek_key()
+        if not key:
+            logger.warning("[toolbox] 官方抓取缺少 DeepSeek key")
+            if self._conf_bool("web_fallback_browser", False):
+                return None
+            raise RuntimeError("官方抓取缺少 DeepSeek API key")
+        got = await deepseek_web.fetch(self._deepseek_base(), key, url)
+        text = str(got.get("content") or "")
+        return {
+            "url": url,
+            "title": str(got.get("title") or ""),
+            "text": text[:max_chars],
+            "total_chars": len(text),
+            "status": 200,
+            "engine": "deepseek",
+        }
+
     @filter.llm_tool(name="web_search_bing")
     async def web_search_bing(
         self, event: AstrMessageEvent, query: str, count: int = 8
     ) -> str:
-        """用本机浏览器在搜索引擎上查网页。只返回结果的序号、标题和网址，不返回正文。
+        """搜索网页。默认走 DeepSeek 官方搜索（按次计费），失败自动回退本机浏览器。
+        只返回结果的序号、标题和网址，不返回正文。
 
         Args:
             query(string): 搜索关键词，用自然语言描述要找什么。
@@ -1056,6 +1189,15 @@ class NcdToolboxPlugin(star.Star):
             stats_add(cache_hit=1)
             logger.info(f"[toolbox] 搜索命中缓存：{query}")
             return cached
+
+        if self._web_backend() == "deepseek":
+            official = await self._official_search(
+                query, count, with_snippet, cache_key,
+                ori_question=await self._event_text(event),
+            )
+            if official is not None:
+                return official
+            logger.info("[toolbox] 官方搜索回退到本地浏览器")
 
         try:
             browser = await self._get_browser()
@@ -1129,7 +1271,8 @@ class NcdToolboxPlugin(star.Star):
 
     @filter.llm_tool(name="fetch_page")
     async def fetch_page(self, event: AstrMessageEvent, url: str, query: str = "") -> str:
-        """打开一个网页，把正文总结成要点后返回。搜索结果里的标题看着相关就用它读内容。
+        """打开一个网页，把正文总结成要点后返回。默认走 DeepSeek 官方抓取，失败回退本机浏览器。
+        搜索结果里的标题看着相关就用它读内容。
 
         Args:
             url(string): 要打开的完整网址，必须以 http:// 或 https:// 开头。
@@ -1138,7 +1281,15 @@ class NcdToolboxPlugin(star.Star):
         """
         url = str(url or "").strip()
         guard_on = self._conf_bool("block_private_urls", True)
-        problem = public_url_error(url) if guard_on else None
+        # ★ 官方 fetch 是 DeepSeek 服务器去抓，本地 hosts/DNS 不该参与判定；
+        #   只有走本机浏览器（或 PDF 本地解析）时才做私网检查。
+        official_backend = self._web_backend() == "deepseek"
+        is_pdf = url.split("?")[0].lower().endswith(".pdf")
+        problem = (
+            public_url_error(url)
+            if guard_on and (not official_backend or is_pdf)
+            else None
+        )
         if problem:
             return json.dumps(
                 {
@@ -1154,23 +1305,54 @@ class NcdToolboxPlugin(star.Star):
             # ★ PDF 直接解析，别塞给浏览器渲染（渲染出来是阅读器界面，抽不到正文）。
             if url.split("?")[0].lower().endswith(".pdf"):
                 return await self._read_pdf(url, fetch_chars)
-            browser = await self._get_browser()
-            # ★ 缓存键只含影响读取结果的参数：网址 + 字数上限。
-            #   放在这里（而不是函数开头）：上面的内网地址检查必须每次都跑，
-            #   被拒的地址不应该进缓存。
+            official = False
+            page = None
             page_key = f"p|{_norm_url(url)}|{fetch_chars}"
             cached_page = self._cache_get(page_key)
             if cached_page is not None:
                 stats_add(cache_hit=1)
                 logger.info(f"[toolbox] 抓正文命中缓存：{url}")
                 page = json.loads(cached_page)
-            else:
-                kws = keywords_of(query or self._event_text(event))
+            elif self._web_backend() == "deepseek":
+                try:
+                    page = await self._official_fetch(url, fetch_chars)
+                    official = page is not None
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[toolbox] 官方抓取失败，尝试回退: {exc}")
+                    if not self._conf_bool("web_fallback_browser", False):
+                        return json.dumps(
+                            {"url": url, "error": f"官方抓取失败：{exc}"},
+                            ensure_ascii=False,
+                        )
+                    page = None
+
+            if page is None:
+                # ★ 官方没返回（无 key / 被跳过）时也不能绕过“关回退”的开关
+                if not self._conf_bool("web_fallback_browser", False):
+                    return json.dumps(
+                        {
+                            "url": url,
+                            "error": "官方抓取不可用（未返回内容），且已关闭本地浏览器回退",
+                        },
+                        ensure_ascii=False,
+                    )
+                # 回退浏览器前再查一次（官方失败、本地抓的时候才需要）
+                if guard_on:
+                    landed_problem = public_url_error(url)
+                    if landed_problem:
+                        return json.dumps(
+                            {"url": url, "error": f"本地浏览器打不开这个网址：{landed_problem}"},
+                            ensure_ascii=False,
+                        )
+                browser = await self._get_browser()
+                kws = keywords_of(query or await self._event_text(event))
                 t0 = time.time()
                 page = await browser.fetch_text(url, fetch_chars, kws)
                 stats_add(fetch=1, fetch_ms=(time.time() - t0) * 1000,
                           fetch_chars=len(page.get("text") or ""))
-                self._cache_put(page_key, json.dumps(page, ensure_ascii=False))
+            self._cache_put(page_key, json.dumps(page, ensure_ascii=False))
+            if official:
+                stats_add(fetch=1, fetch_chars=len(page.get("text") or ""))
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[toolbox] 抓正文失败 {url}: {exc}", exc_info=True)
             return json.dumps(
@@ -1181,7 +1363,9 @@ class NcdToolboxPlugin(star.Star):
         # ★ 落地地址要再查一次：上面只验了「模型给的那个 URL」，
         #   而 302 跳转可以把它带到内网去（page["url"] 是导航结束后的真实地址）。
         landed_problem = (
-            public_url_error(str(page.get("url") or "")) if guard_on else None
+            public_url_error(str(page.get("url") or ""))
+            if guard_on and page.get("engine") != "deepseek"
+            else None
         )
         if landed_problem:
             logger.warning(f"[toolbox] {url} 被重定向到不允许的地址，已中止读取")
@@ -1201,7 +1385,13 @@ class NcdToolboxPlugin(star.Star):
             if status:
                 note = f"该网址返回 HTTP {status}。{note}"
             return json.dumps(
-                {"url": page["url"], "title": page["title"], "status": status, "error": note},
+                {
+                    "url": page["url"],
+                    "title": page["title"],
+                    "engine": page.get("engine") or "browser",
+                    "status": status,
+                    "error": note,
+                },
                 ensure_ascii=False,
             )
 
@@ -1217,6 +1407,7 @@ class NcdToolboxPlugin(star.Star):
                     {
                         "url": page["url"],
                         "title": page["title"],
+                        "engine": page.get("engine") or "browser",
                         "status": page.get("status") or 0,
                         "summary": summary,
                         "summarized": True,
@@ -1227,6 +1418,7 @@ class NcdToolboxPlugin(star.Star):
                 )
             logger.warning("[toolbox] 总结失败，退回截断原文")
 
+        page.setdefault("engine", "browser")
         return json.dumps(page, ensure_ascii=False)
 
     async def _event_text(self, event: AstrMessageEvent) -> str:
@@ -1258,8 +1450,8 @@ class NcdToolboxPlugin(star.Star):
                     ensure_ascii=False,
                 )
             return json.dumps(
-                {"url": url, "title": "", "text": text[:max_chars], "total_chars": len(text),
-                 "note": "PDF 直接解析的正文（前 8 页）。"},
+                {"url": url, "title": "", "engine": "pdf", "text": text[:max_chars],
+                 "total_chars": len(text), "note": "PDF 直接解析的正文（前 8 页）。"},
                 ensure_ascii=False,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1297,29 +1489,53 @@ class NcdToolboxPlugin(star.Star):
         if not seen:
             return json.dumps({"error": "没有有效的 http(s) 网址。"}, ensure_ascii=False)
 
+        # ★ 走官方 backend 时不能用本地 DNS 判断（hosts/代理会把域名指到 127.0.0.1）
+        official_backend = self._web_backend() == "deepseek"
         guard_on = self._conf_bool("block_private_urls", True)
-        good = [u for u in seen if not (guard_on and public_url_error(u))]
+        if official_backend:
+            good = list(seen)
+        else:
+            good = [u for u in seen if not (guard_on and public_url_error(u))]
         if not good:
             return json.dumps({"error": "这些网址都不允许访问（内网/本机地址）。"}, ensure_ascii=False)
 
         chars = max(400, min(2500, int(per_page_chars or 1200)))
-        kws = keywords_of(query or self._event_text(event))
-        browser = await self._get_browser()
+        kws = keywords_of(query or await self._event_text(event))
+        fallback = self._conf_bool("web_fallback_browser", False)
         sem = asyncio.Semaphore(3)
 
         async def one(u: str) -> dict:
             async with sem:
-                try:
+                page = None
+                engine = "browser"
+                if official_backend:
+                    try:
+                        page = await self._official_fetch(u, chars)
+                        if page is not None:
+                            engine = "deepseek"
+                    except Exception as exc:  # noqa: BLE001
+                        if not fallback:
+                            return {"url": u, "error": f"官方抓取失败：{exc}"}
+                        logger.warning(f"[toolbox] 批量读官方失败，回退浏览器: {exc}")
+                        page = None
+                if page is None:
+                    if not fallback:
+                        return {"url": u, "error": "官方抓取不可用，且已关闭本地浏览器回退"}
+                    if guard_on:
+                        problem = public_url_error(u)
+                        if problem:
+                            return {"url": u, "error": problem}
+                    browser = await self._get_browser()
                     page = await browser.fetch_text(u, chars, kws)
-                    return {
-                        "url": page.get("url") or u,
-                        "title": page.get("title") or "",
-                        "status": page.get("status") or 0,
-                        "text": (page.get("text") or "")[:chars],
-                        "total_chars": page.get("total_chars") or 0,
-                    }
-                except Exception as exc:  # noqa: BLE001
-                    return {"url": u, "error": f"{type(exc).__name__}: {exc}"}
+                    engine = "browser"
+                return {
+                    "url": page.get("url") or u,
+                    "title": page.get("title") or "",
+                    "engine": engine,
+                    "status": page.get("status") or 0,
+                    "text": (page.get("text") or "")[:chars],
+                    "total_chars": page.get("total_chars") or 0,
+                }
 
         t0 = time.time()
         items = await asyncio.gather(*(one(u) for u in good))

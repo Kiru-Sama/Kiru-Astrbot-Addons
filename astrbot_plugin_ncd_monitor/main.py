@@ -4275,7 +4275,24 @@ class Main(star.Star):
             return srv.server_address[1]
         secret = getattr(self, "_file_secret", "") or os.urandom(16).hex()
         self._file_secret = secret
-        roots = [os.path.realpath(os.path.join(ASTRBOT_ROOT, "data", "temp"))]
+        roots = [
+            os.path.realpath(os.path.join(ASTRBOT_ROOT, "data", "temp")),
+            # 会话分目录后的生成图（comfy_generate 落盘位置）
+            os.path.realpath(
+                os.path.join(ASTRBOT_ROOT, "data", "plugin_data", "ncd_comfy", "out")
+            ),
+            # 审核小图
+            os.path.realpath(
+                os.path.join(
+                    ASTRBOT_ROOT,
+                    "data",
+                    "plugins",
+                    "astrbot_plugin_ncd_comfy",
+                    "data",
+                    "audit",
+                )
+            ),
+        ]
         try:
             from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
@@ -4347,9 +4364,36 @@ class Main(star.Star):
         except Exception:  # noqa: BLE001
             return ""
 
+    def _probe_comfy(self, port: int) -> bool:
+        """探测本机某个 ComfyUI 端口（0.8 秒超时，5 秒缓存）。"""
+        now = time.time()
+        cache = getattr(self, "_comfy_probe_cache", None)
+        if cache is None:
+            cache = self._comfy_probe_cache = {}
+        hit = cache.get(port)
+        if hit and now - hit[0] < 5:
+            return hit[1]
+        ok = False
+        try:
+            import urllib.request
+
+            with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/system_stats", timeout=0.8
+            ) as resp:
+                ok = resp.status == 200
+        except Exception:  # noqa: BLE001
+            ok = False
+        cache[port] = (now, ok)
+        return ok
+
     def _enrich_comfy(self, data: dict) -> None:
         """给 comfy 状态附上内联缩略图：面板一次请求就够，不再二次取图。"""
         try:
+            # 两个端口：bot 的 8199 由 comfy 插件发布；你自己的完整版默认 8188
+            data["external_comfy"] = {
+                "port": 8188,
+                "running": self._probe_comfy(8188),
+            }
             for item in data.get("recent") or []:
                 path = str(item.get("path") or "")
                 if not path or not os.path.isfile(path):

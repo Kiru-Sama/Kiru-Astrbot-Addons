@@ -28,12 +28,12 @@
 
 ## 链路工具箱（toolbox）
 
-- **搜索与抓取**：本机 Edge（CDP）真浏览器，不依赖搜索 API；只回标题+网址，正文按关键词取窗口再总结
+- **搜索与抓取**：默认 DeepSeek 官方 Search/Fetch API（按次计费），默认不回退（失败直接报错），可开 `web_fallback_browser` 才用本机 Edge（CDP）；只回标题+网址，正文按关键词取窗口再总结
 - **批量读**：`web_read_many(urls, query)` 一次并发读最多 4 个网页
 - **收藏表情**：列表 / 预览 / 发送（分页、序号稳定、打乱顺序）
 - **头像 / 历史**：头像只给模型看；历史回溯 30/50/70/90 条
 - **工具菜单 + 沉浸模式**：收窄首轮工具数，剥掉机械工具说明
-- **消息合并**：同一人 3 秒内连发合并成一条，只回一次
+- **消息合并**：同一人 3 秒内连发合并成一条，只回一次；支持连续图片/图文混发（一次看到全部图）
 
 ## 链路本地生成（comfy）
 
@@ -45,6 +45,7 @@
 - **反风控**：发送随机延迟、全局回复间隔、群聊/私聊分档的图片限流
 - **按会话存图**：每会话一个目录，`comfy_output` 只取本会话，`reference=last` 也只认本会话
 - 工具：`comfy_tools` / `comfy_generate` / `comfy_models` / `comfy_status` / `comfy_say` / `comfy_output`
+- `comfy_prompt_help`：按关键词检索本地提示词法典（sfw/nsfw/all），写 prompt 前查 tag
 - 命令：`/comfyui off|on|status`（只关自己拉起的进程）
 
 ## 链路扩展（extra）

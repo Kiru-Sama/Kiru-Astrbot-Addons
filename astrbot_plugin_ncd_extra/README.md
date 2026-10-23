@@ -63,7 +63,7 @@
 气泡样式对齐 AstrBot 原生：
 
 ```
-🔨 调用工具: generate_image
+🔨 调用工具: comfy_generate
    ⤷ 参数: {"prompt":"一只猫","width":1024}
 ```
 
