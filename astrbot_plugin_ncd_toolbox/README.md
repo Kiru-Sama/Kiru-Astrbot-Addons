@@ -31,11 +31,17 @@
 ### 画图 / 语音已经拆出去了（`astrbot_plugin_ncd_comfy`）
 
 2026-10-22 起：绘图改走 ComfyUI，由 **链路本地生成**（`astrbot_plugin_ncd_comfy`）提供
-`comfy_tools` / `comfy_generate` / `comfy_models` / `comfy_status` / `comfy_say` / `comfy_output`。
+`comfy_tools` / `comfy_generate` / `comfy_models` / `comfy_status` / `comfy_say` / `comfy_output` / `comfy_gallery`。
 
 - 工具箱不注册任何画图工具；沉浸模式会用 `FOREIGN_KEEP` 放行这些外部工具；
 - 图形参数、工作流、显存换手说明都在那个插件的 README 里；
 - 更早的 diffusers 版独立绘图插件（`ncd_draw`）已经下线。
+
+### 搜索/抓正文的进度提示
+
+`web_notify`（默认开）：真正发起搜索时先发「🔍 开始搜索了…」，
+抓正文时发「📄 开始读取页面…」，批量读发「📄 开始读取 N 个页面…」。
+命中缓存不提示；关掉就完全静默。
 
 ### 消息合并：同一人连发几条只回一次
 

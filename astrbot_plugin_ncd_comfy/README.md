@@ -25,8 +25,66 @@ ComfyUI 按需拉起、空闲先卸模型再关进程。
 | `comfy_generate` | 出图：prompt / negative / preset / size / steps / cfg / seed / model / lora / reference / denoise |
 | `comfy_models` | 列底模（`kind=model`）或 LoRA（`kind=lora`） |
 | `comfy_status` | 起没起来、端口、显存、队列、模型是否已卸载 |
+| `comfy_say` | 克隆音色发语音（IndexTTS-2） |
+| `comfy_output` | 把本会话画过的图直接发出来（`index` / `file`） |
+| `comfy_gallery` | 按提示词/时间翻本会话历史图 |
 
 没先调 `comfy_tools` 就直接调其它工具 → 返回错误并指正。
+
+## 云端 API 异步出图
+
+`comfy_async_api`（默认开）只在**云端 API** 下生效：
+
+- 模型调 `comfy_generate` 后立即拿到“已交给后台”，bot 继续回聊天；
+- 图在后台画，完成后**直接发到会话**，不再经过模型确认；
+- 异步图发送后会作为 **user 角色的系统记录**写进会话历史（DeepSeek 只接受 user 消息带图，assistant 带图会 400），下一轮模型能直接看到；回合上限/压缩按 AstrBot 正常处理；
+- `comfy_self_view=false` 可关掉这个历史回传，省视觉 token；
+- 云端出图**不再等本地 LLM 空闲**；本地模型仍会等，避免抢显存；
+- 群聊仍然先过 NSFW 审核，没过审不发图；
+- 审核失败默认**合成一条系统通知重新走一轮**（`comfy_audit_nudge`），让模型自己回复“没发，要改描述还是取消”；
+  这条通知会作为用户消息进会话历史，每会话 10 分钟最多拉起一次，防止循环；
+- 本地模型（LM Studio）自动保持同步：它和 ComfyUI 抢显存，不能异步。
+
+异步任务在插件重载/退出时会被取消，并向对应会话发一句“图画被中断了”；失败也会发原因。后台任务有开始/取消/完成日志。
+
+## 设备繁忙检测
+
+`comfy_busy_detect`（默认开）在出图前判断游戏/桌面是否在抢显存：
+
+- `nvidia-smi` 读总显存、空闲显存、GPU 利用率；
+- 用 Windows 按进程 GPU 显存计数器读 ComfyUI 进程的 `DedicatedUsage`，算 ComfyUI 自己占用；
+- 拿不到进程计数器时，才回退到 torch 统计 / 模型大小估算；
+- `外部占用 = 总显存 - 空闲 - ComfyUI 自己占用`；
+- 外部占用 ≥ `comfy_busy_external_gb`（默认 3GB）、或可用显存 ≤ `comfy_busy_free_gb`（默认 2GB）且外部 ≥1GB、或 GPU ≥ `comfy_busy_util`（默认 70%）且外部 ≥1GB，就判繁忙。
+
+繁忙时**不阻塞出图**，只在 `comfy_generate` 的工具结果里加一句：
+
+> ⚠ 设备繁忙（外部占用约 5.2GB，GPU 82%）：这次出图速度会明显降低，可以告诉用户稍等。
+
+模型会自己决定怎么转告；异步照常立即返回、后台照常画。扣掉 ComfyUI 自己的占用是为了避免“它自己加载 SDXL”被误判成游戏占用；连续两次采样都繁忙才提示，避免 unload/load 时的一拍滞后误报。
+
+另外有独立的**排队提示**：`comfy_busy_queue`（默认 3，按总任务数算）。1 个生成中 + 3 个排队 = 总共 4 个，超过 3，新请求会追加：
+
+> ⏳ 排队较多（当前共有 4 个出图任务在画/排队）：这次出图会慢一些，可以告诉用户稍等。
+
+总共 3 个（1 生成 + 2 排队）不提示。排队提示和设备繁忙提示是两回事，可以同时出现。
+
+两个显存条件的区别：
+
+- **可用显存低 + 外部≥1GB**：游戏/桌面占着显存，即使 GPU 暂时空闲，ComfyUI 也可能被挤到共享内存。
+- **GPU 利用率高 + 外部≥1GB**：游戏正在跑，算力被抢，即使显存还没满也会变慢。
+
+两者不重复，可能只中一个，也可能两个都中；两个都中时提示会一起列出原因。
+
+## 每会话历史图
+
+每个会话一个目录：`data/plugin_data/ncd_comfy/out/<sha1(umo)[:16]>/`，
+里面除了图还有 `history.json`（提示词/工作流/时间/大小）。
+
+- 保留 **30 天 / 每会话 200 张**（`comfy_history_days` / `comfy_history_per_session`）；
+- `comfy_gallery(query, limit, days)` 列历史，`comfy_output(index/file)` 发旧图；
+- `reference` 新增 `index:3` / `file:xxx.png`，可以把旧图当参考图；
+- 插件重启后 `reference="last"` 会从会话目录读最新一张，不依赖内存。
 
 ## AI 能调什么
 
@@ -38,7 +96,7 @@ ComfyUI 按需拉起、空闲先卸模型再关进程。
 | `steps` / `cfg` / `seed` | 采样参数；留空/0 = 用工作流里的 |
 | `model` | 换底模（写文件名或其中一段，大小写不敏感） |
 | `lora` | 加 LoRA，如 `"cunnyfunky:0.8"`，多个逗号分隔 |
-| `reference` | 图生图：`message`=这条/被引用消息里的图，`last`=上一张 |
+| `reference` | 图生图：`message`=这条/被引用消息里的图，`last`=上一张，`index:3`/`file:xxx.png`=本会话历史图 |
 | `denoise` | 图生图重绘强度 0.05~1，默认 0.6 |
 
 ### 画幅三档

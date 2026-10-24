@@ -209,6 +209,12 @@
     "hint": "关（默认）：只走 DeepSeek 官方接口，失败直接报错，不会启动 Edge。\\n开：官方 429/超时/无 key 时才用本机浏览器兜底。",
     "default": false
   },
+  "web_notify": {
+    "type": "bool",
+    "description": "搜索/抓正文前发一句进度",
+    "hint": "开（默认）：真正发起搜索时发「🔍 开始搜索了…」，抓正文时发「📄 开始读取页面…」。\\n命中缓存不提示。关掉就完全静默。",
+    "default": true
+  },
   "merge_debug": {
     "type": "bool",
     "description": "合并调试日志",

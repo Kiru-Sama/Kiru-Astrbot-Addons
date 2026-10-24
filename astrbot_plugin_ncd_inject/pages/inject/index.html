@@ -26,6 +26,27 @@
   .tag { font-size:12px; color:var(--muted); white-space:nowrap; }
   .ok { color:var(--ok); } .bad { color:var(--bad); }
   pre { white-space:pre-wrap; margin:0; font:inherit; }
+  .picker { position:relative; }
+  .picker-btn { width:100%; display:flex; align-items:center; gap:10px; text-align:left; background:#fff; color:var(--text); border:1px solid var(--border); border-radius:8px; padding:8px 10px; cursor:pointer; }
+  .picker-btn:hover { border-color:#c9d3e3; }
+  .pick-text { flex:1; min-width:0; display:flex; flex-direction:column; }
+  .pick-title { font-size:14px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .pick-sub { font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .caret { flex:0 0 auto; color:var(--muted); font-size:11px; }
+  .picker-pop { position:absolute; z-index:20; left:0; right:0; top:calc(100% + 6px); background:#fff; border:1px solid var(--border); border-radius:10px; box-shadow:0 10px 30px rgba(15,23,42,.12); padding:8px; }
+  .filter { width:100%; border:1px solid var(--border); border-radius:8px; padding:7px 10px; margin-bottom:6px; }
+  .picker-list { max-height:320px; overflow:auto; }
+  .s-item { width:100%; display:flex; align-items:center; gap:10px; text-align:left; background:transparent; color:var(--text); padding:7px 8px; border-radius:8px; }
+  .s-item:hover { background:#f2f5fa; }
+  .s-item.active { background:#e8f0fe; }
+  .s-main { min-width:0; flex:1; }
+  .s-title, .s-sub { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .s-title { font-size:13px; }
+  .s-sub { font-size:12px; color:var(--muted); }
+  .ava { position:relative; width:34px; height:34px; flex:0 0 34px; border-radius:50%; background:#eef1f6; color:#8a919b; display:inline-flex; align-items:center; justify-content:center; font-size:14px; overflow:hidden; }
+  .ava img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .ava-badge { position:absolute; right:0; bottom:0; min-width:14px; height:14px; border-radius:7px; background:#3b82f6; color:#fff; font-size:9px; line-height:14px; text-align:center; padding:0 2px; }
+  .picker-empty { padding:10px 8px; }
 </style>
 </head>
 <body>
@@ -33,8 +54,22 @@
     <h1>对话提示注入</h1>
     <div class="sub">只在按下注入后的<b>下一轮回复</b>里生效；加到系统提示词末尾，不写进聊天记录。</div>
 
-    <label>目标会话</label>
-    <select id="sessionSelect"><option value="">加载中…</option></select>
+    <label>目标会话 <span class="tag" id="sessionCount"></span></label>
+    <div class="picker" id="picker">
+      <button type="button" class="picker-btn" id="pickerBtn" aria-haspopup="listbox" aria-expanded="false">
+        <span class="ava"><span class="ava-letter">?</span></span>
+        <span class="pick-text">
+          <span class="pick-title">加载中…</span>
+          <span class="pick-sub"></span>
+        </span>
+        <span class="caret">▾</span>
+      </button>
+      <div class="picker-pop" id="pickerPop" hidden>
+        <input id="sessionFilter" class="filter" placeholder="搜昵称 / QQ号 / 群名 / 群号" autocomplete="off" />
+        <div class="picker-list" id="sessionList" role="listbox"></div>
+        <div class="picker-empty hint" id="pickerEmpty" hidden>没有匹配的会话</div>
+      </div>
+    </div>
 
     <label>提示内容（会拼成：嗯，或许我可以…）</label>
     <textarea id="textInput" placeholder="例如：把画幅拉大一点，再试一次"></textarea>
@@ -57,6 +92,7 @@
 <script>
 const P = window.AstrBotPluginPage;
 let sessions = [];
+let selectedUmo = "";
 
 function esc(s) {
   return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -70,20 +106,168 @@ function setStatus(text, ok) {
   el.className = "hint " + (ok === true ? "ok" : ok === false ? "bad" : "");
 }
 
+function ago(ts) {
+  if (!ts) return "";
+  const sec = Date.now() / 1000 - ts;
+  if (sec < 60) return "刚刚";
+  if (sec < 3600) return Math.floor(sec / 60) + " 分钟前";
+  if (sec < 86400) return Math.floor(sec / 3600) + " 小时前";
+  return Math.floor(sec / 86400) + " 天前";
+}
+
+function kindWord(kind) {
+  return kind === "group" ? "群聊" : "私聊";
+}
+
+// QQ 号才写 QQ/群；别的平台（如 webchat 的 uuid）写 ID/会话，别乱认
+function idWord(item) {
+  const num = String((item.kind === "group" ? item.gid : item.uid) || "");
+  if (/^\d{4,12}$/.test(num)) return item.kind === "group" ? "群" : "QQ";
+  return item.kind === "group" ? "会话" : "ID";
+}
+
+function sessionTitle(item) {
+  if (item.kind === "group") return item.gname || (idWord(item) + " " + (item.gid || "未知"));
+  return item.name || (idWord(item) + " " + (item.uid || "未知"));
+}
+
+function sessionSub(item) {
+  const bits = [kindWord(item.kind)];
+  if (item.kind === "group") {
+    bits.push(idWord(item) + " " + (item.gid || "未知"));
+    if (item.name) bits.push("最后 " + item.name);
+  } else {
+    bits.push(idWord(item) + " " + (item.uid || "未知"));
+  }
+  const when = ago(item.ts);
+  if (when) bits.push(when);
+  return bits.join(" · ");
+}
+
+function avatarHtml(item) {
+  const isGroup = item.kind === "group";
+  const base = isGroup ? (item.gname || "群") : (item.name || "私");
+  const letter = (base || "?").trim().slice(0, 1).toUpperCase();
+  return '<span class="ava"><span class="ava-letter">' + esc(letter) + "</span>" +
+    (item.avatar ? '<img data-av="' + esc(item.avatar) + '" alt="" />' : "") +
+    (isGroup ? '<span class="ava-badge">群</span>' : "") +
+    "</span>";
+}
+
+// ★ 内联脚本里不能出现 src 或 href 的属性字面量：AstrBot 的插件页服务
+//   会把整页 HTML 里所有 src/href 属性当资源地址重写（连 <script> 里的字符串也改），
+//   结果图片会去请求插件页自己。这里用 data-av 存地址，插入后再赋 src。
+function bindAvatarFallback(root) {
+  root.querySelectorAll(".ava img[data-av]").forEach(function (img) {
+    img.onerror = function () { img.style.display = "none"; };
+    const src = img.getAttribute("data-av");
+    if (src) img.src = src;
+  });
+}
+
+function currentSession() {
+  for (let i = 0; i < sessions.length; i += 1) {
+    if (sessions[i].umo === selectedUmo) return sessions[i];
+  }
+  return null;
+}
+
+function renderPicked() {
+  const btn = document.getElementById("pickerBtn");
+  const cur = currentSession();
+  if (!cur) {
+    btn.innerHTML = '<span class="ava"><span class="ava-letter">?</span></span>' +
+      '<span class="pick-text"><span class="pick-title">' +
+      (sessions.length ? "选一个会话" : "还没有记录到会话") + "</span>" +
+      '<span class="pick-sub">' +
+      (sessions.length ? "" : "先在目标会话里说句话") + "</span></span>" +
+      '<span class="caret">▾</span>';
+    return;
+  }
+  btn.innerHTML = avatarHtml(cur) +
+    '<span class="pick-text"><span class="pick-title">' + esc(sessionTitle(cur)) + "</span>" +
+    '<span class="pick-sub">' + esc(sessionSub(cur)) + "</span></span>" +
+    '<span class="caret">▾</span>';
+  bindAvatarFallback(btn);
+}
+
+function renderSessions() {
+  const kw = (document.getElementById("sessionFilter").value || "").trim().toLowerCase();
+  const list = document.getElementById("sessionList");
+  const rows = sessions.filter(function (s) {
+    if (!kw) return true;
+    return [s.label, s.name, s.gname, s.uid, s.gid].join(" ").toLowerCase().indexOf(kw) >= 0;
+  });
+  document.getElementById("pickerEmpty").hidden = rows.length > 0;
+  list.innerHTML = rows.map(function (s) {
+    const active = s.umo === selectedUmo ? " active" : "";
+    return '<button type="button" class="s-item' + active + '" data-umo="' + esc(s.umo) + '" role="option">' +
+      avatarHtml(s) +
+      '<span class="s-main"><span class="s-title">' + esc(sessionTitle(s)) + "</span>" +
+      '<span class="s-sub">' + esc(sessionSub(s)) + "</span></span></button>";
+  }).join("");
+  bindAvatarFallback(list);
+  list.querySelectorAll(".s-item").forEach(function (btn) {
+    btn.onclick = function () {
+      selectedUmo = btn.getAttribute("data-umo") || "";
+      renderPicked();
+      renderSessions();
+      togglePicker(false);
+    };
+  });
+}
+
+function togglePicker(open) {
+  const pop = document.getElementById("pickerPop");
+  const btn = document.getElementById("pickerBtn");
+  const next = open == null ? pop.hidden : !!open;
+  pop.hidden = !next;
+  btn.setAttribute("aria-expanded", next ? "true" : "false");
+  if (next) {
+    const input = document.getElementById("sessionFilter");
+    input.value = "";
+    renderSessions();
+    input.focus();
+  }
+}
+
+// 后端没重载时只会给 umo+label，这里就地补号码/头像，别显示成“QQ 未知”
+function normalizeSession(raw) {
+  const item = Object.assign({}, raw);
+  const m = String(item.umo || "").match(/^([^:]+):([^:]+):(.+)$/);
+  if (!m) return null; // 脏 umo（如 "u"）选了也注入不到
+  const parts = [m[1], m[2], m[3]];
+  if (!item.kind) item.kind = parts[1] === "GroupMessage" ? "group" : "private";
+  if (!item.uid && item.kind === "private") item.uid = parts[2] || "";
+  if (!item.gid && item.kind === "group") item.gid = parts[2] || "";
+  const label = String(item.label || "");
+  if (item.kind === "group") {
+    const cut = label.lastIndexOf(" · ");
+    if (!item.gname) item.gname = cut > 0 ? label.slice(0, cut) : "";
+    if (!item.name) item.name = cut > 0 ? label.slice(cut + 3) : "";
+  } else if (!item.name && label.indexOf("私聊 · ") === 0) {
+    item.name = label.slice(5);
+  }
+  if (!item.avatar) {
+    const num = String((item.kind === "group" ? item.gid : item.uid) || "");
+    if (/^\d{4,12}$/.test(num)) {
+      item.avatar = item.kind === "group"
+        ? "https://p.qlogo.cn/gh/" + num + "/" + num + "/100"
+        : "https://q1.qlogo.cn/g?b=qq&nk=" + num + "&s=100";
+    }
+  }
+  return item;
+}
+
 async function loadSessions() {
   try {
     const d = await P.apiGet("/inject/sessions");
-    sessions = (d && d.items) || [];
-    const sel = document.getElementById("sessionSelect");
-    if (!sessions.length) {
-      sel.innerHTML = '<option value="">还没有记录到会话，先在目标会话里说句话</option>';
-      return;
-    }
-    const keep = sel.value;
-    sel.innerHTML = sessions.map(function (s) {
-      return '<option value="' + esc(s.umo) + '">' + esc(s.label || s.umo) + "</option>";
-    }).join("");
-    if (keep) sel.value = keep;
+    sessions = ((d && d.items) || []).map(normalizeSession).filter(Boolean);
+    const exists = sessions.some(function (s) { return s.umo === selectedUmo; });
+    if (!exists) selectedUmo = sessions.length ? sessions[0].umo : "";
+    document.getElementById("sessionCount").textContent = sessions.length ? sessions.length + " 个" : "";
+    renderPicked();
+    renderSessions();
   } catch (e) {
     setStatus("会话列表加载失败：" + e, false);
   }
@@ -118,7 +302,7 @@ async function loadPending() {
 }
 
 async function inject() {
-  const umo = document.getElementById("sessionSelect").value;
+  const umo = selectedUmo;
   const text = document.getElementById("textInput").value.trim();
   if (!umo) { setStatus("先选一个会话", false); return; }
   if (!text) { setStatus("提示内容不能为空", false); return; }
@@ -144,6 +328,14 @@ document.getElementById("injectBtn").onclick = inject;
 document.getElementById("textInput").addEventListener("input", function () {
   const t = this.value.trim();
   document.getElementById("preview").textContent = "嗯，或许我可以" + (t || "…");
+});
+document.getElementById("pickerBtn").onclick = function () { togglePicker(); };
+document.getElementById("sessionFilter").addEventListener("input", renderSessions);
+document.addEventListener("click", function (e) {
+  if (!document.getElementById("picker").contains(e.target)) togglePicker(false);
+});
+document.addEventListener("keydown", function (e) {
+  if (e.key === "Escape") togglePicker(false);
 });
 
 (async function () {

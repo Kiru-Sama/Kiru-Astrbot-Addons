@@ -328,7 +328,7 @@ MENU_TOOL = "ncd_tools"
 #   这里显式放行别的插件提供的工具；以后谁再加工具，记得同步加到这一行。
 #   （2026-10-22：清掉已下线的独立绘图插件 ncd_draw 的四个旧工具名，避免误导）
 FOREIGN_KEEP = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status",
-                "comfy_say", "comfy_output", "comfy_prompt_help",
+                "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help",
                 "extend_turns", "read_attachment")
 
 TOOL_NAMES = (
@@ -382,6 +382,7 @@ DEFAULT_MENU_HINT = (
     "要查东西 / 想发表情包 / 想画图之前，先调用工具： ncd_tools "
     "拿到当轮可用的工具清单，再按清单里的名字去调用具体工具。不要凭印象编工具名。\n"
     "画图 / 发语音是另一个插件（链路本地生成）的事：直接调 comfy_tools 看参数，再调 comfy_generate / comfy_say。\n"
+    "云端 API 下出图是异步的：先回复，画好自动发图；翻旧图用 comfy_gallery + comfy_output。\n"
     "调用方式：这是「工具调用」，不是聊天 —— 要真的把工具调起来、"
     "参数按工具定义里的字段填，不要只用文字说「我去搜一下」。\n"
     "一次只调一个，等结果回来再决定下一步；ncd_tools 返回的清单里写了每个工具要哪些参数，照着填。\n"
@@ -496,6 +497,18 @@ class NcdToolboxPlugin(star.Star):
         if isinstance(raw, bool):
             return raw
         return str(raw).strip().lower() in ("1", "true", "yes", "on", "是")
+
+    async def _web_notice(self, event: AstrMessageEvent, text: str) -> None:
+        """搜索/抓正文前先往会话发一句进度，像出图那样。"""
+        if not self._conf_bool("web_notify", True):
+            return
+        try:
+            await self.context.send_message(
+                event.unified_msg_origin,
+                MessageChain(chain=[Comp.Plain(str(text))]),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[toolbox] 进度提示发送失败（忽略）: {exc}")
 
     def _conf_float(self, key: str, default: float) -> float:
         """取浮点配置。
@@ -1190,6 +1203,7 @@ class NcdToolboxPlugin(star.Star):
             logger.info(f"[toolbox] 搜索命中缓存：{query}")
             return cached
 
+        await self._web_notice(event, "🔍 开始搜索了…")
         if self._web_backend() == "deepseek":
             official = await self._official_search(
                 query, count, with_snippet, cache_key,
@@ -1304,11 +1318,14 @@ class NcdToolboxPlugin(star.Star):
             fetch_chars = self._conf_int("fetch_max_chars", 4000)
             # ★ PDF 直接解析，别塞给浏览器渲染（渲染出来是阅读器界面，抽不到正文）。
             if url.split("?")[0].lower().endswith(".pdf"):
+                await self._web_notice(event, "📄 开始读取 PDF…")
                 return await self._read_pdf(url, fetch_chars)
             official = False
             page = None
             page_key = f"p|{_norm_url(url)}|{fetch_chars}"
             cached_page = self._cache_get(page_key)
+            if cached_page is None:
+                await self._web_notice(event, "📄 开始读取页面…")
             if cached_page is not None:
                 stats_add(cache_hit=1)
                 logger.info(f"[toolbox] 抓正文命中缓存：{url}")
@@ -1499,6 +1516,7 @@ class NcdToolboxPlugin(star.Star):
         if not good:
             return json.dumps({"error": "这些网址都不允许访问（内网/本机地址）。"}, ensure_ascii=False)
 
+        await self._web_notice(event, f"📄 开始读取 {len(good)} 个页面…")
         chars = max(400, min(2500, int(per_page_chars or 1200)))
         kws = keywords_of(query or await self._event_text(event))
         fallback = self._conf_bool("web_fallback_browser", False)

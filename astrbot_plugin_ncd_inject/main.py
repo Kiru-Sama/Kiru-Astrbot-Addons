@@ -7,9 +7,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import os
 import time
+import urllib.request
 import uuid
 from pathlib import Path
 
@@ -25,6 +28,13 @@ except Exception:  # noqa: BLE001
 PLUGIN_DIR = Path(__file__).resolve().parent
 STATE_PATH = PLUGIN_DIR.parents[2] / "data" / "plugin_data" / "ncd_inject" / "state.json"
 PREFIX = "嗯，或许我可以"
+
+# 头像：拉成 data URL 塞进接口，面板里就不必再去外网取图
+# （浏览器扩展/CSP/代理都可能拦外链，服务端这边是通的）
+_AVATAR_TTL = 6 * 3600
+_AVATAR_FAIL_TTL = 600
+_AVATAR_LIMIT = 2 * 1024 * 1024
+_AVATAR_CACHE: dict[str, tuple[float, str, bool]] = {}
 
 
 def _now() -> float:
@@ -87,30 +97,59 @@ class Main(star.Star):
 
     # ---------------- 会话记录 ----------------
     @staticmethod
-    def _label(event: AstrMessageEvent) -> str:
+    def _sender_id(event: AstrMessageEvent) -> str:
         try:
-            name = event.get_sender_name()
+            sid = str(event.get_sender_id() or "")
+        except Exception:  # noqa: BLE001
+            sid = ""
+        if sid:
+            return sid
+        sender = getattr(getattr(event, "message_obj", None), "sender", None)
+        raw = getattr(sender, "user_id", "")
+        return str(raw) if raw not in (None, "") else ""
+
+    @classmethod
+    def _session_info(cls, event: AstrMessageEvent) -> dict:
+        """记下能区分会话的最小信息：类型、号码、名字。"""
+        try:
+            name = str(event.get_sender_name() or "")
         except Exception:  # noqa: BLE001
             name = ""
-        gid = ""
         try:
             gid = str(event.get_group_id() or "")
         except Exception:  # noqa: BLE001
             gid = ""
+        gname = ""
         if gid:
             try:
                 group = getattr(getattr(event, "message_obj", None), "group", None)
                 gname = str(getattr(group, "group_name", "") or "")
             except Exception:  # noqa: BLE001
                 gname = ""
-            return f"{gname or '群' + gid} · {name}".strip(" ·")
-        return f"私聊 · {name}".strip(" ·")
+            label = f"{gname or '群' + gid} · {name}".strip(" ·")
+        else:
+            label = f"私聊 · {name}".strip(" ·")
+        try:
+            platform = str(event.get_platform_id() or "")
+        except Exception:  # noqa: BLE001
+            platform = ""
+        return {
+            "label": label,
+            "platform": platform,
+            "kind": "group" if gid else "private",
+            "uid": cls._sender_id(event),
+            "name": name,
+            "gid": gid,
+            "gname": gname,
+        }
 
     def _track(self, event: AstrMessageEvent) -> str:
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if not umo:
             return ""
-        self._sessions[umo] = {"label": self._label(event), "ts": _now()}
+        info = self._session_info(event)
+        info["ts"] = _now()
+        self._sessions[umo] = info
         self._save()
         return umo
 
@@ -217,13 +256,152 @@ class Main(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[inject] 注册 API 失败: {exc}")
 
+    @staticmethod
+    def _parse_umo(umo: str) -> dict:
+        """umo = 平台:消息类型:会话ID。拆不开的（早期脏数据）返回空。"""
+        parts = str(umo or "").split(":", 2)
+        if len(parts) != 3 or not all(parts):
+            return {}
+        return {"platform": parts[0], "mtype": parts[1], "chat_id": parts[2]}
+
+    @staticmethod
+    def _split_old_label(label: str) -> tuple[str, str]:
+        """老记录只存了「群名 · 昵称」/「私聊 · 昵称」，拆回来补号码。"""
+        text = str(label or "").strip()
+        if text == "私聊":
+            return "", ""
+        if text.startswith("私聊 · "):
+            return "", text[len("私聊 · ") :].strip()
+        if " · " in text:
+            head, tail = text.rsplit(" · ", 1)
+            return head.strip(), tail.strip()
+        return text, ""
+
+    @staticmethod
+    def _qq(value: str) -> str:
+        text = str(value or "").strip()
+        if text.isdigit() and 4 <= len(text) <= 12:
+            return text
+        return ""
+
+    @classmethod
+    def _avatar(cls, kind: str, number: str) -> str:
+        qq = cls._qq(number)
+        if not qq:
+            return ""
+        if kind == "group":
+            return f"https://p.qlogo.cn/gh/{qq}/{qq}/100"
+        return f"https://q1.qlogo.cn/g?b=qq&nk={qq}&s=100"
+
+    @staticmethod
+    def _download_avatar(url: str) -> bytes:
+        req = urllib.request.Request(
+            url, headers={"User-Agent": "Mozilla/5.0 (AstrBot ncd_inject avatar)"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            ctype = str(resp.headers.get("Content-Type") or "")
+            if not ctype.startswith("image/"):
+                return b""
+            raw = resp.read(_AVATAR_LIMIT + 1)
+        return raw if len(raw) <= _AVATAR_LIMIT else b""
+
+    @classmethod
+    async def _avatar_value(cls, kind: str, number: str) -> str:
+        """头像优先返回 data URL；拉不到就退回外链，让浏览器再试一次。"""
+        url = cls._avatar(kind, number)
+        if not url:
+            return ""
+        now = _now()
+        hit = _AVATAR_CACHE.get(url)
+        if hit:
+            ttl = _AVATAR_TTL if hit[2] else _AVATAR_FAIL_TTL
+            if now - hit[0] < ttl:
+                return hit[1]
+        value = url
+        try:
+            raw = await asyncio.to_thread(cls._download_avatar, url)
+            if raw:
+                mime = "image/png" if raw[:8] == b"\x89PNG\r\n\x1a\n" else "image/jpeg"
+                value = "data:" + mime + ";base64," + base64.b64encode(raw).decode("ascii")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[inject] 拉头像失败 {url}: {exc}")
+        _AVATAR_CACHE[url] = (now, value, value != url)
+        return value
+
     async def api_sessions(self):
-        rows = [
-            {"umo": k, "label": v.get("label", ""), "ts": v.get("ts", 0)}
-            for k, v in self._sessions.items()
-        ]
+        rows = []
+        for umo, meta in self._sessions.items():
+            if not isinstance(meta, dict):
+                continue
+            parts = self._parse_umo(umo)
+            if not parts:
+                continue  # 脏 umo（如 "u"）选不了，别让它占列表
+            kind = str(meta.get("kind") or "")
+            if kind not in ("group", "private"):
+                kind = "group" if parts["mtype"] == "GroupMessage" else "private"
+            gid = str(meta.get("gid") or "")
+            uid = str(meta.get("uid") or "")
+            gname = str(meta.get("gname") or "")
+            name = str(meta.get("name") or "")
+            if not gname or not name:
+                head, tail = self._split_old_label(meta.get("label", ""))
+                if kind == "group":
+                    gname = gname or head
+                    name = name or tail
+                else:
+                    name = name or tail
+            if kind == "group":
+                gid = gid or parts["chat_id"]
+            else:
+                uid = uid or parts["chat_id"]
+            number = gid if kind == "group" else uid
+            rows.append(
+                {
+                    "umo": umo,
+                    "label": meta.get("label", ""),
+                    "ts": meta.get("ts", 0),
+                    "platform": parts["platform"],
+                    "kind": kind,
+                    "uid": uid,
+                    "name": name,
+                    "gid": gid,
+                    "gname": gname,
+                    "avatar": "",
+                    "_avatar_kind": "group" if kind == "group" else "user",
+                    "_avatar_number": number,
+                }
+            )
         rows.sort(key=lambda x: x["ts"], reverse=True)
-        return json_response({"items": rows[:50]})
+        items = rows[:50]
+        meta = {
+            row["umo"]: (
+                str(row.pop("_avatar_kind", "")),
+                str(row.pop("_avatar_number", "")),
+            )
+            for row in items
+        }
+        sem = asyncio.Semaphore(8)
+
+        async def _fill(row: dict) -> None:
+            kind, number = meta[row["umo"]]
+            async with sem:
+                try:
+                    row["avatar"] = await self._avatar_value(kind, number)
+                except Exception:  # noqa: BLE001
+                    row["avatar"] = ""
+
+        # 头像只是锦上添花：最多等 4 秒，没拉到的先用外链，别把列表拖死
+        tasks = [asyncio.create_task(_fill(row)) for row in items]
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=4.0)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        for row in items:
+            if not row["avatar"]:
+                row["avatar"] = self._avatar(*meta[row["umo"]])
+        return json_response({"items": items})
 
     async def api_pending(self):
         ttl = self._ttl()

@@ -18,11 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import difflib
 import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import tempfile
 import time
 import uuid
@@ -35,6 +38,10 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 import astrbot.api.message_components as Comp
 from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.provider import ProviderRequest
+from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
+from astrbot.core.platform.message_session import MessageSession
+from astrbot.core.platform.message_type import MessageType
 from astrbot.core.star.filter.command import GreedyStr
 
 try:  # 审核模块（内部用，不注册成聊天工具）
@@ -66,7 +73,7 @@ RECOMMENDED_HINT = (
     "不要手动指定 model / lora。"
 )
 
-TOOL_NAMES = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say", "comfy_output", "comfy_prompt_help")
+TOOL_NAMES = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help")
 
 TOOL_SUMMARY = {
     "comfy_tools": "comfy_tools() —— 出图入口（必须先调）：四个工作流、参数范围、当前默认值",
@@ -74,8 +81,16 @@ TOOL_SUMMARY = {
     "comfy_models": "comfy_models(kind) —— 列底模 / 列 LoRA",
     "comfy_status": "comfy_status() —— ComfyUI 起没起来、显存、队列",
     "comfy_say": "comfy_say(text) —— 用参考音频的克隆音色合成一条语音发出去（慢，按需用）",
+    "comfy_output": "comfy_output(index, hours, file) —— 发本会话画过的图（不用重画）",
+    "comfy_gallery": "comfy_gallery(query, limit) —— 按提示词/时间翻本会话的历史图",
     "comfy_prompt_help": "comfy_prompt_help(query, category=sfw|nsfw|all, limit) —— 按关键词查本地画图提示词法典",
 }
+
+# 后台任务里会再次调用 comfy_generate，用这个标记避免无限套娃
+_ASYNC_RUN: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "ncd_comfy_async_job", default=False
+)
+HISTORY_FILE = "history.json"
 
 GATE_ERROR = (
     "出图失败：ComfyUI 的绘图操作必须【先调用 comfy_tools】（每个会话调一次即可）。\n"
@@ -133,6 +148,15 @@ class NcdComfyPlugin(star.Star):
         self._last_image_at: dict[str, float] = {}
         self._last_voice_at: dict[str, float] = {}
         self._last_reply_at: dict[str, float] = {}
+        # 云端 API 下的异步出图任务：不让回复等画完
+        self._bg_tasks: set[asyncio.Task] = set()
+        self._bg_umo: dict[asyncio.Task, str] = {}
+        # 异步审核失败后，下一轮给模型的提醒（umo -> (ts, note)）
+        self._pending_notes: dict[str, tuple[float, str]] = {}
+        # 审核失败自动拉起 bot 回复：每会话 10 分钟最多一次，防止循环
+        self._audit_nudge_at: dict[str, float] = {}
+        # 异步图写入会话历史时串行，避免并发写坏 content
+        self._conv_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     #  配置
@@ -520,6 +544,194 @@ class NcdComfyPlugin(star.Star):
                 return
             await asyncio.sleep(0.5)
 
+    # ---- 设备繁忙检测：游戏/桌面占显存时提醒模型 ----
+    async def _comfy_own_gb(self) -> float:
+        """ComfyUI 自己占的专用显存（GB）。
+
+        ★ /system_stats 的 torch_vram_total 在 cudaMallocAsync 下基本不涨，
+          不能拿它当模型占用；优先查 Windows 按进程的 GPU 显存计数器。
+        """
+        client = getattr(self, "_client_obj", None)
+        if client is None:
+            try:
+                client = self._client()
+            except Exception:  # noqa: BLE001
+                client = None
+        pid = 0
+        try:
+            pid = int(getattr(getattr(client, "_proc", None), "pid", 0) or 0)
+        except Exception:  # noqa: BLE001
+            pid = 0
+
+        if os.name == "nt":
+            ps = shutil.which("powershell.exe") or shutil.which("pwsh.exe")
+            if ps:
+                script = (
+                    f"$targetPid={pid}; "
+                    "if (-not $targetPid) { "
+                    "$targetPid=(Get-CimInstance Win32_Process | "
+                    "Where-Object { $_.Name -eq 'python.exe' -and "
+                    "$_.CommandLine -match 'ComfyUI.*main\\.py' } | "
+                    "Select-Object -First 1 -ExpandProperty ProcessId) }; "
+                    "$v=0; "
+                    "if ($targetPid) { "
+                    "$v=(Get-CimInstance Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory "
+                    "-ErrorAction SilentlyContinue | "
+                    "Where-Object { $_.Name -like ('pid_' + $targetPid + '_*') } | "
+                    "Measure-Object DedicatedUsage -Sum).Sum }; "
+                    "if ($v) { [string]$v } else { '0' }"
+                )
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        ps,
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        script,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    out, _ = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+                    lines = (out or b"").decode("utf-8", "replace").strip().splitlines()
+                    if lines:
+                        value = float(lines[-1].strip())
+                        if value > 0:
+                            return value / 1024**3
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[comfy] 读 ComfyUI 进程显存失败: {exc}")
+
+        # 回退 1：torch 统计（某些后端/版本会准）
+        try:
+            stats = await asyncio.to_thread(client.healthy_sync) if client else None
+            dev = ((stats or {}).get("devices") or [{}])[0]
+            t = float(dev.get("torch_vram_total") or 0)
+            f = float(dev.get("torch_vram_free") or 0)
+            if t - f >= 1024**3:
+                return max(0.0, (t - f) / 1024**3)
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 回退 2：模型已加载时按模型大小估（SDXL 约 6.5GB）
+        if getattr(client, "_model_loaded", False):
+            name = str(getattr(self, "_last_model", "") or "")
+            try:
+                if name and os.path.isfile(name):
+                    return os.path.getsize(name) / 1024**3
+            except OSError:
+                pass
+            return 6.5
+        return 0.0
+
+    async def _gpu_metrics(self) -> dict:
+        """读 nvidia-smi + ComfyUI 自己的显存，估算外部占用。"""
+        exe = shutil.which("nvidia-smi")
+        if not exe:
+            for candidate in (
+                r"C:\Windows\System32\nvidia-smi.exe",
+                r"C:\Program Files\NVIDIA Corporation\NVSMI\nvidia-smi.exe",
+            ):
+                if os.path.isfile(candidate):
+                    exe = candidate
+                    break
+        if not exe:
+            return {}
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                exe,
+                "--query-gpu=memory.total,memory.free,utilization.gpu",
+                "--format=csv,noheader,nounits",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=2.5)
+            line = (out or b"").decode("utf-8", "replace").strip().splitlines()
+            if not line:
+                return {}
+            parts = [p.strip() for p in line[0].split(",")]
+            total_mib = float(parts[0])
+            free_mib = float(parts[1])
+            util = float(parts[2]) if len(parts) > 2 else -1.0
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 读 GPU 显存失败（忽略）: {exc}")
+            return {}
+
+        total_gb = total_mib / 1024.0
+        free_gb = free_mib / 1024.0
+        comfy_gb = await self._comfy_own_gb()
+        external_gb = max(0.0, total_gb - free_gb - comfy_gb)
+        return {
+            "total_gb": total_gb,
+            "free_gb": free_gb,
+            "util": util,
+            "comfy_gb": comfy_gb,
+            "external_gb": external_gb,
+        }
+
+    def _busy_note(self, metrics: dict) -> str:
+        """把繁忙指标翻成给模型看的一句话；不忙返回空串。"""
+        if not metrics or not self._conf_bool("comfy_busy_detect", True):
+            return ""
+        ext = metrics.get("external_gb")
+        free = float(metrics.get("free_gb") or 0)
+        util = float(metrics.get("util") or -1)
+        ext_limit = float(self._conf_int("comfy_busy_external_gb", 3))
+        free_limit = float(self._conf_int("comfy_busy_free_gb", 2))
+        util_limit = float(self._conf_int("comfy_busy_util", 70))
+
+        reasons = []
+        if ext is not None:
+            if ext >= ext_limit:
+                reasons.append(f"外部占用约 {ext:.1f}GB")
+            if free <= free_limit and ext >= 1.0:
+                reasons.append(f"可用显存仅 {free:.1f}GB")
+            if util >= util_limit and ext >= 1.0:
+                reasons.append(f"GPU {util:.0f}%")
+        elif free <= 1.0 and util >= util_limit:
+            # 拿不到 ComfyUI 自己的占用时只报最严重的：快没显存且 GPU 高负载
+            reasons.append(f"可用显存仅 {free:.1f}GB，GPU {util:.0f}%")
+        if not reasons:
+            return ""
+        return (
+            "⚠ 设备繁忙（" + "，".join(reasons) + "）："
+            "这次出图速度会明显降低，可以告诉用户稍等。"
+        )
+
+    async def _busy_note_for_current(self) -> str:
+        if _ASYNC_RUN.get():
+            return ""
+        try:
+            first = self._busy_note(await self._gpu_metrics())
+            if not first:
+                return ""
+            # ComfyUI 卸载/加载模型时，进程显存计数可能慢一拍：
+            # 只认连续两次都繁忙，避免瞬时误报。
+            await asyncio.sleep(0.8)
+            second = self._busy_note(await self._gpu_metrics())
+            return second if second else ""
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 繁忙检测失败（忽略）: {exc}")
+            return ""
+
+    def _queue_note(self) -> str:
+        """排队人数提示；和设备显存繁忙是两回事。"""
+        if not self._conf_bool("comfy_busy_detect", True):
+            return ""
+        limit = self._conf_int("comfy_busy_queue", 3)
+        if limit <= 0:
+            return ""
+        existing = max(
+            len(getattr(self, "_bg_tasks", set()) or ()),
+            int(getattr(self, "_gen_waiting", 0) or 0),
+        )
+        if existing <= limit:
+            return ""
+        return (
+            f"⏳ 排队较多（当前共有 {existing} 个出图任务在画/排队）："
+            "这次出图会慢一些，可以告诉用户稍等。"
+        )
+
     # ---- 显存换手：本地模型 ↔ ComfyUI ----
     def _lms_exe(self) -> str:
         """找 LM Studio 的 lms 命令。"""
@@ -715,13 +927,16 @@ class NcdComfyPlugin(star.Star):
         """
         self._gen_waiting += 1
         try:
+            logger.info("[comfy] 等待出图槽…")
             async with self._render_lock:
-                # ★ 换手只在本地模型时做：云端 API 不占显卡，卸了反而白等重载
+                logger.info("[comfy] 获得出图槽")
+                # ★ 换手/等 LLM 只在本地模型时做：云端 API 不占显卡
                 local = await self._llm_is_local(event)
                 handoff = local and self._conf_bool("comfy_handoff", True)
-                if handoff:
-                    await self._unload_llm()
-                await self._wait_llm_idle()
+                if local:
+                    if handoff:
+                        await self._unload_llm()
+                    await self._wait_llm_idle()
                 self._gpu_write(comfy=1, comfy_ts=time.time())
                 poller = asyncio.create_task(self._queue_poller())
                 try:
@@ -766,12 +981,51 @@ class NcdComfyPlugin(star.Star):
                     return data
         return None
 
+    def _reference_ready(
+        self, reference: str, event: AstrMessageEvent
+    ) -> str | None:
+        """异步入队前先检查参考图存不存在，避免先承诺再失败。"""
+        ref = str(reference or "").strip().lower()
+        if not ref:
+            return None
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if ref in ("last", "previous", "上一张", "刚才那张"):
+            if self._last_image_bytes.get(umo):
+                return None
+            entries = self._history_read(umo)
+            if entries:
+                return None
+            return (
+                "出图失败：本会话还没有画过图，reference=last 没有参考图。"
+                "留空改成文生图，或先画一张。"
+            )
+        if ref.startswith(("index:", "history:")):
+            try:
+                idx = max(1, int(ref.split(":", 1)[1]))
+            except ValueError:
+                return "出图失败：reference 的写法应是 index:3（1=最新）。"
+            entries = self._history_read(umo)
+            if idx > len(entries):
+                return (
+                    f"出图失败：本会话只有 {len(entries)} 张历史图，"
+                    f"取不到 index:{idx}。先 comfy_gallery 看序号，或留空改成文生图。"
+                )
+            return None
+        if ref.startswith("file:"):
+            name = os.path.basename(str(reference).split(":", 1)[1].strip())
+            if not name or not (self._session_image_dir(umo) / name).is_file():
+                return f"出图失败：本会话历史里没有「{name}」，先 comfy_gallery 查文件名。"
+            return None
+        return None
+
     async def _reference_bytes(self, reference: str, event: AstrMessageEvent) -> bytes | None:
         """把 reference 解析成图片字节。
 
         · ""            → 不用参考图（走文生图）
         · "message"     → 这条 / 被引用消息里的图
-        · "last"        → 上一张生成的图
+        · "last"        → 上一张生成的图（重启后从会话历史里取最新一张）
+        · "index:3"     → 本会话历史里第 3 新的图（1=最新）
+        · "file:xxx.png"→ 本会话历史里指定文件名的图
         ★ 认不出、或没有图 → 返回 None，由调用方给出明确错误（不要静默退回文生图，
           那会让人以为"改了图"，实际出来一张全新的图）。
         """
@@ -781,6 +1035,35 @@ class NcdComfyPlugin(star.Star):
             data = self._last_image_bytes.get(umo)
             if data:
                 return data
+            # 插件重启/内存清空后，仍能从会话目录拿最新一张
+            try:
+                entries = self._history_read(umo)
+                if entries:
+                    path = self._session_image_dir(umo) / entries[0]["file"]
+                    if path.is_file():
+                        return path.read_bytes()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 取历史最新图失败: {exc}")
+            return None
+        if ref.startswith(("index:", "history:")):
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            try:
+                idx = max(1, int(ref.split(":", 1)[1]))
+                entries = self._history_read(umo)
+                if idx <= len(entries):
+                    path = self._session_image_dir(umo) / entries[idx - 1]["file"]
+                    if path.is_file():
+                        return path.read_bytes()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 取历史第 N 张失败: {exc}")
+            return None
+        if ref.startswith("file:"):
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            name = os.path.basename(str(reference).split(":", 1)[1].strip())
+            if name:
+                path = self._session_image_dir(umo) / name
+                if path.is_file():
+                    return path.read_bytes()
             return None
         if ref in ("message", "msg", "image", "图", "这张", "消息图"):
             data = self._component_image_bytes(event.get_messages() or [])
@@ -835,6 +1118,234 @@ class NcdComfyPlugin(star.Star):
         if parts:
             # ★ 只在「确实要加载权重」时发这一句；别的进度一律不推。
             await self._notify(event, "⏳ 正在加载模型权重…出图后直接把图发你。")
+
+    # ------------------------------------------------------------------
+    #  云端 API：异步出图（回复不等信息画完）
+    # ------------------------------------------------------------------
+    async def _async_ok(self, event: AstrMessageEvent) -> bool:
+        """只有云端 API 才异步：本地模型和 ComfyUI 抢显存，必须同步排队。"""
+        if not self._conf_bool("comfy_async_api", True):
+            return False
+        try:
+            return not await self._llm_is_local(event)
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _spawn_image_job(self, event: AstrMessageEvent, kwargs: dict) -> None:
+        task = asyncio.create_task(self._image_job(event, kwargs))
+        self._bg_tasks.add(task)
+        self._bg_umo[task] = str(getattr(event, "unified_msg_origin", "") or "")
+        task.add_done_callback(self._on_bg_done)
+        logger.info(
+            f"[comfy] 后台任务已创建 preset={kwargs.get('preset') or '默认'} "
+            f"reference={kwargs.get('reference') or '-'}"
+        )
+
+    def _on_bg_done(self, task: asyncio.Task) -> None:
+        self._bg_tasks.discard(task)
+        umo = self._bg_umo.pop(task, "")
+        if task.cancelled():
+            logger.warning(f"[comfy] 后台任务被取消 → {umo}")
+            return
+        exc = task.exception()
+        if exc:
+            logger.error(f"[comfy] 后台出图任务异常: {exc}", exc_info=exc)
+
+    async def _image_job(self, event: AstrMessageEvent, kwargs: dict) -> None:
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        token = _ASYNC_RUN.set(True)
+        logger.info(f"[comfy] 后台任务开始 → {umo}")
+        try:
+            result = await self.comfy_generate(event, **kwargs)
+        except asyncio.CancelledError:
+            logger.warning(f"[comfy] 后台任务在生成前被取消 → {umo}")
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 异步出图异常: {exc}", exc_info=True)
+            await self._send_chat(umo, f"图画失败了：{type(exc).__name__}: {exc}")
+            return
+        finally:
+            _ASYNC_RUN.reset(token)
+        if isinstance(result, str):
+            await self._handle_async_result(event, umo, result)
+        else:
+            logger.info(f"[comfy] 后台任务完成，图已自动发出 → {umo}")
+
+    def _queue_audit_nudge(self, event: AstrMessageEvent, umo: str) -> bool:
+        """审核失败时合成一条系统消息，走完整 pipeline 拉起 bot 回复。"""
+        now = time.time()
+        if now - self._audit_nudge_at.get(umo, 0) < 600:
+            return False
+        try:
+            session = MessageSession.from_str(umo)
+            platform = self.context.get_platform_inst(session.platform_name)
+            if platform is None:
+                return False
+            msg = AstrBotMessage()
+            msg.type = session.message_type
+            msg.self_id = str(getattr(event, "get_self_id", lambda: "")() or "")
+            msg.session_id = session.session_id
+            msg.message_id = uuid.uuid4().hex
+            msg.sender = MessageMember(user_id="0", nickname="系统")
+            text = (
+                "[系统通知] 刚才那张图在群聊审核里没通过，没有发出去。"
+                "请回复用户：说明没发，并问他是要调整描述重画还是取消。"
+                "不要自动重画，也不要重复发图。"
+            )
+            msg.message = [Comp.Plain(text)]
+            msg.message_str = text
+            msg.raw_message = None
+            msg.timestamp = int(now)
+            if session.message_type == MessageType.GROUP_MESSAGE:
+                group = Group(session.session_id)
+                original = getattr(getattr(event, "message_obj", None), "group", None)
+                group.group_name = getattr(original, "group_name", None)
+                msg.group = group
+            new_event = platform.create_event(msg)
+            new_event.is_wake = True
+            new_event.is_at_or_wake_command = True
+            platform.commit_event(new_event)
+            self._audit_nudge_at[umo] = now
+            logger.info(f"[comfy] 审核失败已合成系统消息，拉起 bot 回复 → {umo}")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 审核失败拉起回复失败，退回文字提示: {exc}")
+            return False
+
+    async def _handle_async_result(
+        self, event: AstrMessageEvent, umo: str, result: str
+    ) -> None:
+        first = result.split("\n", 1)[0].strip()
+        if "被判为 NSFW" in result:
+            # 直接合成一轮，让模型自己组织“没过审，要改还是算了”
+            if self._conf_bool("comfy_audit_nudge", True) and self._queue_audit_nudge(
+                event, umo
+            ):
+                self._pending_notes.pop(umo, None)
+                return
+            await self._send_chat(
+                umo,
+                "这张图没过审，没发。要整改重画就调整描述再来；不想画了就取消。",
+            )
+            self._pending_notes[umo] = (
+                time.time(),
+                "上一张图在群聊审核里没通过，没有发出去。"
+                "用户若要重画，先调整描述；不想画就取消。",
+            )
+            logger.info("[comfy] 异步出图被审核拦下，已提示会话")
+            return
+        if "这张图先不发了" in result:
+            await self._send_chat(umo, first)
+            return
+        if result.startswith("出图失败"):
+            await self._send_chat(umo, first)
+            return
+        # 画幅提醒、参数校验之类的文字结果：也得让人看见，不能静默
+        await self._send_chat(umo, first or "图画失败了，稍后再试。")
+
+    async def _send_chat(self, umo: str, text: str) -> None:
+        if not umo or not text:
+            return
+        try:
+            await self.context.send_message(
+                umo, MessageChain(chain=[Comp.Plain(str(text))])
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 后台提示发送失败: {exc}")
+
+    @staticmethod
+    def _image_data_url(path: Path) -> str:
+        """把会话图压到 1024px，供写进历史时控制视觉 token。"""
+        try:
+            import io
+
+            from PIL import Image
+
+            img = Image.open(path)
+            img = img.convert("RGB")
+            img.thumbnail((1024, 1024))
+            buf = io.BytesIO()
+            img.save(buf, "JPEG", quality=85)
+            return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 历史图转 data URL 失败: {exc}")
+            return ""
+
+    async def _append_image_history(self, umo: str, path: Path) -> None:
+        """把已发出的异步图作为 user 角色的系统记录写进当前会话历史。
+
+        ★ DeepSeek 只接受 user 消息里的 image_url；assistant 带图会 400。
+        ★ 用 [系统记录] 前缀说明这是 bot 自己刚画好的图。
+        """
+        if not self._conf_bool("comfy_self_view", True):
+            return
+        try:
+            cm = self.context.conversation_manager
+            cid = await cm.get_curr_conversation_id(umo)
+            if not cid:
+                logger.info("[comfy] 异步图未写入历史：当前没有会话 id")
+                return
+            url = await asyncio.to_thread(self._image_data_url, Path(path))
+            if not url:
+                return
+            async with (getattr(self, "_conv_lock", None) or asyncio.Lock()):
+                conv = await cm.get_conversation(umo, cid)
+                if conv is None:
+                    logger.warning("[comfy] 异步图未写入历史：拿不到当前会话")
+                    return
+                raw = getattr(conv, "history", None)
+                if isinstance(raw, list):
+                    history = list(raw)
+                elif isinstance(raw, str) and raw.strip():
+                    try:
+                        import json as _json
+
+                        history = list(_json.loads(raw))
+                    except Exception as exc:  # noqa: BLE001
+                        # ★ 解析失败绝不能写空历史，否则会把旧对话冲掉
+                        logger.warning(f"[comfy] 会话历史解析失败，放弃写入: {exc}")
+                        return
+                elif raw in (None, ""):
+                    history = []
+                else:
+                    logger.warning("[comfy] 会话历史格式未知，放弃写入")
+                    return
+                history.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": (
+                                    "[系统记录] 这是你刚才画好并已发到会话里的图"
+                                    f"（{Path(path).name}），供你查看。"
+                                ),
+                            },
+                            {"type": "image_url", "image_url": {"url": url}},
+                        ],
+                    }
+                )
+                await cm.update_conversation(
+                    umo, conversation_id=cid, history=history
+                )
+            logger.info(f"[comfy] 异步图已写入会话历史 → {umo}（{Path(path).name}）")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 异步图写入历史失败（图已发出）: {exc}")
+
+    @filter.on_llm_request()
+    async def _drain_pending_note(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
+        """审核失败后，下一轮让模型知道“刚才那张没发”，方便整改或取消。"""
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        item = self._pending_notes.pop(umo, None)
+        if not item:
+            return
+        ts, note = item
+        if time.time() - ts > 900:
+            return
+        base = (req.system_prompt or "").rstrip()
+        req.system_prompt = (base + "\n\n[系统提醒] " + note).strip()
 
     # ------------------------------------------------------------------
     #  工具入口
@@ -946,7 +1457,10 @@ class NcdComfyPlugin(star.Star):
             "★ 写 prompt 前先调 comfy_prompt_help(query, category=sfw|nsfw|all) "
             "—— 查本地法典，会返回匹配 tag + 一条示范成品提示词。",
             "另外：comfy_say(text) 可以用克隆音色说一句话、发成语音（约 6 秒一条）。",
-            "超时兜底：comfy_output() 可以把 output 里已经画好的图直接发出来，不用重画。",
+            "云端 API：comfy_generate 会立即返回，图在后台画、画完直接发；不要等，也不要重复调。",
+            "翻旧图：comfy_gallery(query) 看列表，comfy_output(index/file) 直接发；本会话保留 "
+            f"{self._history_days()} 天 / {self._history_limit()} 张，不会串到别的会话。",
+            "超时兜底：comfy_output() 可以把已经画好的图直接发出来，不用重画。",
             "默认风格：sdxl 预设默认底模 waiIllustriousSDXL_v170，不自动叠 LoRA；要加风格用 lora 参数。",
             "推荐组合：sdxl + waiIllustriousSDXL_v170（无 LoRA，默认即此）。非用户特别要求，别手动指定 model / lora。",
             "",
@@ -959,7 +1473,8 @@ class NcdComfyPlugin(star.Star):
             "· steps       1~150；cfg 0~30；seed 整数（-1 = 随机）",
             "· model       换底模（写文件名或其中一段，大小写不敏感）",
             '· lora        加 LoRA，如 "cunnyfunky:0.8"；多个用逗号隔开',
-            "· reference   图生图：message=这条/被引用消息里的图；last=上一张；留空=文生图",
+            "· reference   图生图：message=这条/被引用消息里的图；last=上一张；"
+            "index:3=本会话历史第 3 新；file:xxx.png=指定历史文件；留空=文生图",
             '· denoise     图生图重绘强度 0.05~1（越大越像重画）；0 = 用配置默认',
             "",
             "prompt 硬规则：① 只写英文；② 逗号分隔短标签，别写长句；",
@@ -1008,6 +1523,9 @@ class NcdComfyPlugin(star.Star):
     ) -> str:
         """按预设工作流画一张图并发到当前会话。★ 必须先调用 comfy_tools。
 
+        ★ 云端 API 下本工具会立即返回：图在后台画，画完直接发到会话。
+          所以这一轮不要等、不要再调一次，也不要说“图已经画好了/我看到了”。
+
         Args:
             prompt(string): 英文【标签式】描述（逗号分隔短标签，10~15 个，
                 开头写 masterpiece, best quality, highres）。中文会出废图。
@@ -1031,6 +1549,62 @@ class NcdComfyPlugin(star.Star):
         gate = self._gate(event, "comfy_generate")
         if gate:
             return gate
+
+        # ★ 云端 API：把整张图丢到后台，先把聊天放出去。
+        #   本地模型必须同步 —— 它和 ComfyUI 抢显存。
+        #   带“消息里的图”做参考时也走同步：临时图可能在事件结束后被清掉。
+        ref_raw = str(reference or "").strip().lower()
+        message_ref = ref_raw in ("message", "msg", "image", "图", "这张", "消息图")
+        if not _ASYNC_RUN.get() and not message_ref and await self._async_ok(event):
+            early = str(prompt or "").strip()
+            if not early:
+                return "出图失败：prompt 是空的。写一段英文标签式描述再调。"
+            want_early = (preset or "").strip().lower()
+            if want_early and want_early not in presets.PRESETS:
+                return (
+                    f"出图失败：没有工作流「{preset}」。可选："
+                    + "、".join(presets.PRESETS)
+                )
+            ref_err = self._reference_ready(reference, event)
+            if ref_err:
+                return ref_err
+            busy_note = await self._busy_note_for_current()
+            self._spawn_image_job(
+                event,
+                {
+                    "prompt": prompt,
+                    "negative": negative,
+                    "preset": preset,
+                    "size": size,
+                    "width": width,
+                    "height": height,
+                    "steps": steps,
+                    "cfg": cfg,
+                    "seed": seed,
+                    "model": model,
+                    "lora": lora,
+                    "reference": reference,
+                    "denoise": denoise,
+                    "force": force,
+                },
+            )
+            logger.info(
+                f"[comfy] 云端异步出图已入队 → "
+                f"{str(getattr(event, 'unified_msg_origin', '') or '')}"
+            )
+            queue_note = self._queue_note()
+            return (
+                "已经交给后台画了，画好会直接把图发到会话里。\n"
+                "★ 这一轮不用等，也不要再调 comfy_generate，"
+                "更不要说自己已经看到图。\n"
+                "可以先用一句“在画了”告诉用户。"
+                + (
+                    "\n\n" + "\n".join(n for n in (queue_note, busy_note) if n)
+                    if (queue_note or busy_note)
+                    else ""
+                )
+            )
+
         text = str(prompt or "").strip()
         if not text:
             return "出图失败：prompt 是空的。写一段英文标签式描述再调。"
@@ -1248,7 +1822,16 @@ class NcdComfyPlugin(star.Star):
         await self._pace_send()
         self._last_image_at[umo_ev] = time.time()
         filename = str(image.get("filename") or "image.png")
-        path = self._save_session_image(umo_ev, data, filename)
+        path = self._save_session_image(
+            umo_ev,
+            data,
+            filename,
+            {
+                "prompt": text,
+                "preset": preset_name,
+                "model": os.path.basename(used_model),
+            },
+        )
         try:
             await self.context.send_message(
                 event.unified_msg_origin,
@@ -1257,6 +1840,9 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[comfy] 发送生成的图失败: {exc}", exc_info=True)
             return f"图画好了但发送失败：{type(exc).__name__}: {exc}"
+
+        if _ASYNC_RUN.get():
+            await self._append_image_history(umo_ev, path)
 
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         self._last_output[umo] = str(path)
@@ -1309,11 +1895,15 @@ class NcdComfyPlugin(star.Star):
             )
         if ref_name:
             used.append(f"图生图（参考图 denoise {denoise_val:g}）")
+        queue_note = self._queue_note()
+        busy_note = await self._busy_note_for_current()
+        notes = "\n".join(n for n in (queue_note, busy_note) if n)
         return self._tool_image_result(
             f"图已经画好并发到会话里了（{filename}，{len(data):,} 字节，"
             f"ComfyUI 用时 {result['seconds']} 秒）。\n"
             f"参数：{' · '.join(used)}\n"
-            "★ 这张图已经附在本次结果里，你可以直接看。先自查一遍"
+            + (f"{notes}\n" if notes else "")
+            + "★ 这张图已经附在本次结果里，你可以直接看。先自查一遍"
             "（脸、发色、服装、动作是否和用户要求一致），不对就调整描述重画；"
             "不要重复调用本工具，也不要声称看过图却描述不出细节。",
             data,
@@ -1483,110 +2073,85 @@ class NcdComfyPlugin(star.Star):
         self,
         event: AstrMessageEvent,
         index: int = 1,
-        hours: int = 6,
+        hours: int = 0,
+        file: str = "",
         force: bool = False,
     ) -> str:
-        """把 ComfyUI 已经画好的图直接发到会话里（不用重画）。
+        """把本会话已经画好的图直接发到会话里（不用重画）。
 
-        ★ 用途：上一次出图超时或连接断了，但 ComfyUI 其实已经跑完 ——
-          图就躺在磁盘上。这时先调这个把最新那张取回来，不要重新生成。
+        ★ 用途：翻旧图、重发上个月那张、异步出图后想再取一次。
+        ★ 只能取本会话自己的历史，不会串到别的群/私聊。
         ★ 已经发过的图默认跳过；用户明确说“再发一遍”才用 force=True。
 
         Args:
             index(int): 1 = 最新一张，2 = 倒数第二张……默认 1。
-            hours(int): 只找最近几小时内生成的，默认 6，最大 72。
+            hours(int): 只找最近几小时内生成的；0（默认）= 全部保留期。
+            file(string): 精确文件名（先用 comfy_gallery 查）；填了就忽略 index。
             force(bool): True = 允许重发已经发过的图。
         """
-        idx = max(1, int(index or 1))
-        window = max(1, min(72, int(hours or 6)))
         umo = str(getattr(event, "unified_msg_origin", "") or "")
-        client = self._client()
-        if getattr(client, "_busy", False) or self._render_lock.locked():
-            return (
-                "上一张还在画（ComfyUI 队列里），现在取只会拿到旧图。"
-                "等它画完再取，或者直接重新生成一张。"
-            )
-        # ★ 只扫本会话目录：跨会话串图就是从“全局目录按时间取最新”来的
-        roots = [str(self._session_image_dir(umo))]
+        entries = self._history_read(umo)
+        days = self._history_days()
+        idx = max(1, int(index or 1))
+        window = max(0, min(days * 24, int(hours or 0)))
+        cutoff = time.time() - window * 3600 if window else 0
+        want_file = os.path.basename(str(file or "").strip())
 
-        cutoff = time.time() - window * 3600
-        found: list[tuple[float, str]] = []
-        for root in dict.fromkeys(roots):
-            if not os.path.isdir(root):
-                continue
-            # ★ 递归：ComfyUI 的临时图在 comfy_tmp\temp\ 这种子目录里
-            for dirpath, _dirs, files in os.walk(root):
-                for name in files:
-                    if not name.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
-                        continue
-                    path = os.path.join(dirpath, name)
-                    # AstrBot 的 temp 根目录里只认我们自己的 comfy_* 副本，
-                    # 免得把聊天图片/表情缓存当成“画好的图”发出去
-                    try:
-                        mtime = os.path.getmtime(path)
-                    except OSError:
-                        continue
-                    if mtime >= cutoff:
-                        found.append((mtime, path))
-
-        # ★ 同一张图会有两份副本（ComfyUI temp 原文件 + 我们保存的 comfy_*），
-        #   按内容指纹去重，否则会当成两张图分别发出去。
-        seen: set[str] = set()
-        uniq: list[tuple[float, str, str]] = []
-        for mtime, path in sorted(found, key=lambda x: x[0], reverse=True):
-            fp = self._file_print(path) or os.path.realpath(path)
-            if fp in seen:
-                continue
-            seen.add(fp)
-            uniq.append((mtime, path, fp))
-
-        # 最近一次生成的优先（即便磁盘时间戳被拷动过）
-        last = self._last_output.get(umo)
-        if last and os.path.isfile(last):
-            fp = self._file_print(last) or os.path.realpath(last)
-            if fp not in seen:
-                uniq.insert(0, (os.path.getmtime(last), last, fp))
-                seen.add(fp)
-
-        # ★ 不按“已发”过滤：默认就该给最新那张，否则 AI 取不回自己刚发的图
-        cand = uniq
-        if not cand:
-            if uniq:
+        if want_file:
+            entries = [e for e in entries if e["file"] == want_file]
+            if not entries:
                 return (
-                    "最近这些图都已经发过了。要重发就加 force=True；"
-                    "或者用 index 换一张（1=最新，2=上一张）。"
+                    f"本会话历史里没有「{want_file}」。"
+                    "先用 comfy_gallery 查文件名，再填 file。"
                 )
-            return f"最近 {window} 小时里没有找到已经画好的图。"
-        if idx > len(cand):
-            return f"最近 {window} 小时有 {len(cand)} 张可发的图，取不到第 {idx} 张。"
+        else:
+            if cutoff:
+                entries = [e for e in entries if e["ts"] >= cutoff]
+            if not entries:
+                span = f"最近 {window} 小时" if window else f"保留期（{days} 天）"
+                return (
+                    f"本会话{span}没有画好的图。"
+                    f"（历史最多保留 {days} 天 / {self._history_limit()} 张）"
+                )
+            if idx > len(entries):
+                return (
+                    f"本会话现在有 {len(entries)} 张可发的图，取不到第 {idx} 张。"
+                    "先用 comfy_gallery 看列表。"
+                )
 
-        mtime, path, fp = cand[idx - 1]
+        entry = entries[0] if want_file else entries[idx - 1]
+        path = self._session_image_dir(umo) / entry["file"]
+        if not path.is_file():
+            return f"历史里有这条记录，但文件已经不在了：{entry['file']}"
+
+        fp = self._file_print(str(path)) or os.path.realpath(str(path))
         marks = self._sent_at.get(umo) or {}
         last_sent = marks.get(fp) or 0
         if not force and last_sent and time.time() - last_sent < 60:
             when = time.strftime("%H:%M:%S", time.localtime(last_sent))
             return (
-                f"这张（{os.path.basename(path)}，{when}）刚发过，"
+                f"这张（{os.path.basename(str(path))}，{when}）刚发过，"
                 "60 秒内不重复发。确实要再发一次就加 force=True。"
             )
-        umo_ev = str(getattr(event, "unified_msg_origin", "") or "")
-        ok, wait = self._image_allowed(umo_ev, event)
+
+        ok, wait = self._image_allowed(umo, event)
         if not ok:
             return f"这个会话 {wait} 秒内刚发过图，先不重复发了。"
         await self._pace_send()
-        self._last_image_at[umo_ev] = time.time()
+        self._last_image_at[umo] = time.time()
 
         if self._is_group_chat(event):
             try:
-                raw = pathlib.Path(path).read_bytes()
+                raw = Path(path).read_bytes()
             except OSError:
                 raw = b""
             if await self._nsfw_blocked(event, raw):
-                return f"这张图（{os.path.basename(path)}）被判为 NSFW，没有发到群里。"
+                return f"这张图（{os.path.basename(str(path))}）被判为 NSFW，没有发到群里。"
 
         try:
             await self.context.send_message(
-                event.unified_msg_origin, MessageChain(chain=[Comp.Image(file=path)])
+                event.unified_msg_origin,
+                MessageChain(chain=[Comp.Image(file=str(path))]),
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[comfy] 发送已有图失败: {exc}", exc_info=True)
@@ -1596,14 +2161,75 @@ class NcdComfyPlugin(star.Star):
         if fp:
             bucket.append(fp)
             del bucket[:-50]
-            self._sent_at.setdefault(umo, {})[fp] = time.time()
-        skipped = len(uniq) - len(cand)
+        self._sent_at.setdefault(umo, {})[fp] = time.time()
+
+        busy = bool(getattr(self._client(), "_busy", False)) or self._render_lock.locked()
+        prompt = (entry.get("prompt") or "").strip()
+        detail = f"（{time.strftime('%Y-%m-%d %H:%M', time.localtime(entry['ts']))}"
+        if prompt:
+            detail += "，" + prompt[:60]
+        detail += "）"
+        rest = len(entries) - 1
+        note = "（新一轮还在画，这是目前最新的一张）" if busy and idx == 1 and not want_file else ""
         return (
-            f"已把第 {idx} 张发过来了：{os.path.basename(path)}"
-            f"（{time.strftime('%H:%M:%S', time.localtime(mtime))}，"
-            f"{os.path.getsize(path):,} 字节）。"
-            + (f"\n（还有 {skipped} 张更早的，index=2 可取上一张）" if skipped else "")
+            f"已把图发过来了：{os.path.basename(str(path))}{detail}。"
+            f"{note}"
+            + (f"\n（本会话还有 {rest} 张更早的，index=2 取上一张）" if rest > 0 else "")
         )
+
+    @filter.llm_tool(name="comfy_gallery")
+    async def comfy_gallery(
+        self,
+        event: AstrMessageEvent,
+        query: str = "",
+        limit: int = 20,
+        days: int = 0,
+    ) -> str:
+        """列出本会话画过的图（按时间从新到旧），用来追溯旧图。
+
+        Args:
+            query(string): 在正向提示词/文件名/工作流里搜关键词；留空 = 最近全部。
+            limit(int): 最多列几条，默认 20，上限 50。
+            days(int): 只看最近几天；0（默认）= 全部保留期。
+        """
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        all_entries = self._history_read(umo)
+        positions = {e["file"]: i for i, e in enumerate(all_entries, 1)}
+        entries = all_entries
+        max_days = self._history_days()
+        window = max(0, min(max_days, int(days or 0)))
+        if window:
+            cutoff = time.time() - window * 86400
+            entries = [e for e in entries if e["ts"] >= cutoff]
+        key = str(query or "").strip().lower()
+        if key:
+            entries = [
+                e for e in entries
+                if key in (e.get("prompt") or "").lower()
+                or key in e["file"].lower()
+                or key in (e.get("preset") or "").lower()
+            ]
+        if not entries:
+            return (
+                "本会话历史里没有匹配的图。"
+                f"（保留 {max_days} 天 / {self._history_limit()} 张）"
+            )
+        limit = max(1, min(50, int(limit or 20)))
+        lines = [
+            f"本会话画过的图（匹配 {len(entries)} 条，最多列 {limit} 条；"
+            "发图用 comfy_output(index=N) 或 file=...）："
+        ]
+        for e in entries[:limit]:
+            when = time.strftime("%m-%d %H:%M", time.localtime(e["ts"]))
+            prompt = (e.get("prompt") or "").strip()[:70] or "（老图，没有记录提示词）"
+            preset = e.get("preset") or "?"
+            lines.append(
+                f"index={positions[e['file']]} [{when}] {preset} · {prompt}\n"
+                f"   file={e['file']}"
+            )
+        if len(entries) > limit:
+            lines.append(f"……还有 {len(entries) - limit} 条，可加 limit 或 query 缩小范围。")
+        return "\n".join(lines)
 
     @filter.llm_tool(name="comfy_status")
     async def comfy_status(self, event: AstrMessageEvent) -> str:
@@ -1807,8 +2433,115 @@ class NcdComfyPlugin(star.Star):
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def _save_session_image(self, umo: str, data: bytes, filename: str) -> Path:
-        """把生成图落到会话目录，顺手只留最近 60 张。"""
+    def _history_days(self) -> int:
+        try:
+            days = int(self._conf_int("comfy_history_days", 30))
+        except Exception:  # noqa: BLE001
+            days = 30
+        return max(1, min(3650, days))
+
+    def _history_limit(self) -> int:
+        try:
+            limit = int(self._conf_int("comfy_history_per_session", 200))
+        except Exception:  # noqa: BLE001
+            limit = 200
+        return max(1, min(5000, limit))
+
+    def _history_read(self, umo: str) -> list[dict]:
+        """读本会话的画图索引；没有索引就按目录里的图补一份。"""
+        folder = self._session_image_dir(umo)
+        raw: list[dict] = []
+        path = folder / HISTORY_FILE
+        if path.is_file():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                raw = list((data or {}).get("items") or [])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 读历史索引失败，按目录重建: {exc}")
+                raw = []
+        items: dict[str, dict] = {}
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            name = os.path.basename(str(entry.get("file") or ""))
+            if not name:
+                continue
+            fp = folder / name
+            if not fp.is_file():
+                continue
+            try:
+                stamp = float(entry.get("ts") or fp.stat().st_mtime)
+            except Exception:  # noqa: BLE001
+                stamp = fp.stat().st_mtime
+            items[name] = {
+                "file": name,
+                "ts": stamp,
+                "size": int(entry.get("size") or fp.stat().st_size),
+                "prompt": str(entry.get("prompt") or ""),
+                "preset": str(entry.get("preset") or ""),
+                "model": str(entry.get("model") or ""),
+            }
+        if not items:
+            # 老目录还没索引：扫一遍图片，至少能按时间取
+            try:
+                for fp in folder.iterdir():
+                    if not fp.is_file():
+                        continue
+                    if fp.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                        continue
+                    items[fp.name] = {
+                        "file": fp.name,
+                        "ts": fp.stat().st_mtime,
+                        "size": fp.stat().st_size,
+                        "prompt": "",
+                        "preset": "",
+                        "model": "",
+                    }
+            except OSError:
+                pass
+        return sorted(items.values(), key=lambda x: x["ts"], reverse=True)
+
+    def _history_write(self, umo: str, items: list[dict]) -> None:
+        folder = self._session_image_dir(umo)
+        path = folder / HISTORY_FILE
+        tmp = path.with_suffix(".tmp")
+        try:
+            tmp.write_text(
+                json.dumps({"version": 1, "items": items}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 写历史索引失败: {exc}")
+
+    def _history_prune(self, umo: str, items: list[dict]) -> list[dict]:
+        """按天数和每会话张数裁剪，顺便删掉不再保留的图。"""
+        cutoff = time.time() - self._history_days() * 86400
+        kept = [e for e in sorted(items, key=lambda x: x["ts"], reverse=True)
+                if e["ts"] >= cutoff][: self._history_limit()]
+        keep_names = {e["file"] for e in kept}
+        folder = self._session_image_dir(umo)
+        try:
+            for fp in folder.iterdir():
+                if not fp.is_file() or fp.name == HISTORY_FILE:
+                    continue
+                if fp.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
+                    continue
+                if fp.name not in keep_names:
+                    fp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        self._history_write(umo, kept)
+        return kept
+
+    def _save_session_image(
+        self,
+        umo: str,
+        data: bytes,
+        filename: str,
+        meta: dict | None = None,
+    ) -> Path:
+        """把生成图落到会话目录，写进历史索引，并按 30 天 / 200 张裁剪。"""
         import re as _re
         import uuid as _uuid
 
@@ -1817,16 +2550,17 @@ class NcdComfyPlugin(star.Star):
         stamp = time.strftime("%Y%m%d-%H%M%S")
         path = folder / f"{stamp}-{_uuid.uuid4().hex[:6]}-{safe}"
         path.write_bytes(data)
-        try:
-            files = sorted(
-                (p for p in folder.iterdir() if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-                reverse=True,
-            )
-            for old in files[60:]:
-                old.unlink(missing_ok=True)
-        except OSError:
-            pass
+        meta = meta or {}
+        items = {e["file"]: e for e in self._history_read(umo)}
+        items[path.name] = {
+            "file": path.name,
+            "ts": time.time(),
+            "size": len(data),
+            "prompt": str(meta.get("prompt") or "")[:300],
+            "preset": str(meta.get("preset") or ""),
+            "model": str(meta.get("model") or ""),
+        }
+        self._history_prune(umo, list(items.values()))
         return path
 
     @staticmethod
@@ -1884,7 +2618,19 @@ class NcdComfyPlugin(star.Star):
         return f"ComfyUI 未运行（端口 {port}）。出图或发语音时会自动拉起。"
 
     async def terminate(self) -> None:
-        """插件卸载/重载时收掉自己拉起的 ComfyUI。"""
+        """插件卸载/重载时收掉后台任务和自己拉起的 ComfyUI。"""
+        pending = list(self._bg_tasks)
+        umos = {self._bg_umo.get(task, "") for task in pending}
+        for task in pending:
+            task.cancel()
+        for umo in umos:
+            if umo:
+                try:
+                    await self._send_chat(umo, "图画被中断了（插件重载/退出）。")
+                except Exception:  # noqa: BLE001
+                    pass
+        self._bg_tasks.clear()
+        self._bg_umo.clear()
         try:
             if self._client_obj is not None:
                 self._client_obj.stop()

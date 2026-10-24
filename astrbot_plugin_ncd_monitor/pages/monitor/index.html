@@ -2489,7 +2489,7 @@ function renderAudit(d) {
       ? '<span style="color:var(--bad)">拒绝</span>'
       : '<span style="color:var(--ok)">通过</span>';
     const thumb = r.thumb_data
-      ? '<img width="40" height="40" src="' + r.thumb_data + '" ' +
+      ? '<img width="40" height="40" data-thumb="' + r.thumb_data + '" ' +
         'style="object-fit:cover;border-radius:4px;margin-right:6px;vertical-align:middle">'
       : (r.thumb
         ? '<img class="auditThumb" data-i="' + orig + '" data-path="' + esc(r.thumb) +
@@ -2500,6 +2500,14 @@ function renderAudit(d) {
       esc(String(r.prompt || '').slice(0, 60)) + '</span></div>';
   });
   box.innerHTML = html;
+  // ★ 内联脚本里不能出现 src 或 href 的属性字面量：AstrBot 的插件页服务
+  //   会把整页 HTML 的 src/href 属性当资源地址重写（连 <script> 里的字符串也改）。
+  //   这里先放 data-thumb，插入 DOM 后再赋 src。
+  box.querySelectorAll("img[data-thumb]").forEach(function (img) {
+    const value = img.getAttribute("data-thumb");
+    if (value) img.src = value;
+    img.removeAttribute("data-thumb");
+  });
   loadAuditThumbs();
 }
 

@@ -200,7 +200,49 @@
   "comfy_self_view": {
     "type": "bool",
     "description": "出图后把图回传给模型自查",
-    "hint": "开（默认）：工具结果里附带生成图（压到 1024px），模型当轮能看见自己画的，方便自查脸/发色/服装。\n关：只回文字，省视觉 token，但模型只能靠文字猜画面。\n图不会写进对话历史，只在出图这一轮出现。",
+    "hint": "开（默认）：同步出图把图附在工具结果里；异步图会在发送后作为 user 角色的系统记录写进会话历史，下一轮模型能直接看到。\n关：只回文字，省视觉 token，模型只能靠文字猜画面。\n图不会写进对话历史（同步时），只在出图这一轮出现；异步历史会按 AstrBot 正常的回合上限/压缩处理。",
+    "default": true
+  },
+  "comfy_busy_detect": {
+    "type": "bool",
+    "description": "出图前检测设备繁忙",
+    "hint": "开（默认）：用 nvidia-smi + Windows 按进程 GPU 显存计数器，算 ComfyUI 自己占了多少，再估算游戏/桌面占了多少显存。\n繁忙时只在 comfy_generate 的工具结果里加一句“设备繁忙，出图会变慢”，让模型自己转告用户；照常入队，不阻塞。\n连续两次采样都繁忙才提示，避免 ComfyUI 卸载/加载模型时瞬时误报。\n关：不检测，不提示。",
+    "default": true
+  },
+  "comfy_busy_external_gb": {
+    "type": "int",
+    "description": "外部显存占用达到多少 GB 算繁忙",
+    "hint": "默认 3GB。外部占用 = 总显存 - 空闲 - ComfyUI 自己占用；游戏/浏览器/桌面都算外部。\n调高更不容易提示，调低更容易提示。",
+    "default": 3
+  },
+  "comfy_busy_free_gb": {
+    "type": "int",
+    "description": "可用显存低于多少 GB 算繁忙",
+    "hint": "默认 2GB。只有确认有外部占用时才用这条，避免 ComfyUI 自己加载 SDXL 就误报。",
+    "default": 2
+  },
+  "comfy_busy_util": {
+    "type": "int",
+    "description": "GPU 利用率达到多少算繁忙",
+    "hint": "默认 70%。还要同时有至少 1GB 外部占用才提示，避免桌面/浏览器轻负载误报。",
+    "default": 70
+  },
+  "comfy_busy_queue": {
+    "type": "int",
+    "description": "出图任务总共超过多少时提示排队较多",
+    "hint": "默认 3。按总数算：1 个生成中 + 3 个排队 = 总共 4 个，超过 3，提示；总共 3 个（1 生成 + 2 排队）不提示。\n它和设备显存繁忙是两套独立提示，可同时出现。\n设 0 关闭排队提示。",
+    "default": 3
+  },
+  "comfy_async_api": {
+    "type": "bool",
+    "description": "云端 API 下异步出图（推荐）",
+    "hint": "开（默认）：云端模型调 comfy_generate 后立即返回，bot 继续聊天；图画好后直接发到会话，不再经过模型确认。\n关：和以前一样，等图画完才回复。\n★ 本地模型自动保持同步（要抢显存），不受这个开关影响。",
+    "default": true
+  },
+  "comfy_audit_nudge": {
+    "type": "bool",
+    "description": "审核失败后自动拉起 bot 回复",
+    "hint": "开（默认）：后台审核没过时，合成一条系统通知重新走一轮，让模型自己说“没发，要改描述还是取消”。\n★ 这条通知会作为用户消息进会话历史；每会话 10 分钟最多拉起一次，防止循环。\n关：只发一句固定提示，模型等你下一条消息时才知道。",
     "default": true
   },
   "comfy_send_jitter_min": {
@@ -244,6 +286,18 @@
     "description": "私聊里两张图的最小间隔（秒）",
     "hint": "私聊自用可以短一点（默认 30 秒）；群聊用上面那个 300 秒的。",
     "default": 30.0
+  },
+  "comfy_history_days": {
+    "type": "int",
+    "description": "每个会话的图保留多少天",
+    "hint": "默认 30 天。超过就自动删图并清索引；comfy_gallery 只能翻到保留期内的图。",
+    "default": 30
+  },
+  "comfy_history_per_session": {
+    "type": "int",
+    "description": "每个会话最多保留多少张图",
+    "hint": "默认 200 张（约 300MB/会话）。超过按时间从旧到新删；磁盘紧就调小。",
+    "default": 200
   },
   "comfy_codex_enabled": {
     "type": "bool",
