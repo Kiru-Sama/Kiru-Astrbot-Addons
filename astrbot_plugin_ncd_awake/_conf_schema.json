@@ -1,0 +1,20 @@
+{
+  "enabled": {
+    "type": "bool",
+    "description": "AstrBot 启动时自动保持唤醒",
+    "hint": "默认关闭。开启后每次启动 AstrBot 都会自动挂上唤醒请求；面板上的开关会改这个值。",
+    "default": false
+  },
+  "keep_display": {
+    "type": "bool",
+    "description": "连屏幕一起保持常亮",
+    "hint": "默认只让系统不睡（屏幕可以关）。勾上会让显示器也常亮，更费电。",
+    "default": false
+  },
+  "refresh_seconds": {
+    "type": "int",
+    "description": "重新申明保持唤醒的间隔（秒）",
+    "hint": "默认 30 秒，范围 5~600。一般不用改。",
+    "default": 30
+  }
+}

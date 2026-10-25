@@ -66,6 +66,88 @@ PRESETS: dict[str, dict] = {
 
 DEFAULT_PRESET = "sdxl"
 
+# ---- ControlNet / 控制适配器 -------------------------------------------------
+# SDXL：一个 union 模型覆盖多种类型（ComfyUI 的 SetUnionControlNetType 选类型）
+SDXL_CONTROLNET = "controlnet-union-sdxl-1.0.safetensors"
+SDXL_UNION_TYPES = {
+    "auto": "auto",
+    "pose": "openpose",
+    "openpose": "openpose",
+    "depth": "depth",
+    "scribble": "hed/pidi/scribble/ted",
+    "hed": "hed/pidi/scribble/ted",
+    "canny": "canny/lineart/anime_lineart/mlsd",
+    "lineart": "canny/lineart/anime_lineart/mlsd",
+    "anime_lineart": "canny/lineart/anime_lineart/mlsd",
+    "mlsd": "canny/lineart/anime_lineart/mlsd",
+    "normal": "normal",
+    "segment": "segment",
+    "tile": "tile",
+    "repaint": "repaint",
+}
+
+# Anima：LLLite 模型补丁，每种控制类型一个文件（Comfy-Org/Anima-LLLite）
+ANIMA_LLLITE_TYPES = {
+    "depth": "anima-lllite-depth-1.safetensors",
+    "lineart": "anima-lllite-lineart-1.safetensors",
+    "pose": "anima-lllite-pose-1.safetensors",
+    "scribble": "anima-lllite-scribble-1.safetensors",
+    "inpainting": "anima-lllite-inpainting-v2.safetensors",
+    "any": "anima-lllite-any-test-like-v2.safetensors",
+    "any-test-like": "anima-lllite-any-test-like-v2.safetensors",
+}
+
+# MOSS：color/depth 控制适配器（LoRA 形式），接 MOSSImageControl
+MOSS_CONTROL_TYPES = {
+    "depth": "depth_map",
+    "color": "color_map",
+}
+MOSS_CONTROL_LORA = "Moss\\moss_image_color_depth_control.safetensors"
+
+# Krea2：Control LoRA（第三方节点）；depth 与社区 pose 权重
+KREA2_CONTROL_TYPES = {
+    "depth": "Krea2-功能\\depth-control-lora.safetensors",
+    "pose": "Krea2-功能\\krea2-pose-control-mix025.safetensors",
+    "openpose": "Krea2-功能\\krea2-pose-control-mix025.safetensors",
+}
+
+#: 已经接线控制能力的预设。
+CONTROL_PRESETS = ("sdxl", "anima", "moss", "krea2")
+
+# 自动预处理：普通照片 → 控制图（交给 comfyui_controlnet_aux）
+# 不用预处理的情况（tile / repaint / auto / inpainting / any）不在表里。
+CONTROL_PREPROCESSORS = {
+    "sdxl": {
+        "depth": ("DepthAnythingV2Preprocessor", {"ckpt_name": "depth_anything_v2_vitl.pth", "resolution": 1024}),
+        "pose": ("OpenposePreprocessor", {"detect_hand": "enable", "detect_body": "enable", "detect_face": "enable", "resolution": 1024}),
+        "openpose": ("OpenposePreprocessor", {"detect_hand": "enable", "detect_body": "enable", "detect_face": "enable", "resolution": 1024}),
+        "canny": ("CannyEdgePreprocessor", {"low_threshold": 100, "high_threshold": 200, "resolution": 1024}),
+        "lineart": ("LineArtPreprocessor", {"coarse": "disable", "resolution": 1024}),
+        "anime_lineart": ("AnimeLineArtPreprocessor", {"resolution": 1024}),
+        "scribble": ("ScribblePreprocessor", {"resolution": 1024}),
+        "normal": ("BAE-NormalMapPreprocessor", {"resolution": 1024}),
+        "segment": ("UniFormer-SemSegPreprocessor", {"resolution": 1024}),
+    },
+    "anima": {
+        "depth": ("DepthAnythingV2Preprocessor", {"ckpt_name": "depth_anything_v2_vitl.pth", "resolution": 1024}),
+        "pose": ("OpenposePreprocessor", {"detect_hand": "enable", "detect_body": "enable", "detect_face": "enable", "resolution": 1024}),
+        "lineart": ("AnimeLineArtPreprocessor", {"resolution": 1024}),
+        "scribble": ("ScribblePreprocessor", {"resolution": 1024}),
+    },
+    "moss": {
+        "depth": ("DepthAnythingV2Preprocessor", {"ckpt_name": "depth_anything_v2_vitl.pth", "resolution": 1024}),
+        "color": ("ColorPreprocessor", {"resolution": 1024}),
+    },
+    "krea2": {
+        "depth": ("DepthAnythingV2Preprocessor", {"ckpt_name": "depth_anything_v2_vitl.pth", "resolution": 1024}),
+        "pose": ("OpenposePreprocessor", {"detect_hand": "enable", "detect_body": "enable", "detect_face": "enable", "resolution": 1024}),
+        "openpose": ("OpenposePreprocessor", {"detect_hand": "enable", "detect_body": "enable", "detect_face": "enable", "resolution": 1024}),
+    },
+}
+
+
+
+
 #: 能当「底模」的加载节点类
 LOADER_CLASSES = (
     "CheckpointLoaderSimple",
@@ -224,6 +306,13 @@ def apply_params(
     filename_prefix: str | None = None,
     source_image: str | None = None,
     denoise: float | None = None,
+    preset: str | None = None,
+    control_image: str | None = None,
+    control_type: str | None = None,
+    control_strength: float = 0.8,
+    control_start: float = 0.0,
+    control_end: float = 1.0,
+    control_preprocess: bool = True,
 ) -> dict:
     """按参数改一份新图（不动传入的 dict）。
 
@@ -273,6 +362,21 @@ def apply_params(
 
     if loras:
         g = _insert_loras(g, roles, loras)
+
+    if control_image:
+        g = _insert_controlnet(
+            g,
+            roles,
+            preset=str(preset or ""),
+            image_name=str(control_image),
+            control_type=str(control_type or ""),
+            strength=float(control_strength),
+            start=float(control_start),
+            end=float(control_end),
+            width=width,
+            height=height,
+            preprocess=bool(control_preprocess),
+        )
 
     return g
 
@@ -369,4 +473,219 @@ def _insert_loras(graph: dict, roles: dict, loras: list[dict]) -> dict:
     graph[roles["positive"]]["inputs"]["clip"] = prev_clip
     graph[roles["negative"]]["inputs"]["clip"] = prev_clip
 
+    return graph
+
+
+def _insert_controlnet(
+    graph: dict,
+    roles: dict,
+    *,
+    preset: str,
+    image_name: str,
+    control_type: str,
+    strength: float,
+    start: float,
+    end: float,
+    width: int | None,
+    height: int | None,
+    preprocess: bool = True,
+) -> dict:
+    """插入 ControlNet / LLLite 控制链（只改内存图）。
+
+    sdxl  ：ControlNetLoader → SetUnionControlNetType → ControlNetApplyAdvanced
+    anima ：ModelPatchLoader → AnimaLLLiteApply（挂在 model 链末端）
+    """
+    if preset not in CONTROL_PRESETS:
+        raise WorkflowError(
+            f"{preset or '当前预设'} 的 ControlNet 还没接线（当前支持："
+            + "、".join(CONTROL_PRESETS)
+            + "）"
+        )
+    if not image_name:
+        raise WorkflowError("control 图没有上传成功")
+
+    def fresh(base: str) -> str:
+        nid = base
+        i = 1
+        while nid in graph:
+            i += 1
+            nid = f"{base}_{i}"
+        return nid
+
+    # 控制图统一缩放到出图尺寸（ControlNet 与 latent 对齐）
+    ctype = str(control_type or "").strip().lower()
+    latent_inputs = (graph.get(roles.get("latent", "")) or {}).get("inputs") or {}
+    w = int(width or latent_inputs.get("width") or 0)
+    h = int(height or latent_inputs.get("height") or 0)
+    load_id = fresh("ctrl_image")
+    graph[load_id] = {
+        "class_type": "LoadImage",
+        "inputs": {"image": str(image_name)},
+    }
+    image_link: list = [load_id, 0]
+    # 普通照片自动预处理成深度/线稿/骨架等（controlnet_aux）
+    if preprocess:
+        spec = (CONTROL_PREPROCESSORS.get(preset) or {}).get(ctype)
+        if spec:
+            pre_cls, pre_params = spec
+            pre_id = fresh("ctrl_pre")
+            pre_inputs = {"image": image_link}
+            pre_inputs.update(pre_params)
+            graph[pre_id] = {"class_type": pre_cls, "inputs": pre_inputs}
+            image_link = [pre_id, 0]
+    if w > 0 and h > 0:
+        scale_id = fresh("ctrl_scale")
+        graph[scale_id] = {
+            "class_type": "ImageScale",
+            "inputs": {
+                "image": image_link,
+                "upscale_method": "lanczos",
+                "width": w,
+                "height": h,
+                "crop": "center",
+            },
+        }
+        image_link = [scale_id, 0]
+
+    if preset == "sdxl":
+        union_type = SDXL_UNION_TYPES.get(ctype or "auto")
+        if not union_type:
+            raise WorkflowError(
+                f"SDXL 不支持控制类型「{control_type}」。可用："
+                + "、".join(sorted(SDXL_UNION_TYPES))
+            )
+        net_id = fresh("ctrl_net")
+        graph[net_id] = {
+            "class_type": "ControlNetLoader",
+            "inputs": {"control_net_name": SDXL_CONTROLNET},
+        }
+        type_id = fresh("ctrl_type")
+        graph[type_id] = {
+            "class_type": "SetUnionControlNetType",
+            "inputs": {"control_net": [net_id, 0], "type": union_type},
+        }
+        apply_id = fresh("ctrl_apply")
+        inputs = {
+            "positive": [roles["positive"], 0],
+            "negative": [roles["negative"], 0],
+            "control_net": [type_id, 0],
+            "image": image_link,
+            "strength": float(strength),
+            "start_percent": float(start),
+            "end_percent": float(end),
+        }
+        if roles.get("vae_link"):
+            inputs["vae"] = list(roles["vae_link"])
+        graph[apply_id] = {"class_type": "ControlNetApplyAdvanced", "inputs": inputs}
+        graph[roles["sampler"]]["inputs"]["positive"] = [apply_id, 0]
+        graph[roles["sampler"]]["inputs"]["negative"] = [apply_id, 1]
+        return graph
+
+    if preset == "moss":
+        map_key = MOSS_CONTROL_TYPES.get(ctype)
+        if not map_key:
+            raise WorkflowError(
+                f"MOSS 不支持控制类型「{control_type}」。可用："
+                + "、".join(sorted(MOSS_CONTROL_TYPES))
+            )
+        if not roles.get("vae_link"):
+            raise WorkflowError("MOSS 工作流里找不到 VAE，没法做 color/depth 控制")
+        adapter_id = fresh("ctrl_adapter")
+        graph[adapter_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {
+                "model": list(graph[roles["sampler"]]["inputs"]["model"]),
+                "lora_name": MOSS_CONTROL_LORA,
+                "strength_model": 1.0,
+            },
+        }
+        graph[roles["sampler"]]["inputs"]["model"] = [adapter_id, 0]
+        apply_id = fresh("ctrl_apply")
+        inputs = {
+            "positive": [roles["positive"], 0],
+            "negative": [roles["negative"], 0],
+            "vae": list(roles["vae_link"]),
+            "strength": float(strength),
+            "start_percent": float(start),
+            "end_percent": float(end),
+            map_key: image_link,
+        }
+        graph[apply_id] = {"class_type": "MOSSImageControl", "inputs": inputs}
+        graph[roles["sampler"]]["inputs"]["positive"] = [apply_id, 0]
+        graph[roles["sampler"]]["inputs"]["negative"] = [apply_id, 1]
+        return graph
+
+    if preset == "krea2":
+        lora_name = KREA2_CONTROL_TYPES.get(ctype or "depth")
+        if not lora_name:
+            raise WorkflowError(
+                f"Krea2 不支持控制类型「{control_type}」。可用："
+                + "、".join(sorted(KREA2_CONTROL_TYPES))
+            )
+        if not roles.get("vae_link"):
+            raise WorkflowError("Krea2 工作流里找不到 VAE，没法编码控制图")
+        lora_id = fresh("ctrl_lora")
+        graph[lora_id] = {
+            "class_type": "Krea2ControlLoRALoader",
+            "inputs": {
+                "model": list(graph[roles["sampler"]]["inputs"]["model"]),
+                "lora_name": lora_name,
+                "strength": 1.0,
+            },
+        }
+        enc_id = fresh("ctrl_encode")
+        enc_inputs = {
+            "control_image": image_link,
+            "vae": list(roles["vae_link"]),
+            "resize": "match_latent_size",
+            "upscale_method": "lanczos",
+            "crop": "center",
+            "channel_mode": "grayscale" if (ctype or "depth") == "depth" else "rgb",
+            "normalize": "per_image_minmax" if (ctype or "depth") == "depth" else "none",
+            "invert": False,
+            "batch_mode": "independent_images",
+        }
+        latent_link = graph[roles["sampler"]]["inputs"].get("latent_image")
+        if latent_link:
+            enc_inputs["latent"] = list(latent_link)
+        graph[enc_id] = {
+            "class_type": "Krea2ControlImageEncode",
+            "inputs": enc_inputs,
+        }
+        apply_id = fresh("ctrl_apply")
+        graph[apply_id] = {
+            "class_type": "Krea2ControlApply",
+            "inputs": {
+                "model": [lora_id, 0],
+                "control_latent": [enc_id, 0],
+            },
+        }
+        graph[roles["sampler"]]["inputs"]["model"] = [apply_id, 0]
+        return graph
+
+    # anima
+    lllite = ANIMA_LLLITE_TYPES.get(ctype)
+    if not lllite:
+        raise WorkflowError(
+            f"Anima 不支持控制类型「{control_type}」。可用："
+            + "、".join(sorted(ANIMA_LLLITE_TYPES))
+        )
+    patch_id = fresh("ctrl_patch")
+    graph[patch_id] = {
+        "class_type": "ModelPatchLoader",
+        "inputs": {"name": lllite},
+    }
+    apply_id = fresh("ctrl_apply")
+    graph[apply_id] = {
+        "class_type": "AnimaLLLiteApply",
+        "inputs": {
+            "model": list(graph[roles["sampler"]]["inputs"]["model"]),
+            "model_patch": [patch_id, 0],
+            "image": image_link,
+            "strength": float(strength),
+            "start_percent": float(start),
+            "end_percent": float(end),
+        },
+    }
+    graph[roles["sampler"]]["inputs"]["model"] = [apply_id, 0]
     return graph

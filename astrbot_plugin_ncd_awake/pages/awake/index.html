@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>电脑保持唤醒</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --border:#e6e8ec; --text:#1f2329; --muted:#8a919b; --accent:#3b82f6; --ok:#16a34a; --bad:#dc2626; --warn:#d97706; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; padding:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:16px; margin-bottom:14px; }
+  .head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+  h1 { font-size:16px; margin:0 0 4px; }
+  h2 { font-size:13px; margin:14px 0 6px; color:var(--muted); font-weight:600; }
+  h2:first-child { margin-top:0; }
+  .sub { color:var(--muted); font-size:12px; }
+  .pill { flex:0 0 auto; font-size:12px; padding:2px 10px; border-radius:999px; background:#eef1f6; color:var(--muted); }
+  .pill.on { background:#e8f7ee; color:var(--ok); }
+  .pill.off { background:#f1f2f4; color:var(--muted); }
+  .pill.bad { background:#fdecec; color:var(--bad); }
+  .status { display:flex; align-items:center; gap:12px; margin:14px 0 10px; padding:12px; border:1px solid var(--border); border-radius:10px; }
+  .dot { flex:0 0 auto; width:10px; height:10px; border-radius:50%; background:#c3c9d2; }
+  .dot.on { background:var(--ok); box-shadow:0 0 0 4px rgba(22,163,74,.12); }
+  .main { flex:1; min-width:0; }
+  .title { font-size:14px; font-weight:600; }
+  .meta { font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  button { font:inherit; border:none; border-radius:8px; padding:8px 16px; background:var(--accent); color:#fff; cursor:pointer; white-space:nowrap; }
+  button:disabled { opacity:.5; cursor:default; }
+  button.stop { background:#fff; color:var(--bad); border:1px solid #f0c4c4; }
+  .check { display:flex; align-items:flex-start; gap:8px; font-size:13px; color:var(--text); cursor:pointer; }
+  .check input { margin-top:3px; }
+  .check em { color:var(--muted); font-style:normal; font-size:12px; }
+  .err { margin-top:10px; font-size:12px; color:var(--bad); background:#fdecec; border:1px solid #f6cccc; border-radius:8px; padding:8px 10px; }
+  ul { margin:0; padding-left:20px; }
+  li { margin:4px 0; font-size:13px; }
+  code { background:#f3f4f6; border-radius:4px; padding:1px 5px; font-size:12px; }
+  .foot { margin-top:12px; padding-top:10px; border-top:1px dashed var(--border); color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="head">
+      <div>
+        <h1>电脑保持唤醒</h1>
+        <div class="sub">让这台机器在 bot 运行时不休眠、不熄屏。</div>
+      </div>
+      <span class="pill" id="pill">读取中</span>
+    </div>
+
+    <div class="status">
+      <span class="dot" id="dot"></span>
+      <div class="main">
+        <div class="title" id="stateText">加载中…</div>
+        <div class="meta" id="metaText"></div>
+      </div>
+      <button id="toggleBtn" disabled>读取中</button>
+    </div>
+
+    <label class="check">
+      <input type="checkbox" id="displayChk" disabled />
+      <span>连屏幕一起保持常亮 <em>（更费电；不勾也能防止系统睡眠）</em></span>
+    </label>
+
+    <div class="err" id="errText" hidden></div>
+  </div>
+
+  <div class="card">
+    <h2>它管什么</h2>
+    <ul>
+      <li>阻止 Windows 因空闲进入<strong>睡眠/休眠</strong>；可选择连屏幕关闭也一起阻止。</li>
+      <li>用 <code>SetThreadExecutionState</code> 实现，只对 AstrBot 进程生效，<strong>不改注册表、不改电源计划</strong>。</li>
+      <li>关掉开关、重载插件或退出 AstrBot，唤醒请求自动撤销。</li>
+    </ul>
+    <h2>它管不了什么</h2>
+    <ul>
+      <li>手动<strong>关机/重启</strong>、开始菜单里的睡眠、合盖动作——这些由你或系统策略决定，插件不拦。</li>
+      <li>Windows 更新自动重启、停电、蓝屏。</li>
+      <li>非 Windows 系统（会显示不支持）。</li>
+    </ul>
+    <div class="foot">原理：常驻线程每 <span id="refreshText">30</span> 秒重申一次 <code>ES_CONTINUOUS | ES_SYSTEM_REQUIRED</code>。</div>
+  </div>
+
+<script>
+const P = window.AstrBotPluginPage;
+let st = null;
+let busy = false;
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+function fmtDur(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  if (h > 0) return h + " 小时 " + m + " 分";
+  if (m > 0) return m + " 分 " + (s < 10 ? "0" : "") + s + " 秒";
+  return s + " 秒";
+}
+
+function renderMeta() {
+  const el = document.getElementById("metaText");
+  if (!st) return;
+  const supported = st.supported !== false;
+  if (!supported) {
+    el.textContent = "插件目前只支持 Windows";
+    return;
+  }
+  if (st.active) {
+    const held = Date.now() / 1000 - (st.since || Date.now() / 1000);
+    el.textContent = (st.method || "Windows") + " · 已保持 " + fmtDur(held);
+  } else {
+    el.textContent = "系统可以按电源计划休眠";
+  }
+}
+
+function render() {
+  const supported = !st || st.supported !== false;
+  const active = !!(st && st.active);
+  const pill = document.getElementById("pill");
+  const dot = document.getElementById("dot");
+  const btn = document.getElementById("toggleBtn");
+  const chk = document.getElementById("displayChk");
+  const err = document.getElementById("errText");
+
+  dot.className = "dot" + (active ? " on" : "");
+  pill.className = "pill" + (!supported ? " bad" : active ? " on" : " off");
+  pill.textContent = !st ? "读取中" : !supported ? "不支持" : active ? "保持中" : "已关闭";
+
+  document.getElementById("stateText").textContent = !st
+    ? "加载中…"
+    : !supported
+      ? "当前系统不支持"
+      : active
+        ? "正在保持系统唤醒"
+        : "没有保持唤醒";
+
+  if (st) {
+    chk.checked = !!st.keep_display;
+    const refresh = st.refresh_seconds || 30;
+    document.getElementById("refreshText").textContent = String(refresh);
+  }
+  chk.disabled = busy || !supported || !st;
+  btn.disabled = busy || !supported || !st;
+  btn.textContent = busy ? "处理中…" : active ? "关闭保持" : "开启保持";
+  btn.className = active ? "stop" : "";
+
+  err.hidden = !(st && st.error);
+  err.textContent = st && st.error ? "最近错误：" + st.error : "";
+  renderMeta();
+}
+
+async function load() {
+  try {
+    st = await P.apiGet("/awake/status");
+  } catch (e) {
+    document.getElementById("errText").hidden = false;
+    document.getElementById("errText").textContent = "读取状态失败：" + e;
+    return;
+  }
+  render();
+}
+
+async function toggle() {
+  if (!st || busy) return;
+  busy = true;
+  render();
+  try {
+    const want = !st.active;
+    const r = await P.apiPost("/awake/toggle", {
+      on: want,
+      keep_display: document.getElementById("displayChk").checked,
+    });
+    if (r) st = r;
+    if (r && r.ok === false) {
+      st = Object.assign({}, st, { error: r.error || "开启失败" });
+    }
+  } catch (e) {
+    st = Object.assign({}, st, { error: String(e) });
+  }
+  busy = false;
+  render();
+}
+
+document.getElementById("toggleBtn").onclick = toggle;
+document.getElementById("displayChk").onchange = async function () {
+  if (!st || !st.active || busy) return;
+  const wantDisplay = this.checked;
+  busy = true;
+  render();
+  try {
+    const r = await P.apiPost("/awake/toggle", { on: true, keep_display: wantDisplay });
+    if (r) st = r;
+    if (r && r.ok === false) {
+      st = Object.assign({}, st, { error: r.error || "切换屏幕常亮失败" });
+    }
+  } catch (e) {
+    st = Object.assign({}, st, { error: String(e) });
+  }
+  busy = false;
+  render();
+};
+
+(async function () {
+  try { await P.ready(); } catch (e) { /* 独立打开时没有父页面 */ }
+  load();
+  setInterval(load, 5000);
+  setInterval(function () { if (st && st.active) renderMeta(); }, 1000);
+})();
+</script>
+</body>
+</html>

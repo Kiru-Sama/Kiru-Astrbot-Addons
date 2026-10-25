@@ -1,4 +1,4 @@
-﻿# Kiru-Astrbot-Addons
+# Kiru-Astrbot-Addons
 
 给 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 写的插件与补丁合集。都是先给自己用、再把私人配置剥干净后放上来的：
 **能不碰上游源码就不碰**，必须动的地方单独记成补丁；每个结论都尽量附可复现的证据（日志、测试用例）。
@@ -15,6 +15,7 @@
 | `astrbot_plugin_ncd_session/` | 链路会话 | `/会话` `/切换` `/命名` `/删除`（补 AstrBot 原生只有 `/new` 的缺口） |
 | `astrbot_plugin_ncd_catchup/` | 链路补台 | 服务重开后，把停机期间没被回复的**私聊**补回来 |
 | `astrbot_plugin_ncd_inject/` | 对话提示注入 | 面板里给指定会话塞一句“念头”，只在下一轮回复里生效一次，不单独发气泡 |
+| `astrbot_plugin_ncd_awake/` | 链路醒着 | 面板一键阻止 Windows 空闲睡眠/熄屏，让 bot 常驻在线；不改电源计划 |
 
 > 2026-10-22 起，绘图改走 ComfyUI（`ncd_comfy`），原先基于 diffusers 的独立绘图插件 `ncd_draw` 已从仓库移除。
 
@@ -38,13 +39,15 @@
 ## 链路本地生成（comfy）
 
 - 预设工作流（SDXL / KREA2 / ANIMA / MOSS / TTS），参数注入、LoRA 链、图生图动态接线
+- **ControlNet**：sdxl / anima / moss / krea2 四族；普通照片自动预处理（depth/pose/canny/lineart 等），Krea2 也支持 pose
+- 文生图是主线；图生图分普通降噪（`reference`）和结构控制（`control`）两类，由 bot 按意图选
 - 语音：IndexTTS2 克隆音色，支持情绪预设与自然语言情绪描述、停顿标记
 - **显存换手**：自动判断模型来源 —— 本地模型才卸/释放，云端 API 不换手
 - **自查回图**：出图后把图压到 1024px 一起回传给模型，让她能看见自己画的东西
 - **群聊审核**：只在群聊里判，只有明确露三点才拦；被拦的图留 96px 小图在面板核对
 - **反风控**：发送随机延迟、全局回复间隔、群聊/私聊分档的图片限流
 - **按会话存图**：每会话一个目录，`comfy_output` 只取本会话，`reference=last` 也只认本会话
-- 工具：`comfy_tools` / `comfy_generate` / `comfy_models` / `comfy_status` / `comfy_say` / `comfy_output`
+- 工具：`comfy_tools` / `comfy_generate` / `comfy_models` / `comfy_status` / `comfy_say` / `comfy_output` / `comfy_gallery`
 - `comfy_prompt_help`：按关键词检索本地提示词法典（sfw/nsfw/all），写 prompt 前查 tag
 - 命令：`/comfyui off|on|status`（只关自己拉起的进程）
 

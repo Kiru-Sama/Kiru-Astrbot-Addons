@@ -17,12 +17,37 @@ ComfyUI 按需拉起、空闲先卸模型再关进程。
 
 四个工作流的模型文件全部走 `extra_model_paths.yaml` 外挂，插件里不写死任何本机路径。
 
+底模按**目录**分族：`checkpoints\SDXL`、`diffusion_models\anima` 等。
+`model` 指到别的族时，若这个名字在另一个预设里**唯一命中**，插件会自动切到那个
+preset 并在结果里提示（2.6.18+）；找不到或多族都有，则明确报错并列出可用的 preset。
+
+## ControlNet（四个预设都支持）
+
+`comfy_generate` 新增：
+
+| 参数 | 说明 |
+|---|---|
+| `control` | 控制图：留空=不用；`auto` / `message` / `last` 取图方式同 `reference` |
+| `control_type` | sdxl：`auto` `depth` `pose` `canny` `lineart` `scribble` `normal` `segment` `tile` `repaint`；anima：`depth` `lineart` `pose` `scribble` `inpainting` `any`；moss：`depth` `color`；krea2：`depth` `pose` |
+| `control_strength` | 0~2，默认 0.8 |
+| `control_start` / `control_end` | 0~1，默认 0 / 1 |
+| `control_preprocess` | `true`（默认）= 自动把普通照片处理成控制图；`false` = 你给的就是处理好的控制图 |
+
+- **sdxl**：`ControlNetLoader` → `SetUnionControlNetType` → `ControlNetApplyAdvanced`，用 `controlnet-union-sdxl-1.0`
+- **anima**：`ModelPatchLoader` → `AnimaLLLiteApply`，按类型加载 `anima-lllite-*`
+- **moss**：`LoraLoaderModelOnly` 叠 color/depth adapter，再接 `MOSSImageControl`（`depth` / `color` 二选一）
+- **krea2**：`Krea2ControlLoRALoader` → `Krea2ControlImageEncode` → `Krea2ControlApply`，支持 `depth`（本机已有）与 `pose`（社区 OpenPose Control LoRA）
+- 预处理由 [comfyui_controlnet_aux](https://github.com/Fannovel16/comfyui_controlnet_aux) 自动完成：depth/pose/canny/lineart/scribble/normal/segment
+  都会先转成对应控制图，用户**直接发普通照片即可**；`tile` / `repaint` / `auto` 不预处理。
+- Krea2 的 Control 需要 [comfyui-krea2-controlnet](https://github.com/s-adhit/krea2-pose-controlnet) 自定义节点。
+- 文生图是主线；图生图由 bot 分两类选：`reference` = 普通降噪重绘，`control` = 结构控制。
+
 ## 工具
 
 | 工具 | 作用 |
 |---|---|
 | `comfy_tools` | **入口，必须先调**：四个工作流、各自底模/默认参数、可选底模清单 |
-| `comfy_generate` | 出图：prompt / negative / preset / size / steps / cfg / seed / model / lora / reference / denoise |
+| `comfy_generate` | 出图：prompt / negative / preset / size / steps / cfg / seed / model / lora / reference / denoise / control / control_type / control_strength / control_start / control_end |
 | `comfy_models` | 列底模（`kind=model`）或 LoRA（`kind=lora`） |
 | `comfy_status` | 起没起来、端口、显存、队列、模型是否已卸载 |
 | `comfy_say` | 克隆音色发语音（IndexTTS-2） |
@@ -197,14 +222,10 @@ python 构建最小版.py --source "F:\ComfyUI_portable\ComfyUI_windows_portable
 | anima 720×960 / 6 步 | 30.8 秒 |
 | moss 720×960 / 6 步 | 46.2 秒（输出在 temp） |
 | 卸载模型 | `/free` 后显存空闲 2.3 GB → **10.7 GB** |
-| 离线测试 | `测试-接线.py` **16 组全过** |
 
 ## 测试
 
 ```bat
-:: 纯逻辑，不碰 GPU（16 组）
-python 测试-接线.py
-
 :: 端到端：四个预设各出一张 + 图生图 + 卸载验证
 python 测试-出图.py --preset all --fast --img2img --free-test
 ```
@@ -232,7 +253,7 @@ python 测试-出图.py --preset all --fast --img2img --free-test
 
 - **单卡**：和完整版 ComfyUI 同时出图会抢显存
 - 换底模只换工作流里那个加载节点的名字；CLIP/VAE 不跟着换（换错模型 ComfyUI 会报错，原话会带回来）
-- 图生图固定插 `ImageScale(lanczos)`，不做裁切；要 crop / ControlNet 得另加
+- 图生图固定插 `ImageScale(lanczos)`，不做裁切；ControlNet 走上面的控制链
 - 四个工作流是 API 格式（`nodes` 那套 UI 格式不能用）
 
 ## 回滚

@@ -1,0 +1,6 @@
+name: astrbot_plugin_ncd_awake
+display_name: 链路醒着
+desc: 面板一键阻止 Windows 空闲睡眠/熄屏，让 bot 常驻在线；不改电源计划，不拦手动关机。
+author: 本地自用
+version: 1.0.1
+repo: ""

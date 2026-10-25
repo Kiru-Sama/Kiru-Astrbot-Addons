@@ -512,6 +512,50 @@ class NcdComfyPlugin(star.Star):
         more = "" if len(items) <= limit else "…"
         return "、".join(names) + more
 
+    def _presets_with_model(self, want: str) -> list[str]:
+        """这个底模名在哪些预设的目录里能解析到（用于跨族提示 / 自动切换）。"""
+        hits: list[str] = []
+        for preset in presets.PRESETS:
+            try:
+                self._resolve_name(want, self._scan(preset), "底模")
+            except ComfyError:
+                continue
+            hits.append(preset)
+        return hits
+
+    def _auto_preset_for_model(self, model: str, current: str) -> tuple[str, str]:
+        """底模不在当前预设家族、且只属于另一个预设时，自动切过去。
+
+        为什么要自动切：模型放在哪个目录，就决定它能用哪种加载器
+        （SDXL 是整包 CheckpointLoader，ANIMA/KREA2/MOSS 是 UNETLoader）。
+        预设选错时继续硬跑只会在采样阶段报 shape/keys 不匹配，不如提前纠正。
+
+        返回 (preset, note)。note 为空表示没切。
+        """
+        want = str(model or "").strip()
+        if not want:
+            return current, ""
+        try:
+            self._resolve_name(want, self._scan(current), "底模")
+            return current, ""  # 本来就在这一族，不动
+        except ComfyError:
+            pass
+
+        hits = [p for p in self._presets_with_model(want) if p != current]
+        if len(hits) != 1:
+            return current, ""  # 找不到或跨多族：不猜，交给后面的报错说明
+        target = hits[0]
+        note = (
+            f"★ 底模「{os.path.basename(want)}」不在 "
+            f"{presets.PRESETS[current]['label']} 目录，"
+            f"已自动切到 {presets.PRESETS[target]['label']} 预设。"
+        )
+        logger.info(
+            f"[comfy] 底模跨族，自动切换预设 {current} → {target}"
+            f"（{os.path.basename(want)}）"
+        )
+        return target, note
+
     def _resolve_name(self, want: str, items: list[dict], label: str) -> str:
         """把模型/LoRA 名字解析成 ComfyUI 认的相对路径。
 
@@ -1812,10 +1856,19 @@ class NcdComfyPlugin(star.Star):
             "· steps       1~150；cfg 0~30；seed 整数（-1 = 随机）",
             "· model       换底模（写文件名或其中一段，大小写不敏感）",
             '· lora        加 LoRA，如 "cunnyfunky:0.8"；多个用逗号隔开',
-            "· reference   仅“改图/重绘/图生图”才用：auto=插件自己找；"
-            "message=这条/被引用消息里的图；last=上一张；留空=文生图。"
-            "★ 用户发图只是服装/风格参考时，留空，按文生图写 tags，不要传 reference。",
-            '· denoise     图生图重绘强度 0.05~1（越大越像重画）；0 = 用配置默认',
+            "· reference   普通降噪图生图（不锁结构）：auto/message/last；留空=文生图。"
+            "用户要“改图/重绘/换风格/换服装”才用；只是风格参考时留空按文生图写 tags。",
+            '· denoise     普通图生图重绘强度 0.05~1（越大越像重画）；0 = 用配置默认',
+            "· control     结构控制图生图（ControlNet，锁姿势/构图/线稿）："
+            "auto/message/last；必须配 control_type；sdxl/anima/moss/krea2 都支持。"
+            "普通照片也可以，插件会自动预处理。",
+            "· control_type sdxl：auto/depth/pose/canny/lineart/scribble/normal/"
+            "segment/tile/repaint；anima：depth/lineart/pose/scribble/inpainting/any；"
+            "moss：depth/color；krea2：depth/pose",
+            "· control_strength 0~2（默认 0.8）；control_start/end 0~1（默认 0/1）；"
+            "control_preprocess=true 自动预处理，false=你给的是处理好的控制图",
+            "★ 文生图是主线；只有用户明确要改图/锁结构才用图生图。"
+            "普通降噪选 reference，结构控制选 control——由你按用户意图判断，插件不猜。",
             "",
             "prompt 硬规则：① 只写英文；② 逗号分隔短标签，别写长句；",
             "③ 开头写 masterpiece, best quality, highres；④ 别堆 8k / ultra detailed。",
@@ -1859,6 +1912,12 @@ class NcdComfyPlugin(star.Star):
         lora: str = "",
         reference: str = "",
         denoise: float = 0.0,
+        control: str = "",
+        control_type: str = "",
+        control_strength: float = 0.8,
+        control_start: float = 0.0,
+        control_end: float = 1.0,
+        control_preprocess: bool = True,
         force: bool = False,
     ) -> str:
         """按预设工作流画一张图并发到当前会话。★ 必须先调用 comfy_tools。
@@ -1881,11 +1940,24 @@ class NcdComfyPlugin(star.Star):
             seed(int): 随机种子；-1 = 每次随机。
             model(string): 换底模（写文件名或其中一段）；留空 = 工作流里那个。
             lora(string): 加 LoRA，如 "cunnyfunky:0.8"；多个用逗号分隔；留空 = 不加。
-            reference(string): 图生图的参考图：留空 = 文生图；"auto" = 插件自动找
-                （当前/引用消息 → 最近用户图 → 最近生成图）；"message" = 这条或
-                被引用消息里的图；"last" = 上一张生成的图。是否用参考图完全由你判断：
-                用户要改图/重绘才传；只是服装/风格参考时留空。
-            denoise(float): 图生图重绘强度 0.05~1（越大越像重画）；0 = 用配置默认。
+            reference(string): **普通降噪图生图**（不锁结构）：留空 = 文生图；
+                "auto" = 插件自动找（当前/引用消息 → 最近用户图 → 最近生成图）；
+                "message" = 这条或被引用消息里的图；"last" = 上一张生成的图。
+                用户要“改这张 / 重绘 / 换风格 / 换服装”才用；只是说“参考这个风格”
+                时可以留空按文生图写 tags。
+            denoise(float): 普通图生图的重绘强度 0.05~1（越大越像重画）；0 = 配置默认。
+            control(string): **结构控制图生图**（ControlNet，锁姿势/构图/线稿）：
+                留空 = 不用；auto/message/last 取图方式同 reference。
+                用户明确要“照着这张的姿势/构图/线稿”才用；必须同时给 control_type。
+            control_type(string): sdxl 可用 auto/depth/pose/canny/lineart/scribble/
+                normal/segment/tile/repaint；anima 可用 depth/lineart/pose/scribble/
+                inpainting/any；moss 可用 depth/color；krea2 可用 depth/pose。
+                普通照片也可以：插件会自动预处理（control_preprocess=true）。
+            control_strength(float): 控制强度 0~2，默认 0.8。
+            control_start(float): 从采样百分之几开始生效，0~1，默认 0。
+            control_end(float): 到百分之几结束，0~1，默认 1。
+            control_preprocess(bool): true = 自动把照片处理成深度/线稿/骨架等；
+                false = 你给的已经是处理好的控制图。
             force(bool): 画幅超过提醒线、且用户已同意时才填 True。
         """
         gate = self._gate(event, "comfy_generate")
@@ -1898,7 +1970,15 @@ class NcdComfyPlugin(star.Star):
         ref_raw = str(reference or "").strip().lower()
         auto_ref = ref_raw in ("auto", "自动", "自己选", "自动选")
         message_ref = auto_ref or ref_raw in ("message", "msg", "image", "图", "这张", "消息图")
-        if not _ASYNC_RUN.get() and not message_ref and await self._async_ok(event):
+        # 控制图来自当前/引用消息时也必须同步：后台任务开始时临时图可能已经被清掉
+        ctrl_raw = str(control or "").strip().lower()
+        ctrl_sync = bool(ctrl_raw) and ctrl_raw not in ("last", "上一张")
+        if (
+            not _ASYNC_RUN.get()
+            and not message_ref
+            and not ctrl_sync
+            and await self._async_ok(event)
+        ):
             early = str(prompt or "").strip()
             if not early:
                 return "出图失败：prompt 是空的。写一段英文标签式描述再调。"
@@ -1925,6 +2005,12 @@ class NcdComfyPlugin(star.Star):
                 "lora": lora,
                 "reference": reference,
                 "denoise": denoise,
+                "control": control,
+                "control_type": control_type,
+                "control_strength": control_strength,
+                "control_start": control_start,
+                "control_end": control_end,
+                "control_preprocess": control_preprocess,
                 "force": force,
             }
             dup = self._duplicate_image_job(
@@ -1971,6 +2057,8 @@ class NcdComfyPlugin(star.Star):
         if want_preset and want_preset not in presets.PRESETS:
             return f"出图失败：没有工作流「{preset}」。可选：" + "、".join(presets.PRESETS)
         preset_name = self._preset(want_preset)
+        # 模型在别的家族目录里时，唯一命中就自动切预设（见 _auto_preset_for_model）
+        preset_name, auto_preset_note = self._auto_preset_for_model(model, preset_name)
 
         try:
             graph = presets.load_graph(preset_name)
@@ -1997,6 +2085,55 @@ class NcdComfyPlugin(star.Star):
                     "把图直接发在消息里（或引用一张图）再试；"
                     "不想用参考图就把 reference 留空。"
                 )
+
+        # ---- ControlNet 控制图（和 reference 分开：可以同时图生图 + 控构图） ----
+        ctrl_bytes: bytes | None = None
+        ctrl_type = str(control_type or "").strip().lower()
+        ctrl_strength = (
+            0.8 if control_strength is None else max(0.0, min(2.0, float(control_strength)))
+        )
+        ctrl_start = 0.0 if control_start is None else max(0.0, min(1.0, float(control_start)))
+        ctrl_end = 1.0 if control_end is None else max(0.0, min(1.0, float(control_end)))
+        if ctrl_end < ctrl_start:
+            ctrl_start, ctrl_end = ctrl_end, ctrl_start
+        if (control or "").strip():
+            ctrl_bytes = await self._reference_bytes(control, event)
+            if not ctrl_bytes:
+                return (
+                    "出图失败：control 要的是控制图，但没找到。\n"
+                    "把控制图直接发在消息里/引用一张再试；不用 ControlNet 就留空。"
+                )
+        elif ctrl_type:
+            return "出图失败：给了 control_type 但没给 control 图。"
+        if ctrl_bytes:
+            if preset_name not in presets.CONTROL_PRESETS:
+                return (
+                    f"出图失败：{presets.PRESETS[preset_name]['label']} 暂未接 "
+                    "ControlNet，当前支持："
+                    + "、".join(presets.CONTROL_PRESETS)
+                )
+            if preset_name == "anima" and ctrl_type not in presets.ANIMA_LLLITE_TYPES:
+                return (
+                    "出图失败：Anima 需要 control_type。可用："
+                    + "、".join(sorted(presets.ANIMA_LLLITE_TYPES))
+                )
+            if (
+                preset_name == "sdxl"
+                and ctrl_type
+                and ctrl_type not in presets.SDXL_UNION_TYPES
+            ):
+                return (
+                    "出图失败：SDXL 不支持控制类型 "
+                    f"「{control_type}」。可用："
+                    + "、".join(sorted(presets.SDXL_UNION_TYPES))
+                )
+            if preset_name == "moss" and ctrl_type not in presets.MOSS_CONTROL_TYPES:
+                return (
+                    "出图失败：MOSS 需要 control_type（depth / color）。可用："
+                    + "、".join(sorted(presets.MOSS_CONTROL_TYPES))
+                )
+            if preset_name == "krea2" and ctrl_type not in ("", "depth", "pose", "openpose"):
+                return "出图失败：Krea2 支持 depth / pose（control_type=depth 或 pose）。"
 
         try:
             if ref_bytes and not (size or width or height):
@@ -2038,10 +2175,30 @@ class NcdComfyPlugin(star.Star):
                 model_name = self._resolve_name(model, self._scan(preset_name), "底模")
             except ComfyError:
                 meta = presets.PRESETS[preset_name]
+                hits = self._presets_with_model(model)
+                if len(hits) == 1:
+                    tip = (
+                        f"★ 它实际在 {presets.PRESETS[hits[0]]['label']}"
+                        f"（preset={hits[0]}）的目录里，请把 preset 改成 "
+                        f"{hits[0]} 再调。"
+                    )
+                elif hits:
+                    options = "、".join(
+                        f"{presets.PRESETS[p]['label']}（preset={p}）" for p in hits
+                    )
+                    tip = (
+                        f"★ 它同时出现在 {options} 的目录里，"
+                        f"请明确指定 preset（比如 preset={hits[0]}）。"
+                    )
+                else:
+                    tip = (
+                        "★ 当前预设的目录里没有这个文件；检查文件名，"
+                        "或 comfy_extra_paths 指向的目录。"
+                    )
                 return (
                     f"出图失败：{meta['label']} 只能用 {meta.get('model_dir')} 目录里的底模，"
-                    f"你给的「{model}」不属于这一族。\n"
-                    f"★ 不想选错就用默认预设：{preset_name}（不填 model 即可）。"
+                    f"你给的「{model}」不在这一族。\n"
+                    + tip
                     + RECOMMENDED_HINT
                 )
 
@@ -2120,6 +2277,11 @@ class NcdComfyPlugin(star.Star):
                     ref_name = await client.upload_image(
                         ref_bytes, f"ref_{uuid.uuid4().hex[:8]}.png"
                     )
+                ctrl_name = ""
+                if ctrl_bytes:
+                    ctrl_name = await client.upload_image(
+                        ctrl_bytes, f"ctrl_{uuid.uuid4().hex[:8]}.png"
+                    )
                 final = presets.apply_params(
                     graph,
                     prompt=text,
@@ -2134,6 +2296,13 @@ class NcdComfyPlugin(star.Star):
                     filename_prefix=self._conf_str("comfy_filename_prefix") or None,
                     source_image=ref_name or None,
                     denoise=(denoise_val if ref_name else None),
+                    preset=preset_name,
+                    control_image=ctrl_name or None,
+                    control_type=ctrl_type,
+                    control_strength=ctrl_strength,
+                    control_start=ctrl_start,
+                    control_end=ctrl_end,
+                    control_preprocess=bool(control_preprocess),
                 )
                 async def _on_sampler() -> None:
                     mode_label = "图生图" if ref_name else "文生图"
@@ -2284,6 +2453,11 @@ class NcdComfyPlugin(star.Star):
             )
         if ref_name:
             used.append(f"图生图（参考图 denoise {denoise_val:g}）")
+        if ctrl_name:
+            used.append(
+                f"控制图 {ctrl_type or 'auto'}（strength {ctrl_strength:g}，"
+                f"{ctrl_start:g}~{ctrl_end:g}）"
+            )
         queue_note = self._queue_note()
         busy_note = await self._busy_note_for_current()
         notes = "\n".join(n for n in (queue_note, busy_note) if n)
@@ -2291,6 +2465,7 @@ class NcdComfyPlugin(star.Star):
             f"图已经画好并发到会话里了（{filename}，{len(data):,} 字节，"
             f"ComfyUI 用时 {result['seconds']} 秒）。\n"
             f"参数：{' · '.join(used)}\n"
+            + (f"{auto_preset_note}\n" if auto_preset_note else "")
             + (f"{notes}\n" if notes else "")
             + "★ 这张图已经附在本次结果里，你可以直接看。先自查一遍"
             "（脸、发色、服装、动作是否和用户要求一致），不对就调整描述重画；"

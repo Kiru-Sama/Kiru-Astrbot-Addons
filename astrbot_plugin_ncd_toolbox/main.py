@@ -819,7 +819,7 @@ class NcdToolboxPlugin(star.Star):
         #   所以它是"模型接下来会看到哪些工具"的近似值。
         #   真正决定能不能调用还看 provider 的 modalities 里有没有 tool_use
         #   （见 README「工具没被调用」一节）。
-        #   预期：开了工具菜单时是 1/7（只有 ncd_tools），点开菜单后变 7/7。
+        #   预期：开了工具菜单时是 1/9（只有 ncd_tools），点开菜单后变 9/9。
         names = [tool.name for tool in req.func_tool.tools] if req.func_tool else []
         mine = [name for name in names if name in TOOL_NAMES]
         logger.info(
@@ -1108,9 +1108,12 @@ class NcdToolboxPlugin(star.Star):
                 count=count, ori_question=ori_question,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[toolbox] 官方搜索失败，尝试回退: {exc}")
             if not self._conf_bool("web_fallback_browser", False):
-                return json.dumps({"error": f"官方搜索失败：{exc}"}, ensure_ascii=False)
+                return json.dumps(
+                    {"error": f"官方搜索失败：{exc}（本地浏览器回退已关闭）"},
+                    ensure_ascii=False,
+                )
+            logger.warning(f"[toolbox] 官方搜索失败，回退本机浏览器: {exc}")
             return None
 
         rows = []
@@ -1161,7 +1164,9 @@ class NcdToolboxPlugin(star.Star):
     async def web_search_bing(
         self, event: AstrMessageEvent, query: str, count: int = 8
     ) -> str:
-        """搜索网页。默认走 DeepSeek 官方搜索（按次计费），失败自动回退本机浏览器。
+        """搜索网页。默认走 DeepSeek 官方搜索（按次计费）。
+        只有配置 web_fallback_browser 开启时，官方失败才会回退本机浏览器；
+        该开关默认关闭，关闭时失败直接报错。
         只返回结果的序号、标题和网址，不返回正文。
 
         Args:
@@ -1285,7 +1290,9 @@ class NcdToolboxPlugin(star.Star):
 
     @filter.llm_tool(name="fetch_page")
     async def fetch_page(self, event: AstrMessageEvent, url: str, query: str = "") -> str:
-        """打开一个网页，把正文总结成要点后返回。默认走 DeepSeek 官方抓取，失败回退本机浏览器。
+        """打开一个网页，把正文总结成要点后返回。默认走 DeepSeek 官方抓取。
+        只有配置 web_fallback_browser 开启时，官方失败才会回退本机浏览器；
+        该开关默认关闭，关闭时失败直接报错。
         搜索结果里的标题看着相关就用它读内容。
 
         Args:
@@ -1335,12 +1342,12 @@ class NcdToolboxPlugin(star.Star):
                     page = await self._official_fetch(url, fetch_chars)
                     official = page is not None
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"[toolbox] 官方抓取失败，尝试回退: {exc}")
                     if not self._conf_bool("web_fallback_browser", False):
                         return json.dumps(
-                            {"url": url, "error": f"官方抓取失败：{exc}"},
+                            {"url": url, "error": f"官方抓取失败：{exc}（本地浏览器回退已关闭）"},
                             ensure_ascii=False,
                         )
+                    logger.warning(f"[toolbox] 官方抓取失败，回退本机浏览器: {exc}")
                     page = None
 
             if page is None:

@@ -35,18 +35,6 @@
     "hint": "用来把 LoRA / VAE 这类小文件从底模清单里筛掉。默认 0.5。",
     "default": 0.5
   },
-  "comfy_width": {
-    "type": "int",
-    "description": "默认宽（0 = 用工作流里的）",
-    "hint": "工作流本身是 720×960。只有想全局改画幅时才填，8 的倍数。",
-    "default": 0
-  },
-  "comfy_height": {
-    "type": "int",
-    "description": "默认高（0 = 用工作流里的）",
-    "hint": "8 的倍数。",
-    "default": 0
-  },
   "comfy_steps": {
     "type": "int",
     "description": "默认步数（0 = 用工作流里的）",

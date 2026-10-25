@@ -241,7 +241,7 @@ async def main() -> int:
     if results.get("B") != "摘要乙乙乙":
         bad.append(f"★用例4：B 的压缩结果被 A 串味了，实际 {results.get('B')!r}")
     print("  注：面板的实时缓冲在这种并发下会混着显示 —— 已知限制，只影响显示，")
-    print("      前提是 max_concurrent_replies=1（默认值，压缩不会重叠）")
+    print("      把 max_concurrent_replies 设成 1 时压缩不会重叠；默认 0 时可能同屏")
     print()
 
     # ── ⑤ 压缩没生效必须被判定出来 ──────────────────────────────────

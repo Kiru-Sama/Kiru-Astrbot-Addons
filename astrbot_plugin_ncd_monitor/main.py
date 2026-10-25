@@ -2127,8 +2127,8 @@ class Main(star.Star):
           非压缩时的那次清理就删不掉它（`测试-压缩流式.py` 用例 3 会红）。
           而这点混流的影响面【只在面板显示】：压缩的**结果**来自
           `_run_compress_stream` 自己捞的 final，不经过实时缓冲。
-          代价与收益不成比例，所以保持现状 —— 前提是 max_concurrent_replies=1
-          （默认就是 1，压缩不可能重叠）。
+          代价与收益不成比例，所以保持现状 —— 若把 max_concurrent_replies
+          设成 1，压缩就不会重叠；默认 0 时接受两个压缩可能同屏。
         """
         try:
             return _CURRENT_UMO.get("") or ""

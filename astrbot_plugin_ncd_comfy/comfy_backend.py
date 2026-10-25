@@ -31,14 +31,31 @@ class ComfyError(Exception):
     """ComfyUI 后端的可预期失败（要给人话，不是栈）。"""
 
 
-def _log_tail(path: Path | None, limit: int = 800) -> str:
-    """读 ComfyUI 日志尾部（启动失败时贴给用户看）。"""
+def _exit_text(code: int | None) -> str:
+    """把 Windows 的 4294967295 归一成 -1，避免用户看到天文数字。"""
+    if code is None:
+        return "未知"
+    normalized = code - 0x100000000 if code > 0x7FFFFFFF else code
+    if normalized < 0:
+        return f"{normalized}（0x{code & 0xFFFFFFFF:08X}）"
+    return str(normalized)
+
+
+def _log_tail(path: Path | None, limit: int = 2000) -> str:
+    """读 ComfyUI 日志尾部（启动失败/崩溃时贴给用户看）。
+
+    ★ 只读文件最后几 KB，不把 4MB 日志整个读进内存。
+    """
     if not path:
         return ""
     try:
         if not path.exists():
             return ""
-        text = path.read_text(encoding="utf-8", errors="replace")
+        with path.open("rb") as fp:
+            fp.seek(0, 2)
+            size = fp.tell()
+            fp.seek(max(0, size - limit * 4))
+            text = fp.read().decode("utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         return ""
     return text[-limit:].strip()
@@ -140,11 +157,24 @@ class ComfyClient:
             s.settimeout(1.0)
             return s.connect_ex(("127.0.0.1", self.port)) == 0
 
+    def _drop_stale_proc(self) -> None:
+        """丢掉已经退出的旧进程句柄，改为接管端口上的 ComfyUI。
+
+        ★ 场景：插件拉起的 ComfyUI 被手动重启/换成了外部进程。
+          端口健康但旧 _proc 已死，若继续拿它判断，会把正常任务误判成
+          “出图过程中 ComfyUI 退出了”。
+        """
+        self._proc = None
+        self._owned = False
+
     async def ensure_server(self) -> dict:
         """确保有一个可用的 ComfyUI。返回它的 /system_stats。"""
         async with self._lock:
             stats = await asyncio.to_thread(self._health_sync, 2.0)
             if stats is not None:
+                if self._proc is not None and self._proc.poll() is not None:
+                    logger.warning("[comfy] 端口健康但旧进程已退出，接管外部 ComfyUI")
+                    self._drop_stale_proc()
                 self._last_used = time.time()
                 return stats
             if await asyncio.to_thread(self._port_busy):
@@ -219,8 +249,13 @@ class ComfyClient:
         deadline = time.time() + self.startup_timeout
         while time.time() < deadline:
             if self._proc is not None and self._proc.poll() is not None:
+                stats = await asyncio.to_thread(self._health_sync, 1.0)
+                if stats is not None:
+                    logger.warning("[comfy] 旧进程退出但服务已在线，接管外部 ComfyUI")
+                    self._drop_stale_proc()
+                    return stats
                 raise ComfyError(
-                    f"ComfyUI 启动就退出了（exit={self._proc.returncode}）。"
+                    f"ComfyUI 启动就退出了（exit={_exit_text(self._proc.returncode)}）。"
                     f"日志尾部：{_log_tail(self.log_path) or '（空）'}"
                 )
             stats = await asyncio.to_thread(self._health_sync, 1.5)
@@ -247,8 +282,7 @@ class ComfyClient:
 
         ★ 2026-10-21 事故：这里原来的判断是 `if self._last_used and ...: continue`，
           `_last_used` 初值是 0 —— 于是"刚拉起来 15 秒"被当成"空闲 60 秒"，
-          冷启动中的进程被自己杀了。现在把四种"不能杀"的情况都显式列出来，
-          并有单测钉住（测试-接线.py 的空闲自退组）。
+          冷启动中的进程被自己杀了。现在把四种"不能杀"的情况都显式列出来。
         """
         gap = self._idle_gap()
         return gap is not None and gap >= self.idle_timeout
@@ -602,10 +636,17 @@ class ComfyClient:
         deadline = time.time() + self.gen_timeout
         while time.time() < deadline:
             if self._proc is not None and self._proc.poll() is not None:
-                raise ComfyError(
-                    f"出图过程中 ComfyUI 退出了（exit={self._proc.returncode}）。"
-                    f"日志尾部：{_log_tail(self.log_path) or '（空）'}"
-                )
+                # ★ 先看端口：手动重启/外部进程接管时，旧句柄已死但服务还活着，
+                #   不能把上一张图的日志当成这一张的崩溃。
+                stats = await asyncio.to_thread(self._health_sync, 1.0)
+                if stats is not None:
+                    logger.warning("[comfy] 旧进程句柄已退出但服务在线，接管后继续等待")
+                    self._drop_stale_proc()
+                else:
+                    raise ComfyError(
+                        f"出图过程中 ComfyUI 退出了（exit={_exit_text(self._proc.returncode)}）。"
+                        f"日志尾部：{_log_tail(self.log_path) or '（空）'}"
+                    )
             try:
                 hist = await asyncio.to_thread(
                     self._get_json_sync, f"/history/{urllib.parse.quote(prompt_id)}", 10.0

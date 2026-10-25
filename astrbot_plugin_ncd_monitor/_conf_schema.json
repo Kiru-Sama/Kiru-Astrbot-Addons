@@ -38,8 +38,8 @@
   "max_concurrent_replies": {
     "type": "int",
     "description": "最多几个会话同时生成回复",
-    "hint": "默认 1（串行 + 排队）；填 0 或负数 = 不限制（恢复 AstrBot 原本的全并行）。★ 别随便调大：LM Studio 以 kv_unified=true 加载时 KV 池是共享的（实测 n_slots=4, n_ctx_slot=8192），两个请求各带几千 token 同时进去会直接报 Context size has been exceeded。上下文窗口够大时才适合调大",
-    "default": 1
+    "hint": "默认 0（不排队，各走各的）；填 0 或负数 = 不限制。要串行 + 排队就设 1。★ 别随便调大：LM Studio 以 kv_unified=true 加载时 KV 池是共享的（实测 n_slots=4, n_ctx_slot=8192），两个请求各带几千 token 同时进去会直接报 Context size has been exceeded。上下文窗口够大时才适合调大",
+    "default": 0
   },
   "gate_hold_timeout": {
     "type": "int",
