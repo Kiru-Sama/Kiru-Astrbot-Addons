@@ -107,6 +107,16 @@ GATE_ERROR = (
 )
 
 
+def _canvas_reminder(w: int, h: int, warn: int) -> str:
+    """画幅超过提醒线时返回给模型的话（前台/后台共用同一段文案）。"""
+    return (
+        f"画幅 {w}×{h} 超过提醒线（单边 {warn}）：\n"
+        "12 GB 卡上这个尺寸会明显更慢，也可能因为显存不够失败。\n"
+        "用户确认就要这个尺寸的话，带 force=true 再调一次；"
+        f"否则改成 {warn} 以内的尺寸（比如 720x960 / 1024x1024）。"
+    )
+
+
 class NcdComfyPlugin(star.Star):
     def __init__(
         self, context: star.Context, config: dict[str, Any] | None = None
@@ -798,13 +808,18 @@ class NcdComfyPlugin(star.Star):
         if _ASYNC_RUN.get():
             return ""
         try:
-            first = self._busy_note(await self._gpu_metrics())
+            # ★ nvidia-smi 线程也可能被卡住；后台任务不能因此无限等。
+            first = self._busy_note(
+                await asyncio.wait_for(self._gpu_metrics(), timeout=6.0)
+            )
             if not first:
                 return ""
             # ComfyUI 卸载/加载模型时，进程显存计数可能慢一拍：
             # 只认连续两次都繁忙，避免瞬时误报。
             await asyncio.sleep(0.8)
-            second = self._busy_note(await self._gpu_metrics())
+            second = self._busy_note(
+                await asyncio.wait_for(self._gpu_metrics(), timeout=6.0)
+            )
             return second if second else ""
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 繁忙检测失败（忽略）: {exc}")
@@ -1338,7 +1353,18 @@ class NcdComfyPlugin(star.Star):
     ) -> None:
         """换工作流 / 换底模 / 冷启动时，先把"要等"说清楚。"""
         client = self._client()
-        cold = await asyncio.to_thread(client.healthy_sync) is None
+        try:
+            # ★ 线程池可能被别的工具占满；这里不能无限等，否则整条后台出图
+            #   会停在拿出图槽之前（Kirusama 20:18 的三张就是这样卡住的）。
+            cold = (
+                await asyncio.wait_for(
+                    asyncio.to_thread(client.healthy_sync), timeout=3.0
+                )
+                is None
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 健康检查超时/失败，跳过加载提示: {exc}")
+            cold = False
         parts = []
         if cold:
             parts.append("⏳ 正在启动 ComfyUI（首次约 20~50 秒）…")
@@ -1482,7 +1508,17 @@ class NcdComfyPlugin(star.Star):
                     break
                 self._img_current = job
                 try:
-                    await self._image_job(job["event"], job["kwargs"])
+                    # ★ 看门狗：单张任务不能无限占住公平队列。
+                    #   MOSS 50 步 + 首次加载可能 2 分钟，给 10 分钟上限；
+                    #   真超时就发一条提示并继续下一张，不让 worker 静默卡死。
+                    await asyncio.wait_for(
+                        self._image_job(job["event"], job["kwargs"]),
+                        timeout=max(600.0, float(self._conf_int("comfy_timeout", 300)) + 120.0),
+                    )
+                except asyncio.TimeoutError:
+                    umo = str(job.get("umo") or "")
+                    logger.error(f"[comfy] 后台出图超时（已中止）→ {umo}")
+                    # _image_job 的 CancelledError 分支会发“被中断”提示，避免重复发。
                 finally:
                     self._img_current = None
         except asyncio.CancelledError:
@@ -1530,6 +1566,12 @@ class NcdComfyPlugin(star.Star):
         finally:
             _ASYNC_RUN.reset(token)
         if isinstance(result, str):
+            # ★ 后台任务提前返回文字（参数被拒/画幅提醒）时，日志里必须留下一行，
+            #   否则表现就是“入队后凭空消失”，前面那五次就是这么查不出来的。
+            logger.info(
+                f"[comfy] 后台任务提前返回文字结果 → {umo}: "
+                f"{result.split(chr(10), 1)[0][:120]}"
+            )
             await self._handle_async_result(event, umo, result)
         else:
             logger.info(f"[comfy] 后台任务完成，图已自动发出 → {umo}")
@@ -1963,6 +2005,10 @@ class NcdComfyPlugin(star.Star):
         gate = self._gate(event, "comfy_generate")
         if gate:
             return gate
+        if _ASYNC_RUN.get():
+            logger.info("[comfy] 后台参数解析开始")
+        else:
+            logger.info("[comfy] 前台参数解析开始")
 
         # ★ 云端 API：把整张图丢到后台，先把聊天放出去。
         #   本地模型必须同步 —— 它和 ComfyUI 抢显存。
@@ -1991,6 +2037,29 @@ class NcdComfyPlugin(star.Star):
             ref_err = self._reference_ready(reference, event)
             if ref_err:
                 return ref_err
+            # ★ 画幅提醒必须在这里就拦住。入队后再返回提醒，这一轮模型看不到，
+            #   用户只收到半句话、图也永远不出（Kirusama 1152x1536 连卡五次）。
+            if size or width or height:
+                preset_early, _ = self._auto_preset_for_model(
+                    model, self._preset(want_early)
+                )
+                max_side = self._conf_int("comfy_max_side", 1920)
+                max_pixels = int(self._conf_float("comfy_max_mp", 2.7648) * 1e6)
+                try:
+                    info_early = presets.summarize(presets.load_graph(preset_early))
+                    w_early, h_early = sizing.resolve_size(
+                        size,
+                        width,
+                        height,
+                        (info_early["width"], info_early["height"]),
+                        max_side,
+                        max_pixels,
+                    )
+                except (presets.WorkflowError, ValueError) as exc:
+                    return f"出图失败：{exc}"
+                warn_early = sizing.warn_side(max_side)
+                if not force and max(w_early, h_early) > warn_early:
+                    return _canvas_reminder(w_early, h_early, warn_early)
             job_kwargs = {
                 "prompt": prompt,
                 "negative": negative,
@@ -2151,12 +2220,7 @@ class NcdComfyPlugin(star.Star):
         # 提醒线：单边超过上限的 3/4 就先问一句（旧插件也是这么做的）
         warn = sizing.warn_side(max_side)
         if not force and max(w, h) > warn:
-            return (
-                f"画幅 {w}×{h} 超过提醒线（单边 {warn}）：\n"
-                "12 GB 卡上这个尺寸会明显更慢，也可能因为显存不够失败。\n"
-                f"用户确认就要这个尺寸的话，带 force=true 再调一次；"
-                f"否则改成 {warn} 以内的尺寸（比如 720x960 / 1024x1024）。"
-            )
+            return _canvas_reminder(w, h, warn)
 
         steps_val = int(steps or 0) or int(
             self._conf_int("comfy_steps", 0) or info["steps"]
@@ -2263,7 +2327,15 @@ class NcdComfyPlugin(star.Star):
                     )
 
         used_model = model_name or info["model"]
+        if _ASYNC_RUN.get():
+            logger.info("[comfy] 参数解析完成，开始加载提示")
+        else:
+            logger.info("[comfy] 前台参数解析完成，开始加载提示")
         await self._notify_loading(event, preset_name, used_model)
+        if _ASYNC_RUN.get():
+            logger.info("[comfy] 加载提示完成，进入出图槽")
+        else:
+            logger.info("[comfy] 前台加载提示完成，进入出图槽")
 
         client = self._client()
         async with self._gen_slot(event):
