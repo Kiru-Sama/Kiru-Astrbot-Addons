@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """端到端：真的拉起 ComfyUI、用你给的预设工作流出图、取回图片。
 
-前置：F:\\ComfyUI_min 已建好（或 --comfy-dir 指向别的便携版），
+前置：用 --comfy-dir 或环境变量 COMFY_DIR 指向 ComfyUI 便携版根目录，
      它的 extra_model_paths.yaml 能查到四个工作流用到的底模。
 
 跑：
@@ -15,6 +15,7 @@
 
 import argparse
 import asyncio
+import os
 import pathlib
 import struct
 import sys
@@ -175,7 +176,7 @@ async def run(args) -> int:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--comfy-dir", default=r"F:\ComfyUI_min")
+    ap.add_argument("--comfy-dir", default=os.environ.get("COMFY_DIR", ""))
     ap.add_argument("--port", type=int, default=8199)
     ap.add_argument("--preset", default="sdxl", help="sdxl/krea2/anima/moss，或 all")
     ap.add_argument("--size", default="", help="留空 = 用工作流里的画幅")
@@ -187,6 +188,8 @@ def main() -> int:
     ap.add_argument("--idle-test", action="store_true")
     ap.add_argument("--idle-timeout", type=float, default=5)
     args = ap.parse_args()
+    if not args.comfy_dir:
+        ap.error("请用 --comfy-dir 或环境变量 COMFY_DIR 指定 ComfyUI 便携版根目录")
     if args.preset != "all" and args.preset not in presets.PRESETS:
         print(f"没有这个预设：{args.preset}；可选 {'、'.join(presets.PRESETS)} 或 all")
         return 2

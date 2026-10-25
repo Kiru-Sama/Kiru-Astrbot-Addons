@@ -227,6 +227,12 @@
     "hint": "默认 70%。还要同时有至少 1GB 外部占用才提示，避免桌面/浏览器轻负载误报。",
     "default": 70
   },
+  "comfy_fair_batch": {
+    "type": "int",
+    "description": "每个用户连续出图多少张后轮换",
+    "hint": "默认 3。有人排队时，每人最多连续画 3 张就换下一个人；只有一个人排队时不限，独享整条队列。\n例：A 8 张、B 2 张、C 6 张，顺序为 A3、B2、C3、A3、C3、A2。",
+    "default": 3
+  },
   "comfy_busy_queue": {
     "type": "int",
     "description": "出图任务总共超过多少时提示排队较多",

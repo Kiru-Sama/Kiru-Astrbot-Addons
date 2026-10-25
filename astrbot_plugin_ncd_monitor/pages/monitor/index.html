@@ -4,6 +4,22 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>链路监控</title>
+<script>
+/* 预绘制外观：先于 CSS 生效，避免深色模式闪白。 */
+(function () {
+  try {
+    var a = JSON.parse(localStorage.getItem("ncd-monitor-appearance") || "{}");
+    var root = document.documentElement;
+    var mode = a.mode || "system";
+    var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var resolved = mode === "system" ? (dark ? "dark" : "light") : mode;
+    root.dataset.theme = resolved;
+    root.dataset.density = a.density || "cozy";
+    root.dataset.accent = a.accent || "blue";
+    root.style.colorScheme = resolved;
+  } catch (e) { /* 隐私模式/禁用存储时退回默认 */ }
+})();
+</script>
 <script src="/api/plugin/page/bridge-sdk.js"></script>
 <style>
   :root {
@@ -130,9 +146,21 @@
   .link .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
 
   /* ---- 上下文条 ---- */
+  .ctx-head {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 12px; margin: 8px 2px 6px;
+  }
+  .ctx-head .used { color: var(--muted); font-size: 12.5px; }
+  .ctx-head .used b {
+    color: var(--text); font-size: 15px; font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .ctx-head .fig {
+    color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums;
+  }
   .bar {
-    position: relative; height: 26px; border-radius: 7px;
-    background: var(--track); overflow: hidden; margin: 4px 0 8px;
+    position: relative; height: 18px; border-radius: 7px;
+    background: var(--track); overflow: hidden; margin: 0 0 8px;
   }
   .bar > .fill {
     height: 100%; width: 0%;
@@ -151,6 +179,62 @@
     font-size: 12.5px; font-weight: 600; font-variant-numeric: tabular-nums;
     text-shadow: 0 1px 2px rgba(0,0,0,.28); color: #fff;
   }
+
+  /* ---- 上下文构成（三段条 + 图例，口径与 DSH 面板一致）---- */
+  .bar > .fill.split {
+    background: transparent; display: flex; gap: 1px; overflow: hidden;
+  }
+  .bar > .fill.split > i { display: block; height: 100%; min-width: 1px; }
+  .bar > .fill.split > i:first-child { border-radius: 7px 0 0 7px; }
+  .bar > .fill.split > i:last-child { border-radius: 0 7px 7px 0; }
+  .bar > .fill.split > i:only-child { border-radius: 7px; }
+  .seg-system { background: #94a3b8; }
+  .seg-tools { background: #a78bfa; }
+  .seg-messages { background: var(--accent); }
+  .ctx-legend { display: grid; gap: 2px; margin: 2px 0 10px; }
+  .ctx-legend .row {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 12.5px; color: var(--muted);
+  }
+  .ctx-legend .row b {
+    margin-left: auto; color: var(--text); font-weight: 550;
+    font-variant-numeric: tabular-nums;
+  }
+  .ctx-legend .sw { width: 8px; height: 8px; border-radius: 2px; flex: none; }
+
+  /* ---- Token 用量卡 ---- */
+  .usage-head {
+    display: flex; align-items: baseline; gap: 8px;
+    padding: 2px 0 10px; margin-bottom: 4px;
+    border-bottom: 1px dashed var(--border);
+  }
+  .usage-head .n {
+    font-size: 26px; font-weight: 700; letter-spacing: -.6px;
+    font-variant-numeric: tabular-nums;
+  }
+  .usage-head .u { color: var(--muted); font-size: 12px; }
+  .usage-hint { margin-top: 8px; font-size: 12px; color: var(--muted); }
+
+  /* ---- 缓存诊断：前缀哪一段变了 ---- */
+  .diag-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+  .diag-table th, .diag-table td {
+    padding: 4px 0; border-bottom: 1px dashed var(--border); vertical-align: middle;
+  }
+  .diag-table th { color: var(--muted); font-weight: 500; text-align: left; }
+  .diag-table th.num, .diag-table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .diag-table th.c, .diag-table td.c { text-align: center; }
+  .diag-table td.diag-name {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 8px;
+  }
+  .diag-table tr:last-child td { border-bottom: none; }
+  .diag-pill {
+    display: inline-block; min-width: 30px; text-align: center;
+    padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  }
+  .diag-pill.same { color: var(--muted); background: var(--track); }
+  .diag-pill.chg { color: #fff; background: var(--bad); }
+  .diag-pill.na { color: var(--muted); }
+  .diag-note { margin-top: 8px; font-size: 11.5px; color: var(--muted); }
 
   .kv { display: flex; justify-content: space-between; gap: 10px; padding: 3.5px 0; font-size: 13px; }
   .kv .k { color: var(--muted); }
@@ -186,25 +270,49 @@
   .res-note { font-size: 11.5px; color: var(--muted); padding: 3px 0; }
 
   /* ---- 各会话上下文占用 ----
-     行样式沿用原来「持久化的群聊消息」卡片那一套（名称 + 进度条 + 数值），
-     前缀从 pg- 改成 ses-（session），因为持久化卡片已经删掉了。 */
+     统一成一套 6 列网格：会话 / 进度 / 消息 / Token / 占比 / 缓存。
+     所有行的列宽一致，数值列右对齐，不再让文字长度把进度条挤来挤去。 */
+  .ses-head,
+  .ses-row {
+    display: grid;
+    grid-template-columns:
+      minmax(130px, 200px) minmax(80px, 1fr)
+      64px 96px 64px 72px;
+    column-gap: 10px;
+    align-items: center;
+  }
+  .ses-head {
+    padding: 0 0 4px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 11px;
+    letter-spacing: 0.02em;
+  }
+  .ses-head > span:nth-child(n + 3) { text-align: right; }
   .ses-list { display: flex; flex-direction: column; gap: 3px; }
-  .ses-row { display: flex; align-items: center; gap: 9px; font-size: 13px; }
+  .ses-row { font-size: 13px; }
   .ses-name {
-    flex: none; width: 170px;
+    min-width: 0;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .ses-bar {
-    flex: 1; height: 7px; min-width: 40px; border-radius: 4px;
+    height: 7px; min-width: 40px; border-radius: 4px;
     background: var(--border); overflow: hidden;
   }
   .ses-bar > i { display: block; height: 100%; background: var(--accent); border-radius: 4px; }
   .ses-bar > i.hot { background: var(--warn); }
-  .ses-cnt {
-    flex: none; min-width: 150px; text-align: right;
-    font-variant-numeric: tabular-nums; color: var(--muted);
+  .ses-messages,
+  .ses-tokens,
+  .ses-pct,
+  .ses-cache {
+    text-align: right;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
   }
-  .ses-cnt.hot { color: var(--warn); font-weight: 600; }
+  .ses-pct.hot { color: var(--warn); font-weight: 600; }
+  .ses-cache { color: var(--muted); }
   .ses-empty { font-size: 12.5px; color: var(--muted); padding: 4px 0; }
   .pill.off { background: color-mix(in srgb, var(--muted) 18%, transparent); color: var(--muted); }
 
@@ -595,6 +703,238 @@
     color: var(--text); width: 100%; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap;
   }
+  /* ==================================================================
+     NCD Design System v2
+     参考 SnowLuma 的外观模型：主题 / 密度 / 主色都由 <html data-*> 驱动，
+     组件只消费语义变量。这样以后加页面不用再复制一套颜色和间距。
+     ================================================================== */
+  :root {
+    --bg: #f4f7fb;
+    --bg-2: #edf3fa;
+    --card: #ffffff;
+    --card-2: #f8fafc;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --muted: #64748b;
+    --track: #edf2f7;
+    --accent: #0ea5e9;
+    --accent-2: #0284c7;
+    --accent-soft: color-mix(in srgb, var(--accent) 13%, transparent);
+    --ok: #10b981;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+    --radius: 16px;
+    --radius-sm: 10px;
+    --gap: 14px;
+    --card-pad: 16px 18px;
+    --shadow: 0 1px 2px rgba(15, 23, 42, .04),
+              0 12px 32px -22px rgba(15, 23, 42, .28);
+    --font-ui: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+    --mono: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  }
+  html[data-theme="dark"] {
+    --bg: #0b1120;
+    --bg-2: #0f172a;
+    --card: #111827;
+    --card-2: #0f172a;
+    --border: #1f2937;
+    --text: #e5e7eb;
+    --muted: #94a3b8;
+    --track: #172033;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .28),
+              0 18px 40px -24px rgba(0, 0, 0, .65);
+  }
+  html[data-accent="teal"] { --accent: #14b8a6; --accent-2: #0f766e; }
+  html[data-accent="violet"] { --accent: #8b5cf6; --accent-2: #6d28d9; }
+  html[data-accent="rose"] { --accent: #f43f5e; --accent-2: #be123c; }
+  html[data-accent="amber"] { --accent: #f59e0b; --accent-2: #b45309; }
+  html[data-density="compact"] {
+    --gap: 10px;
+    --card-pad: 12px 14px;
+  }
+
+  body {
+    background:
+      radial-gradient(900px 420px at 8% -8%, var(--accent-soft), transparent 62%),
+      radial-gradient(760px 360px at 100% 0%, color-mix(in srgb, var(--accent) 7%, transparent), transparent 58%),
+      var(--bg);
+    background-attachment: fixed;
+    font-family: var(--font-ui);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  .wrap { gap: var(--gap); }
+  .grid { gap: var(--gap); }
+  header { align-items: center; gap: 10px; margin-bottom: 18px; }
+  header h1 { font-size: 20px; font-weight: 700; letter-spacing: -.2px; }
+  header .sub { color: var(--muted); font-size: 12.5px; }
+  .refresh {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 6px 11px;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .03);
+  }
+  .ui-icon,
+  .ui-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    gap: 6px; cursor: pointer; font: inherit; font-size: 12.5px;
+    color: var(--text); background: var(--card);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 6px 11px; line-height: 1;
+    transition: border-color .15s, background .15s, color .15s;
+  }
+  .ui-icon { width: 32px; height: 32px; padding: 0; font-size: 15px; }
+  .ui-icon:hover, .ui-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .ui-btn { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .ui-btn:hover { color: #fff; filter: brightness(1.04); }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: var(--card-pad);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .card h2 {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    margin: 0 0 12px; color: var(--text);
+    font-size: 13.5px; font-weight: 650;
+    text-transform: none; letter-spacing: 0;
+  }
+  /* 主栏卡片统一用设计系统的间距；HTML 里旧的 margin 只作为无 JS 兜底。 */
+  .col-main > .card,
+  .col-main > .grid,
+  .col-main > details.card { margin-bottom: var(--gap) !important; }
+  details.card > summary {
+    display: flex; align-items: center; gap: 8px;
+    min-height: 24px; cursor: pointer;
+  }
+  details.card > summary h2 { margin: 0; }
+  details.card > summary .hint { margin-left: auto; }
+  .refresh { white-space: nowrap; }
+  .card h2 .h2sub {
+    display: inline; margin-left: 2px;
+    font-size: 11.5px; font-weight: 400; color: var(--muted);
+    text-transform: none; letter-spacing: 0;
+  }
+  .col-side .card h2 .h2sub { display: block; flex: 1 1 100%; margin: 2px 0 0; }
+  .scalebtns { float: none; margin-left: auto; }
+
+  .summary,
+  .stat,
+  .live-body {
+    background: color-mix(in srgb, var(--card-2) 88%, var(--track));
+    border-radius: var(--radius-sm);
+  }
+  .summary { border: 1px solid var(--border); }
+  .stat { padding: 10px 12px; }
+  .stat .val { font-size: 18px; letter-spacing: -.2px; }
+  .pill, .tag { border-radius: 999px; }
+  .pill { padding: 2px 8px; }
+  .tag { padding: 2px 8px; }
+
+  .scroll {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    overflow: auto;
+  }
+  table { font-size: 12.5px; }
+  th, td { padding: 9px 10px; border-bottom: 1px solid color-mix(in srgb, var(--border) 78%, transparent); }
+  th {
+    position: sticky; top: 0; z-index: 2;
+    background: var(--card);
+    color: var(--muted); font-size: 11.5px; font-weight: 600;
+    text-transform: none; letter-spacing: .02em;
+  }
+  td.num { font-family: var(--mono); }
+  tbody tr:hover td { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+  tbody tr:last-child td { border-bottom: none; }
+
+  button, select, input, textarea { font-family: inherit; }
+  button { border-radius: var(--radius-sm); }
+  .sbtn {
+    border-radius: 8px; padding: 4px 10px;
+    background: var(--card); border-color: var(--border);
+  }
+  .sbtn.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .lbtn { border-radius: 8px; padding: 3px 9px; }
+
+  ::-webkit-scrollbar { width: 9px; height: 9px; }
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted) 28%, transparent);
+    border-radius: 999px; border: 2px solid transparent; background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--muted) 45%, transparent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* 只让主栏卡片参与“显示/隐藏”，右栏上下文和实时输出始终保留 */
+  .card[hidden] { display: none !important; }
+
+  /* 外观抽屉 */
+  .ui-drawer {
+    position: fixed; inset: 0; z-index: 90;
+    background: color-mix(in srgb, #0b1120 34%, transparent);
+    backdrop-filter: blur(3px);
+    display: flex; justify-content: flex-end;
+  }
+  .ui-drawer[hidden] { display: none !important; }
+  .ui-panel {
+    width: min(380px, 94vw); height: 100%;
+    background: var(--card); color: var(--text);
+    border-left: 1px solid var(--border);
+    box-shadow: -24px 0 60px -30px rgba(0, 0, 0, .5);
+    padding: 20px; overflow: auto;
+  }
+  .ui-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 18px;
+  }
+  .ui-head strong { font-size: 15px; }
+  .ui-close {
+    width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card); color: var(--muted); cursor: pointer; font-size: 18px;
+  }
+  .ui-section { margin-bottom: 18px; }
+  .ui-label {
+    color: var(--muted); font-size: 11.5px; margin-bottom: 8px;
+    letter-spacing: .04em; text-transform: uppercase;
+  }
+  .ui-seg {
+    display: grid; grid-template-columns: repeat(3, 1fr);
+    gap: 3px; padding: 3px; background: var(--track); border-radius: 10px;
+  }
+  .ui-seg button {
+    border: 0; background: transparent; color: var(--muted);
+    border-radius: 8px; padding: 7px 4px; font-size: 12px; cursor: pointer;
+  }
+  .ui-seg button.on { background: var(--card); color: var(--text); box-shadow: 0 1px 4px rgba(15, 23, 42, .12); }
+  #uiDensity { grid-template-columns: repeat(2, 1fr); }
+  .ui-swatches { display: flex; gap: 10px; }
+  .ui-swatch {
+    width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--card);
+    box-shadow: 0 0 0 1px var(--border); cursor: pointer; padding: 0;
+  }
+  .ui-swatch.on { box-shadow: 0 0 0 2px var(--card), 0 0 0 4px var(--accent); }
+  .ui-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
+  .ui-check {
+    display: flex; align-items: center; gap: 7px; padding: 7px 8px;
+    border: 1px solid var(--border); border-radius: 8px;
+    color: var(--text); font-size: 12px; cursor: pointer;
+  }
+  .ui-check input { accent-color: var(--accent); }
+  .ui-reset {
+    width: 100%; padding: 9px; border: 1px solid var(--border);
+    border-radius: 9px; background: transparent; color: var(--muted); cursor: pointer;
+  }
+  .ui-reset:hover { color: var(--text); border-color: var(--accent); }
+  @media (max-width: 760px) {
+    header { gap: 8px; }
+    .ui-btn { padding: 6px 9px; }
+    .ui-cards { grid-template-columns: 1fr; }
+  }
+
 </style>
 </head>
 <body>
@@ -608,26 +948,35 @@
     <span class="sub">宿主机 → LM Studio → AstrBot → SnowLuma</span>
     <span class="spacer"></span>
     <span class="refresh"><span class="dot pulse" id="liveDot"></span><span id="meta">加载中…</span></span>
+    <button class="ui-icon" id="themeQuick" title="切换深浅色" aria-label="切换深浅色">◐</button>
+    <button class="ui-btn" id="uiBtn" title="外观与布局" aria-expanded="false">⚙ 外观</button>
   </header>
 
   <!-- 链路健康 -->
   <div class="grid g4" style="margin-bottom:14px" id="links"></div>
 
   <!-- 上下文 -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="context" data-title="上下文用量">
     <h2>上下文用量</h2>
+    <div class="ctx-head">
+      <span class="used">上下文已用 <b id="ctxPct">—</b></span>
+      <span class="fig" id="ctxFigures">— / —</span>
+    </div>
     <div class="bar" id="ctxBar">
       <div class="fill" id="ctxFill"></div>
       <div class="mark" id="ctxMark" title="82% 压缩触发线"></div>
-      <div class="label" id="ctxLabel">— / —</div>
+    </div>
+    <div class="ctx-legend" id="ctxLegend" hidden>
+      <div class="row"><span class="sw seg-system"></span><span>系统提示词</span><b id="ctxPartSystem">—</b></div>
+      <div class="row"><span class="sw seg-tools"></span><span>工具定义</span><b id="ctxPartTools">—</b></div>
+      <div class="row"><span class="sw seg-messages"></span><span>对话消息</span><b id="ctxPartMessages">—</b></div>
     </div>
     <div class="grid g2" style="margin-top:10px">
       <div>
-        <div class="kv"><span class="k">已用</span><span class="v" id="ctxUsed">—</span></div>
         <div class="kv"><span class="k">模型上下文上限</span><span class="v" id="ctxMax">—</span></div>
+        <div class="kv"><span class="k">压缩触发线（82%）</span><span class="v" id="ctxThr">—</span></div>
       </div>
       <div>
-        <div class="kv"><span class="k">压缩触发线（82%）</span><span class="v" id="ctxThr">—</span></div>
         <div class="kv"><span class="k">已触发压缩次数</span><span class="v" id="ctxCount">—</span></div>
         <div class="kv"><span class="k">思考剥离</span><span class="v" id="reasonStrip">—</span></div>
       </div>
@@ -635,8 +984,28 @@
     <div class="ctx-live" id="ctxLive"></div>
   </div>
 
+  <!-- Token 用量：自插件加载累计（口径同 DSH 会话统计） -->
+  <div class="card" style="margin-bottom:14px" data-card="usage" data-title="Token 用量">
+    <h2>Token 用量 <span class="h2sub" id="usageSub">自插件加载</span></h2>
+    <div class="usage-head">
+      <span class="n" id="usageTotal">—</span>
+      <span class="u">tok</span>
+    </div>
+    <div class="kv"><span class="k">缓存命中</span><span class="v" id="usageHit">—</span></div>
+    <div class="kv"><span class="k">未缓存输入</span><span class="v" id="usageUncached">—</span></div>
+    <div class="kv"><span class="k">缓存读取</span><span class="v" id="usageCached">—</span></div>
+    <div class="kv"><span class="k">输出</span><span class="v" id="usageOutput">—</span></div>
+    <div class="usage-hint" id="usageHint"></div>
+  </div>
+
+  <!-- 缓存诊断（只读）：看前缀哪一段在变 -->
+  <div class="card" style="margin-bottom:14px" data-card="cachediag" data-title="缓存诊断">
+    <h2>缓存诊断 <span class="h2sub" id="diagSub">只读 · 与同会话上一条请求比 hash</span></h2>
+    <div id="diagBox"><div class="empty">还没有诊断数据 —— 聊两句就会出现。</div></div>
+  </div>
+
   <!-- 压缩摘要 -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="summary" data-title="压缩摘要">
     <h2>上下文压缩摘要（压缩后的实际文字）</h2>
     <div class="summary empty" id="summaries">还没有触发过上下文压缩。</div>
   </div>
@@ -644,61 +1013,61 @@
   <!-- 发给模型的完整上下文（已移到右侧栏）-->
 
   <!-- 事件流：对话 / 工具 -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="timeline" data-title="事件流">
     <h2>事件流 <span class="h2sub">请求 · 回复 · 工具</span></h2>
     <div id="timelineBox"><div class="empty">加载中…</div></div>
   </div>
 
   <!-- 本地生成（ComfyUI 进度，来自 ncd_bus） -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="comfy" data-title="本地生成">
     <h2>本地生成 <span class="h2sub">ComfyUI · 节点进度 · 面板 v5</span></h2>
     <div id="comfyBox"><div class="empty">加载中…</div></div>
   </div>
 
   <!-- 思考内容（仅后台可见） -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="thinking" data-title="思考内容">
     <h2>思考内容 <span class="h2sub">仅后台 · 模型下一轮看不到</span></h2>
     <div id="thinkBox"><div class="empty">加载中…</div></div>
   </div>
 
   <!-- 审核明细（群聊 NSFW） -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="audit" data-title="审核明细">
     <h2>审核明细 <span class="h2sub">只有露三点才拒 · 被拦的留 96px 小图</span></h2>
     <div id="auditBox"><div class="empty">加载中…</div></div>
   </div>
 
   <!-- 工具调用（参数/结果/耗时，来自 monitor 钩子） -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="tools" data-title="工具调用">
     <h2>工具调用 <span class="h2sub">结果对模型可见 · 耗时/大小为后台字段</span></h2>
     <div id="toolsBox"><div class="empty">加载中…</div></div>
   </div>
 
   <!-- 搜索 / 抓取统计（来自链路工具箱） -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="search" data-title="搜索 / 抓取">
     <h2>搜索 / 抓取 <span class="h2sub">来自链路工具箱</span></h2>
     <div id="searchBox" class="empty">还没有搜索记录。</div>
   </div>
 
   <!-- 模型 + 资源 -->
   <div class="grid g2" style="margin-bottom:14px">
-    <div class="card">
+    <div class="card" data-card="model" data-title="模型 / AstrBot">
       <h2>模型 / AstrBot</h2>
       <div id="modelBox"></div>
     </div>
-    <div class="card">
+    <div class="card" data-card="resources" data-title="宿主机资源">
       <h2>宿主机资源 <span class="h2sub">每秒刷新 · 3 分钟趋势</span></h2>
       <div id="resBox"></div>
     </div>
   </div>
 
   <!-- 各会话上下文占用：同一个模型上限，各会话自己的历史长度独立 -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="sessions" data-title="各会话上下文占用">
     <h2>各会话上下文占用 <span class="h2sub" id="sesSub"></span></h2>
     <div id="sesBox"></div>
   </div>
 
   <!-- 其他：低频/次要信息，默认折叠，别占地方 -->
-  <details class="card" id="otherCard" style="margin-bottom:14px">
+  <details class="card" id="otherCard" style="margin-bottom:14px" data-card="other" data-title="其他">
     <summary>
       <h2>其他</h2>
       <span class="hint">SnowLuma / OneBot 端点 · 展开 / 收起</span>
@@ -710,7 +1079,7 @@
   </details>
 
   <!-- 统计 + 曲线 -->
-  <div class="card" style="margin-bottom:14px">
+  <div class="card" style="margin-bottom:14px" data-card="chart" data-title="上下文曲线">
     <h2>
       上下文用量曲线（最近 <span id="chartCount">0</span> 次请求）
       <span class="h2sub" id="chartInfo"></span>
@@ -724,7 +1093,7 @@
   </div>
 
   <!-- 请求历史 -->
-  <div class="card">
+  <div class="card" data-card="calls" data-title="LLM 请求">
     <h2>最近的 LLM 请求</h2>
     <div class="scroll">
       <table>
@@ -773,6 +1142,15 @@ const P = window.AstrBotPluginPage;
 let first = true;
 
 const fmtNum = (n) => (n === null || n === undefined) ? "—" : Number(n).toLocaleString();
+// 紧凑 token 数：1,400 -> 1.4K；3,888,825,330 -> 3.9B（构成图例用）
+const fmtCompact = (n) => {
+  n = Number(n) || 0;
+  const scaled = (v) => (v >= 100 ? String(Math.round(v)) : String(Math.round(v * 10) / 10));
+  if (n >= 1e9) return scaled(n / 1e9) + "B";
+  if (n >= 1e6) return scaled(n / 1e6) + "M";
+  if (n >= 1e3) return scaled(n / 1e3) + "K";
+  return String(Math.round(n));
+};
 const fmtTime = (sec) => {
   const d = new Date(sec * 1000);
   const p = (x) => String(x).padStart(2, "0");
@@ -885,18 +1263,49 @@ function renderContext(d) {
   else if (pct >= 60) bar.classList.add("hot");
 
   mark.style.left = "82%";
+
+  // 上下文构成：本地估算的三段（系统提示词 / 工具定义 / 对话消息）。
+  // 段宽 = 总占比 × 各自在估算总量里的比例，和 DSH 面板同一画法；
+  // 注意这是【估算】，和 label 里的真实 usage.input 不是同一口径。
+  const bd = d.context_breakdown || {};
+  const parts = [
+    { key: "system", value: Math.max(0, bd.system || 0) },
+    { key: "tools", value: Math.max(0, bd.tools || 0) },
+    { key: "messages", value: Math.max(0, bd.messages || 0) },
+  ];
+  const partsTotal = parts.reduce((a, p) => a + p.value, 0);
+  if (partsTotal > 0) {
+    fill.classList.add("split");
+    fill.innerHTML = parts
+      .filter((p) => p.value > 0)
+      .map((p) => `<i class="seg-${p.key}" style="flex:${p.value}"></i>`)
+      .join("");
+  } else {
+    fill.classList.remove("split");
+    fill.innerHTML = "";
+  }
+  const legend = document.getElementById("ctxLegend");
+  legend.hidden = partsTotal <= 0;
+  if (partsTotal > 0) {
+    const put = (id, p) => {
+      const el = document.getElementById(id);
+      el.textContent = "~" + fmtCompact(p.value);
+      el.title = `估算 ${fmtNum(p.value)} token`;
+    };
+    put("ctxPartSystem", parts[0]);
+    put("ctxPartTools", parts[1]);
+    put("ctxPartMessages", parts[2]);
+  }
   // 三种情况要分清：
   //   完全没有数据      -> "—"
   //   有数据 且 来自 API -> "7,234 token"
   //   有数据 但 是估算   -> "7,234 token（估算）"
   const hasData = (lc.request_count || 0) > 0 && (c.used || 0) > 0;
   const isReal = lc.real !== null && lc.real !== undefined;
-  document.getElementById("ctxLabel").textContent = hasData
-    ? `${fmtNum(c.used)} / ${fmtNum(c.max)}  (${pct.toFixed(1)}%)`
+  document.getElementById("ctxPct").textContent = hasData ? pct.toFixed(1) + "%" : "—";
+  document.getElementById("ctxFigures").textContent = hasData
+    ? `${fmtNum(c.used)} / ${fmtNum(c.max)}` + (isReal ? "" : "（估算）")
     : `— / ${fmtNum(c.max)}`;
-  document.getElementById("ctxUsed").textContent = !hasData
-    ? "—（还没有请求数据）"
-    : fmtNum(c.used) + " token" + (isReal ? "" : "（估算）");
   document.getElementById("ctxMax").textContent = fmtNum(c.max) + " token";
   document.getElementById("ctxThr").textContent = fmtNum(c.threshold_tokens) + " token";
   document.getElementById("ctxCount").textContent = (d.astrbot || {}).compression_count ?? 0;
@@ -934,6 +1343,94 @@ function renderContext(d) {
   } else {
     live.textContent = "还没有收到过 LLM 请求 —— 给机器人发条消息就有了";
   }
+}
+
+/* ---------- Token 用量（自插件加载累计） ----------
+   口径与 DSH 会话统计一致：
+     总用量  = 未缓存输入 + 缓存读取 + 输出
+     命中率  = 缓存读取 ÷ 输入（input 已包含 cached） */
+function renderUsage(d) {
+  const u = d.usage || {};
+  const $ = (id) => document.getElementById(id);
+  const has = (u.calls || 0) > 0;
+  const rate = has && u.cache_hit_rate != null
+    ? Number(u.cache_hit_rate).toFixed(1) + "%"
+    : "—";
+  $("usageTotal").textContent = has ? fmtNum(u.total) : "—";
+  $("usageHit").textContent = rate;
+  $("usageUncached").textContent = has ? fmtNum(u.uncached) : "—";
+  $("usageCached").textContent = has ? fmtNum(u.cached) : "—";
+  $("usageOutput").textContent = has ? fmtNum(u.output) : "—";
+  $("usageSub").textContent = has
+    ? `自插件加载 · ${fmtNum(u.calls)} 次请求`
+    : "自插件加载";
+  $("usageHint").textContent = has
+    ? "总用量 = 未缓存输入 + 缓存读取 + 输出；命中率 = 缓存读取 ÷ 输入"
+    : "还没有带 usage 的请求 —— 给机器人发条消息就会开始累计";
+}
+
+/* ---------- 缓存诊断（只读） ----------
+   每次请求记下 system / tools / 历史首条 / 整段历史的 hash，
+   和同会话上一条比：哪段变了，缓存就从哪段之后断。 */
+function renderCacheDiag(calls) {
+  const box = document.getElementById("diagBox");
+  if (!box) return;
+  const rows = (calls || [])
+    .filter((c) => c && c.prefix && c.prefix.system)
+    .slice(-10)
+    .reverse();
+  if (!rows.length) {
+    box.innerHTML = '<div class="empty">还没有诊断数据 —— 聊两句就会出现。</div>';
+    return;
+  }
+  const pill = (v) => (v === true
+    ? '<span class="diag-pill chg">变</span>'
+    : v === false
+      ? '<span class="diag-pill same">同</span>'
+      : '<span class="diag-pill na">—</span>');
+  // 首差：0=完全一样；1..prev_len=头/中间变了；prev_len+1=只在尾部追加。
+  const diffCell = (f) => {
+    const fd = f.first_diff;
+    if (fd === undefined || fd === null) {
+      return '<span class="diag-pill na">—</span>';
+    }
+    if (fd === 0) return '<span class="diag-pill same">同</span>';
+    if (f.prev_ctx && fd === f.prev_ctx + 1) {
+      const add = (f.cur_ctx || 0) - (f.prev_ctx || 0);
+      return `<span class="diag-pill same">尾${add >= 0 ? "+" : ""}${add}</span>`;
+    }
+    return `<span class="diag-pill chg">#${fd}</span>`;
+  };
+  const head = '<table class="diag-table">' +
+    '<colgroup><col style="width:66px"><col><col style="width:62px">' +
+    '<col style="width:46px"><col style="width:46px"><col style="width:64px">' +
+    '<col style="width:54px"></colgroup>' +
+    '<thead><tr><th>时间</th><th>会话</th><th class="num">命中</th>' +
+    '<th class="c">系统</th><th class="c">工具</th><th class="c">首差</th>' +
+    '<th class="num">消息Δ</th></tr></thead><tbody>';
+  const body = rows.map((c) => {
+    const f = c.prefix_flags || {};
+    const p = c.prefix || {};
+    const inp = c.input_tokens || 0;
+    const hit = inp ? ((c.cached_tokens || 0) / inp * 100).toFixed(1) + "%" : "—";
+    const delta = f.msg_delta === undefined
+      ? "—"
+      : (f.msg_delta > 0 ? "+" : "") + f.msg_delta;
+    const title = `系统 ${p.system} · 工具 ${p.tools} · 首条 ${p.head} · 历史 ${p.history}` +
+      ` · 首差 ${f.first_diff === undefined ? "—" : f.first_diff}`;
+    return `<tr title="${esc(title)}">
+      <td class="nowrap">${fmtTime(c.time)}</td>
+      <td class="diag-name">${esc(sourceLabel(c))}</td>
+      <td class="num">${hit}</td>
+      <td class="c">${pill(f.system)}</td>
+      <td class="c">${pill(f.tools)}</td>
+      <td class="c">${diffCell(f)}</td>
+      <td class="num">${delta}</td>
+    </tr>`;
+  }).join("");
+  box.innerHTML = head + body + '</tbody></table>' +
+    '<div class="diag-note">「首差」= 与同会话上一条相比，第一处不同的消息位置：' +
+    '「尾+N」只在尾部追加，缓存不受影响；「#k」表示头/中间变了，缓存从 k 断开。</div>';
 }
 
 /* ---------- 模型信息 ---------- */
@@ -1496,11 +1993,16 @@ function renderSessions(ov) {
   }
 
   box.innerHTML =
+    '<div class="ses-head">' +
+    "<span>会话</span><span>上下文</span>" +
+    "<span>消息</span><span>Token</span><span>占比</span><span>缓存</span>" +
+    "</div>" +
     '<div class="ses-list">' +
     rows
       .map((s) => {
         const pct = Math.max(0, Math.min(100, Number(s.percent) || 0));
         const hot = thr > 0 && (s.tokens || 0) >= thr;
+        const cacheTxt = fmtPct(s.cache_hit_rate);
         const name = !s.umo
           ? "❓ " + (s.label || "未识别会话")
           : s.is_group
@@ -1509,15 +2011,20 @@ function renderSessions(ov) {
         const title =
           s.umo + "\n" + s.messages + " 条消息 · " + fmtNum(s.tokens) +
           " token（估算）\n" + fmtNum(s.chars) + " 字 · 最后 " +
-          fmtTime(s.time) + " · 累计 " + s.requests + " 次请求";
+          fmtTime(s.time) + " · 累计 " + s.requests + " 次请求" +
+          "\n缓存命中 " + cacheTxt + "（" + (s.cache_requests || 0) +
+          " 次，缓存 " + fmtNum(s.cached_tokens || 0) + " / 输入 " +
+          fmtNum(s.cache_input_tokens || 0) + " tok）";
         return (
           '<div class="ses-row" title="' + esc(title) + '">' +
           '<span class="ses-name">' + esc(name) + "</span>" +
           '<span class="ses-bar"><i class="' + (hot ? "hot" : "") +
           '" style="width:' + pct + '%"></i></span>' +
-          '<span class="ses-cnt' + (hot ? " hot" : "") + '">' +
-          s.messages + " 条 · " + fmtNum(s.tokens) + " tok · " + fmtPct(pct) +
-          "</span>" +
+          '<span class="ses-messages">' + fmtNum(s.messages) + " 条</span>" +
+          '<span class="ses-tokens">' + fmtNum(s.tokens) + " tok</span>" +
+          '<span class="ses-pct' + (hot ? " hot" : "") + '">' +
+          fmtPct(pct) + "</span>" +
+          '<span class="ses-cache">' + cacheTxt + "</span>" +
           "</div>"
         );
       })
@@ -2305,16 +2812,27 @@ function renderComfy(d) {
   if (sig === _comfySig) return;
   _comfySig = sig;
   const st = d.status || {}, pr = d.progress || {}, au = d.audit || {};
-  const running = !!st.running;
+  const actual = d.actual || {};
+  const queueOk = !!actual.ok;
+  const qRun = queueOk ? Number(actual.display_running ?? actual.running ?? 0) : 0;
+  const qPending = queueOk ? Number(actual.display_pending ?? actual.pending ?? 0) : 0;
+  const alive = queueOk ? !!actual.alive : false;
+  const active = queueOk ? qRun > 0 : false;
+  const pendingOnly = queueOk && !active && qPending > 0;
   const pct = Math.round((pr.overall || 0) * 100);
-  let html = comfyBar(running ? pct : 100, running ? (pr.label || '执行中') + ' · ' + pct + '%' : '空闲');
+  const genMode = st.mode === "img2img" ? "图生图" : (st.mode === "txt2img" ? "文生图" : "");
+  const barLabel = active
+    ? [pr.label || "执行中", genMode, pct + "%"].filter(Boolean).join(" · ")
+    : (pendingOnly ? "排队中 · 等 " + qPending + " 张" : "空闲");
+  const barPct = active ? pct : (pendingOnly ? 0 : 100);
+  let html = comfyBar(barPct, barLabel);
   const comfyPort = parseInt(st.port, 10) || 8199;
   // ★ iframe 的 sandbox 没有 allow-popups，target=_blank 会被静默拦掉，
   //   所以改成在当前面板内打开；另给一个复制地址的兜底。
   const ext = d.external_comfy || {};
   html += '<div class="row" style="margin-top:8px;gap:16px;font-size:12px">' +
-    '<span>Bot 8199：<b style="color:' + (running ? 'var(--ok)' : 'var(--muted)') + '">' +
-    (running ? '运行中' : '未运行') + '</b></span>' +
+    '<span>Bot 8199：<b style="color:' + (alive ? 'var(--ok)' : 'var(--muted)') + '">' +
+    (alive ? '运行中' : '未运行') + '</b></span>' +
     '<span>你的 8188：<b style="color:' + (ext.running ? 'var(--ok)' : 'var(--muted)') + '">' +
     (ext.running ? '运行中' : '未运行') + '</b></span>' +
     '</div>';
@@ -2322,8 +2840,11 @@ function renderComfy(d) {
   html += '<div class="kv"><span class="k">工作流</span><span class="v">' + esc(st.preset || '—') + '</span></div>';
   html += '<div class="kv"><span class="k">底模</span><span class="v">' + esc(st.model || '—') + '</span></div>';
   html += '</div><div>';
-  const pos = (st.position === 0) ? '进行中' : (st.position == null ? '—' : '第 ' + st.position + ' 位');
-  html += '<div class="kv"><span class="k">队列</span><span class="v">跑 ' + (st.queue_running || 0) + ' · 等 ' + (st.queue_pending || 0) + ' · ' + pos + '</span></div>';
+  const qText = queueOk
+    ? '跑 ' + qRun + ' · 等 ' + qPending
+    : '跑 — · 等 —';
+  const pos = active ? '进行中' : (pendingOnly ? '排队中' : '—');
+  html += '<div class="kv"><span class="k">队列（实际）</span><span class="v">' + qText + ' · ' + pos + '</span></div>';
   html += '<div class="kv"><span class="k">审核 通过/拦截</span><span class="v">' + (au.pass || 0) + ' / ' + (au.reject || 0) + '</span></div>';
   html += '</div></div>';
   const all = d.recent || [];
@@ -2588,6 +3109,7 @@ async function tick() {
     ]);
     renderLinks(ov);
     renderContext(ov);
+    renderUsage(ov);
     renderModel(ov);
     // 资源卡不在这里渲染 —— 它走 1 秒的 refreshSys()，
     // 这里再写一次 #resBox 会把它的趋势图和数据一起冲掉
@@ -2595,6 +3117,7 @@ async function tick() {
     renderSessions(ov);
     renderSummaries(sm.items, ov);
     renderCalls(hi.llm_calls);
+    renderCacheDiag(hi.llm_calls);
     renderStats(ov);
     refreshTools();
     refreshThinking();
@@ -2637,6 +3160,178 @@ if (window.AstrBotPluginPage) {
     "桥接 SDK 未加载（检查 /api/plugin/page/bridge-sdk.js 是否可达）";
   document.getElementById("liveDot").style.background = "var(--bad)";
 }
+</script>
+
+<div class="ui-drawer" id="uiDrawer" hidden>
+  <aside class="ui-panel" role="dialog" aria-modal="true" aria-label="外观与布局">
+    <div class="ui-head">
+      <strong>外观与布局</strong>
+      <button class="ui-close" id="uiClose" type="button" aria-label="关闭">×</button>
+    </div>
+
+    <div class="ui-section">
+      <div class="ui-label">主题</div>
+      <div class="ui-seg" id="uiMode">
+        <button type="button" data-mode="light">浅色</button>
+        <button type="button" data-mode="dark">深色</button>
+        <button type="button" data-mode="system">跟随系统</button>
+      </div>
+    </div>
+
+    <div class="ui-section">
+      <div class="ui-label">密度</div>
+      <div class="ui-seg" id="uiDensity">
+        <button type="button" data-density="cozy">舒适</button>
+        <button type="button" data-density="compact">紧凑</button>
+      </div>
+    </div>
+
+    <div class="ui-section">
+      <div class="ui-label">主色</div>
+      <div class="ui-swatches" id="uiAccent">
+        <button type="button" class="ui-swatch" data-accent="blue" style="background:#0ea5e9" title="蓝"></button>
+        <button type="button" class="ui-swatch" data-accent="teal" style="background:#14b8a6" title="青"></button>
+        <button type="button" class="ui-swatch" data-accent="violet" style="background:#8b5cf6" title="紫"></button>
+        <button type="button" class="ui-swatch" data-accent="rose" style="background:#f43f5e" title="玫红"></button>
+        <button type="button" class="ui-swatch" data-accent="amber" style="background:#f59e0b" title="琥珀"></button>
+      </div>
+    </div>
+
+    <div class="ui-section">
+      <div class="ui-label">显示卡片</div>
+      <div class="ui-cards" id="uiCards"></div>
+    </div>
+
+    <button class="ui-reset" id="uiReset" type="button">恢复默认</button>
+  </aside>
+</div>
+
+<script>
+(function () {
+  const KEY = "ncd-monitor-appearance";
+  const root = document.documentElement;
+  const defaults = { mode: "system", density: "cozy", accent: "blue", hidden: [] };
+  let state = { ...defaults };
+  try {
+    const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
+    if (saved && typeof saved === "object") state = { ...state, ...saved };
+  } catch (e) { /* ignore */ }
+  if (!["system", "light", "dark"].includes(state.mode)) state.mode = "system";
+  if (!["cozy", "compact"].includes(state.density)) state.density = "cozy";
+  if (!["blue", "teal", "violet", "rose", "amber"].includes(state.accent)) state.accent = "blue";
+  if (!Array.isArray(state.hidden)) state.hidden = [];
+
+  const cardEls = Array.from(document.querySelectorAll("[data-card]"));
+  const drawer = document.getElementById("uiDrawer");
+  const uiBtn = document.getElementById("uiBtn");
+  const uiClose = document.getElementById("uiClose");
+  const themeQuick = document.getElementById("themeQuick");
+  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+
+  function resolvedTheme() {
+    if (state.mode === "system") return media && media.matches ? "dark" : "light";
+    return state.mode;
+  }
+
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) { /* ignore */ }
+  }
+
+  function apply() {
+    const resolved = resolvedTheme();
+    root.dataset.theme = resolved;
+    root.dataset.density = state.density;
+    root.dataset.accent = state.accent;
+    root.style.colorScheme = resolved;
+    if (themeQuick) {
+      themeQuick.textContent = resolved === "dark" ? "☀" : "☾";
+      themeQuick.title = resolved === "dark" ? "切换到浅色" : "切换到深色";
+    }
+    document.querySelectorAll("#uiMode [data-mode]").forEach((b) => {
+      b.classList.toggle("on", b.dataset.mode === state.mode);
+    });
+    document.querySelectorAll("#uiDensity [data-density]").forEach((b) => {
+      b.classList.toggle("on", b.dataset.density === state.density);
+    });
+    document.querySelectorAll("#uiAccent [data-accent]").forEach((b) => {
+      b.classList.toggle("on", b.dataset.accent === state.accent);
+    });
+    cardEls.forEach((el) => {
+      el.hidden = state.hidden.includes(el.dataset.card);
+    });
+  }
+
+  function buildCards() {
+    const box = document.getElementById("uiCards");
+    if (!box) return;
+    box.innerHTML = "";
+    cardEls.forEach((el) => {
+      const id = el.dataset.card;
+      const title = el.dataset.title || id;
+      const label = document.createElement("label");
+      label.className = "ui-check";
+      const cb = document.createElement("input");
+      cb.type = "checkbox";
+      cb.checked = !state.hidden.includes(id);
+      cb.addEventListener("change", () => {
+        if (cb.checked) state.hidden = state.hidden.filter((x) => x !== id);
+        else if (!state.hidden.includes(id)) state.hidden.push(id);
+        save();
+        apply();
+      });
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(title));
+      box.appendChild(label);
+    });
+  }
+
+  function openDrawer() {
+    if (!drawer) return;
+    drawer.hidden = false;
+    uiBtn?.setAttribute("aria-expanded", "true");
+    document.body.style.overflow = "hidden";
+    uiClose?.focus();
+  }
+
+  function closeDrawer() {
+    if (!drawer) return;
+    drawer.hidden = true;
+    uiBtn?.setAttribute("aria-expanded", "false");
+    document.body.style.overflow = "";
+  }
+
+  document.querySelectorAll("#uiMode [data-mode]").forEach((b) => {
+    b.addEventListener("click", () => { state.mode = b.dataset.mode; save(); apply(); });
+  });
+  document.querySelectorAll("#uiDensity [data-density]").forEach((b) => {
+    b.addEventListener("click", () => { state.density = b.dataset.density; save(); apply(); });
+  });
+  document.querySelectorAll("#uiAccent [data-accent]").forEach((b) => {
+    b.addEventListener("click", () => { state.accent = b.dataset.accent; save(); apply(); });
+  });
+  themeQuick?.addEventListener("click", () => {
+    state.mode = resolvedTheme() === "dark" ? "light" : "dark";
+    save(); apply();
+  });
+  uiBtn?.addEventListener("click", openDrawer);
+  uiClose?.addEventListener("click", closeDrawer);
+  drawer?.addEventListener("click", (e) => { if (e.target === drawer) closeDrawer(); });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeDrawer(); });
+  document.getElementById("uiReset")?.addEventListener("click", () => {
+    state = { ...defaults, hidden: [] };
+    save();
+    document.querySelectorAll("#uiCards input").forEach((cb) => { cb.checked = true; });
+    apply();
+  });
+  if (media) {
+    const onScheme = () => { if (state.mode === "system") apply(); };
+    if (media.addEventListener) media.addEventListener("change", onScheme);
+    else if (media.addListener) media.addListener(onScheme);
+  }
+
+  buildCards();
+  apply();
+})();
 </script>
 </body>
 </html>

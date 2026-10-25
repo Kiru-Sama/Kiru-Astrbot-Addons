@@ -55,6 +55,15 @@ class NcdSessionPlugin(star.Star):
     def _short(cid: str) -> str:
         return (cid or "")[:8]
 
+    @staticmethod
+    def _cid(conv) -> str:
+        """AstrBot 4.x 的 Conversation 字段是 cid，老版本插件里叫 conversation_id。"""
+        return str(
+            getattr(conv, "cid", None)
+            or getattr(conv, "conversation_id", None)
+            or ""
+        )
+
     def _resolve(self, convs: list, token: str) -> str | None:
         """把「3」或「a1b2c3d4」解析成 conversation_id。"""
         token = (token or "").strip()
@@ -63,12 +72,14 @@ class NcdSessionPlugin(star.Star):
         if token.isdigit():
             idx = int(token)
             if 1 <= idx <= len(convs):
-                return str(getattr(convs[idx - 1], "conversation_id", "") or "")
-            return None
+                cid = self._cid(convs[idx - 1])
+                if cid:
+                    return cid
+            # 不是有效序号时继续当 ID 前缀试（UUID 可能以数字开头）
         low = token.lower()
         for conv in convs:
-            cid = str(getattr(conv, "conversation_id", "") or "")
-            if cid.lower().startswith(low):
+            cid = self._cid(conv)
+            if cid and cid.lower().startswith(low):
                 return cid
         return None
 
@@ -89,7 +100,7 @@ class NcdSessionPlugin(star.Star):
             return
         lines = [f"📚 当前会话的对话（共 {len(convs)} 个）："]
         for i, conv in enumerate(convs, 1):
-            cid = str(getattr(conv, "conversation_id", "") or "")
+            cid = self._cid(conv)
             mark = "  ← 当前" if cid and cid == curr else ""
             lines.append(f"{i}. {self._label(conv, i)} · {self._short(cid)}{mark}")
         lines += [
@@ -120,7 +131,7 @@ class NcdSessionPlugin(star.Star):
             return
         idx = next(
             (i for i, c in enumerate(convs, 1)
-             if str(getattr(c, "conversation_id", "") or "") == cid),
+             if self._cid(c) == cid),
             0,
         )
         title = self._label(convs[idx - 1], idx) if idx else cid[:8]

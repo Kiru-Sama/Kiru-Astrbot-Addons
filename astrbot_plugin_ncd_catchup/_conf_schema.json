@@ -40,5 +40,35 @@
     "description": "一次最多补几个私聊",
     "hint": "默认 10。超过就停下，剩下的下次启动再补，避免一次性连珠炮。",
     "default": 10
+  },
+  "catchup_manual_minutes": {
+    "type": "int",
+    "description": "手动 /补台 默认看最近几分钟",
+    "hint": "默认 30。可以发 /补台 60 临时改；范围 1~240。手动补台不会推进启动补台的处理点。",
+    "default": 30
+  },
+  "catchup_manual_max": {
+    "type": "int",
+    "description": "手动补台一次最多补几个私聊",
+    "hint": "默认 3。手动补台更容易在聊天中途触发，限制少一点，避免一次刷屏。",
+    "default": 3
+  },
+  "catchup_manual_cooldown": {
+    "type": "int",
+    "description": "同一好友两次手动补台的冷却秒数",
+    "hint": "默认 600 秒（10 分钟）。防止刚补完、机器人回复还没进历史时又补一遍。",
+    "default": 600
+  },
+  "catchup_blacklist": {
+    "type": "string",
+    "description": "永远不补的 QQ 号（逗号分隔）",
+    "hint": "填 QQ 号，多个用逗号/空格分隔。比如服务号、自己的小号、不想自动回复的联系人。",
+    "default": ""
+  },
+  "catchup_skip_names": {
+    "type": "string",
+    "description": "昵称命中这些词就跳过",
+    "hint": "默认：我的电脑,文件传输助手,QQ团队,QQ安全中心,QQ空间。按昵称包含匹配，防止补到系统/服务会话。",
+    "default": "我的电脑,文件传输助手,QQ团队,QQ安全中心,QQ空间"
   }
 }

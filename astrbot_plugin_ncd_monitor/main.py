@@ -755,6 +755,22 @@ class Main(star.Star):
         self.llm_calls: deque[dict[str, Any]] = deque(maxlen=MAX_RECORDS)
         self.context_series: deque[dict[str, Any]] = deque(maxlen=MAX_RECORDS)
         self.last_prompt_tokens = 0
+        # 全局 Token 用量累计（自插件加载）。单独累计而不是对 llm_calls 求和：
+        # 那个 deque 只有 300 条，滚掉之后总数会跟着变小。
+        self._usage_totals: dict[str, int] = {
+            "input": 0,
+            "cached": 0,
+            "output": 0,
+            "calls": 0,
+        }
+        # 最近一次请求的上下文构成（本地估算）：系统提示词 / 工具定义 / 对话消息
+        self._ctx_breakdown: dict[str, Any] = {
+            "system": 0,
+            "tools": 0,
+            "messages": 0,
+            "time": 0,
+            "umo": "",
+        }
         # 「无模型可用」现场（见 _patch_lm_diag）：只留最近 10 次
         self._lm_unavailable: deque[dict[str, Any]] = deque(maxlen=10)
 
@@ -768,6 +784,9 @@ class Main(star.Star):
         #   而且耗时会被算成"自己的响应时刻 − 别人的请求时刻"（实测 10.1 秒，
         #   正好等于那个差值）。报告里记的 4.3 就是它。
         self._pending: dict[str, dict[str, Any]] = {}
+        # 最近一次真正发出去的请求前缀指纹（umo -> 指纹）。
+        # ★ 只读诊断：不参与任何请求构造，只用来回答"缓存断在哪一段"。
+        self._prefix_by_umo: dict[str, dict[str, Any]] = {}
         # 群号 -> 群名，来自 SnowLuma 的身份库（惰性加载）
         self._group_names: dict[str, str] = {}
         self._group_names_loaded = False
@@ -1755,6 +1774,78 @@ class Main(star.Star):
             return next(iter(self._pending.values()))
         return {}
 
+    def _prefix_diag(self, kwargs: dict[str, Any]) -> dict[str, Any]:
+        """对【真正发出去】的前缀做指纹（只读，不改请求）。
+
+        四段：
+            system  —— 系统提示词
+            tools   —— 工具 schema（openai_schema 序列化）
+            head    —— 历史第一条消息
+            history —— 整段历史
+
+        ★ 缓存是前缀匹配：history 变不一定断，head 变一定从那里断。
+          所以面板上「变」的段，就是嫌疑最大的那一段。
+        """
+        system_prompt = str(kwargs.get("system_prompt") or "")
+        contexts = kwargs.get("contexts") or []
+        func_tool = kwargs.get("func_tool")
+        schema: list[dict[str, Any]] = []
+        try:
+            if func_tool is not None and getattr(func_tool, "tools", None):
+                schema = func_tool.openai_schema()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 工具 schema 指纹失败: {exc}")
+        try:
+            tools_text = json.dumps(schema, ensure_ascii=False, sort_keys=True)
+        except Exception:  # noqa: BLE001
+            tools_text = ""
+        try:
+            history_text = json.dumps(contexts, ensure_ascii=False, sort_keys=True)
+        except Exception:  # noqa: BLE001
+            history_text = str(contexts)
+
+        head_text = ""
+        head_preview = ""
+        if contexts:
+            try:
+                head_text = json.dumps(contexts[0], ensure_ascii=False, sort_keys=True)
+            except Exception:  # noqa: BLE001
+                head_text = str(contexts[0])
+            try:
+                head_preview = self._content_text(
+                    contexts[0].get("content")
+                    if isinstance(contexts[0], dict)
+                    else getattr(contexts[0], "content", "")
+                )
+            except Exception:  # noqa: BLE001
+                head_preview = ""
+
+        def _h(text: str) -> str:
+            return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:10]
+
+        # 逐条消息指纹：用来算「第一处不同」在哪。
+        # 90 条 × 10 字符，一条请求不到 1KB；面板只留最近 60 条，够用。
+        msg_hashes: list[str] = []
+        for m in contexts[:200]:
+            try:
+                mt = json.dumps(m, ensure_ascii=False, sort_keys=True)
+            except Exception:  # noqa: BLE001
+                mt = str(m)
+            msg_hashes.append(_h(mt))
+
+        return {
+            "system": _h(system_prompt),
+            "tools": _h(tools_text),
+            "head": _h(head_text),
+            "history": _h(history_text),
+            "msg_hashes": msg_hashes,
+            "system_chars": len(system_prompt),
+            "tools_count": len(schema),
+            "ctx_count": len(contexts),
+            "head_preview": " ".join(head_preview.split())[:60],
+            "time": time.time(),
+        }
+
     def _capture_text_chat(
         self, kwargs: dict[str, Any], args: tuple[Any, ...] = ()
     ) -> int | None:
@@ -1769,6 +1860,16 @@ class Main(star.Star):
         #   它靠一个约定标记自报身份（两侧都写了 _INTERNAL_REQUEST_MARKERS）。
         if _is_internal_request(contexts, prompt):
             return None
+
+        # 前缀指纹：必须在【真正调用 provider 之前】量，才是实际发出去的版本。
+        try:
+            umo_now = _CURRENT_UMO.get() or ""
+            if umo_now:
+                self._prefix_by_umo[umo_now] = self._prefix_diag(kwargs)
+                if len(self._prefix_by_umo) > 100:
+                    self._prefix_by_umo.clear()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 前缀指纹失败: {exc}")
 
         inject_text, inject_images, inject_blobs = self._split_extra_parts(
             kwargs.get("extra_user_content_parts")
@@ -2890,6 +2991,15 @@ class Main(star.Star):
 
         return part_text(content) or str(content)
 
+    @staticmethod
+    def _estimate_text_tokens(text: str) -> int:
+        """粗估一段文本的 token：中文按 1 字 ≈ 1 token，英文按 4 字符 ≈ 1 token。"""
+        if not text:
+            return 0
+        cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
+        other = len(text) - cjk
+        return cjk + other // 4
+
     @classmethod
     def _estimate_messages_tokens(cls, messages: list[Any]) -> int:
         """粗估 token 数：中文按 1 字 ≈ 1 token，英文按 4 字符 ≈ 1 token。
@@ -2905,10 +3015,45 @@ class Main(star.Star):
             text = cls._content_text(content)
             if not text:
                 continue
-            cjk = len(re.findall(r"[\u4e00-\u9fff]", text))
-            other = len(text) - cjk
-            total += cjk + other // 4
+            total += cls._estimate_text_tokens(text)
         return total
+
+    @classmethod
+    def _estimate_tool_tokens(cls, req: Any) -> int:
+        """估算本轮工具定义占多少 token（把 OpenAI schema 序列化后折算）。
+
+        ★ 只是估算：真正发出去的是 Provider 适配器转换后的 schema，
+          字段可能略有差异；这里只用来回答"工具定义吃了多少上下文"。
+        """
+        func_tool = getattr(req, "func_tool", None)
+        if not func_tool or not getattr(func_tool, "tools", None):
+            return 0
+        try:
+            text = json.dumps(func_tool.openai_schema(), ensure_ascii=False)
+        except Exception:  # noqa: BLE001
+            return 0
+        return cls._estimate_text_tokens(text)
+
+    def _context_breakdown(
+        self,
+        system_prompt: str,
+        req: Any,
+        contexts: list[dict],
+        prompt: str,
+    ) -> dict[str, int]:
+        """本轮请求的上下文构成（本地估算）：系统提示词 / 工具定义 / 对话消息。
+
+        与真实 usage.input 不是同一口径 —— 真实值拿得到时，百分比用真实值，
+        这三段只用来回答"大致是哪一块占的"。
+        """
+        return {
+            "system": self._estimate_text_tokens(system_prompt),
+            "tools": self._estimate_tool_tokens(req),
+            "messages": self._estimate_messages_tokens(
+                [*contexts]
+                + ([{"role": "user", "content": prompt}] if prompt else [])
+            ),
+        }
 
     @classmethod
     def _count_nonempty(cls, messages: list[Any]) -> int:
@@ -3149,12 +3294,50 @@ class Main(star.Star):
             if cur is None or s.get("time", 0) >= cur.get("time", 0):
                 latest[key] = s
 
+        # 每个会话的缓存命中：用最近保留的 LLM 调用累加，而不是估算。
+        # DeepSeek 的 usage.input 已包含 cached；input_cached 是其中命中部分。
+        cache_stats: dict[str, dict[str, int]] = {}
+
+        def add_cache(key: str, input_tokens: Any, cached_tokens: Any) -> None:
+            try:
+                inp = int(input_tokens)
+                cached = int(cached_tokens or 0)
+            except (TypeError, ValueError):
+                return
+            if inp <= 0:
+                return
+            st = cache_stats.setdefault(
+                key, {"input": 0, "cached": 0, "requests": 0}
+            )
+            st["input"] += inp
+            st["cached"] += max(0, min(cached, inp))
+            st["requests"] += 1
+
+        for call in self.llm_calls:
+            add_cache(
+                str(call.get("umo") or ""),
+                call.get("input_tokens"),
+                call.get("cached_tokens"),
+            )
+
+        # 插件刚重载时 llm_calls 是空的；用最近快照里的 response 兜底，
+        # 这样面板不会立刻变成“—”，能保留上一轮的真实数字。
+        for key, s in latest.items():
+            if key in cache_stats:
+                continue
+            resp = s.get("response") or {}
+            if isinstance(resp, dict):
+                add_cache(key, resp.get("input_tokens"), resp.get("cached_tokens"))
+
         rows: list[dict[str, Any]] = []
         for key, s in latest.items():
             tokens = int(s.get("estimated_tokens") or 0)
             tokens += int(s.get("inject_chars") or 0) // 4  # 注入块也占上下文
             gid = s.get("group_id") or ""
             is_group = bool(gid)
+            cs = cache_stats.get(key) or {}
+            cache_input = int(cs.get("input") or 0)
+            cache_hit = int(cs.get("cached") or 0)
             # 认不出 umo 的快照（例如非 agent 路径发起的 provider 调用）
             # 单独成一档，别和真正的私聊混在一起
             if not key:
@@ -3178,6 +3361,14 @@ class Main(star.Star):
                     "time": s.get("time", 0),
                     "requests": sum(
                         1 for x in self.context_snapshots if (x.get("umo") or "") == key
+                    ),
+                    "cache_requests": int(cs.get("requests") or 0),
+                    "cache_input_tokens": cache_input,
+                    "cached_tokens": cache_hit,
+                    "cache_hit_rate": (
+                        round(cache_hit / cache_input * 100, 1)
+                        if cache_input
+                        else None
                     ),
                 }
             )
@@ -3386,6 +3577,16 @@ class Main(star.Star):
                 all_msgs.append({"role": "user", "content": prompt})
             estimated = self._estimate_messages_tokens(all_msgs)
 
+            # 上下文构成（本地估算，给面板画三段条 / 明细用）：
+            #   system  —— 人设 + 系统提示词
+            #   tools   —— 本轮可用的函数工具 schema
+            #   messages—— 历史上下文 + 本轮用户消息
+            self._ctx_breakdown = {
+                **self._context_breakdown(system_prompt, req, contexts, prompt),
+                "time": time.time(),
+                "umo": umo,
+            }
+
             # 顺带检查：本轮上下文里是否已经带上了压缩摘要
             has_summary = any(
                 isinstance(m.get("content"), str)
@@ -3504,6 +3705,25 @@ class Main(star.Star):
             real_cached = getattr(usage, "input_cached", None)
             ctx_tokens = real_in if real_in is not None else p.get("estimated_tokens", 0)
             self.last_prompt_tokens = ctx_tokens
+
+            # 全局 Token 用量累计（自插件加载）。只统计带真实 usage 的请求：
+            # 估算值掺进来会把缓存命中率算歪。
+            if real_in is not None:
+                try:
+                    inp = int(real_in)
+                    cached = max(0, min(int(real_cached or 0), inp))
+                    out = int(real_out or 0)
+                except (TypeError, ValueError):
+                    inp = cached = out = None
+                if inp is not None:
+                    totals = getattr(self, "_usage_totals", None)
+                    if totals is None:
+                        totals = {"input": 0, "cached": 0, "output": 0, "calls": 0}
+                        self._usage_totals = totals
+                    totals["input"] += inp
+                    totals["cached"] += cached
+                    totals["output"] += out
+                    totals["calls"] += 1
             self.context_series.append(
                 {
                     "time": now,
@@ -3557,6 +3777,52 @@ class Main(star.Star):
                     ),
                 }
             )
+            # 前缀诊断（只读）：和同会话上一条请求比，哪一段变了。
+            prefix = self._prefix_by_umo.pop(umo_ev, None)
+            if prefix is None and p.get("umo"):
+                prefix = self._prefix_by_umo.pop(p["umo"], None)
+            record["prefix"] = prefix or {}
+            prev = None
+            for old in reversed(self.llm_calls):
+                if (old.get("umo") or "") == record["umo"]:
+                    prev = old
+                    break
+            flags: dict[str, Any] = {}
+            if prefix and prev and prev.get("prefix"):
+                pp = prev["prefix"]
+                flags = {
+                    "system": prefix.get("system") != pp.get("system"),
+                    "tools": prefix.get("tools") != pp.get("tools"),
+                    "head": prefix.get("head") != pp.get("head"),
+                    "history": prefix.get("history") != pp.get("history"),
+                    "msg_delta": int(record.get("context_messages") or 0)
+                    - int(prev.get("context_messages") or 0),
+                }
+                # 第一处不同的消息位置（1 基）：
+                #   0            = 完全一样
+                #   1..prev_len  = 头/中间变了（缓存从这里断）
+                #   prev_len + 1 = 只有尾部追加（缓存不受影响）
+                cur_h = prefix.get("msg_hashes") or []
+                prev_h = pp.get("msg_hashes") or []
+                first_diff = None
+                for i, (a, b) in enumerate(zip(cur_h, prev_h)):
+                    if a != b:
+                        first_diff = i + 1
+                        break
+                if first_diff is None:
+                    first_diff = (
+                        0
+                        if len(cur_h) == len(prev_h)
+                        else min(len(cur_h), len(prev_h)) + 1
+                    )
+                flags["first_diff"] = first_diff
+                flags["prev_ctx"] = len(prev_h)
+                flags["cur_ctx"] = len(cur_h)
+                if prev.get("input_tokens"):
+                    flags["prev_hit"] = round(
+                        (prev.get("cached_tokens") or 0) / prev["input_tokens"] * 100, 1
+                    )
+            record["prefix_flags"] = flags
             self.llm_calls.append(record)
             # ★ 释放点之一：拿到模型回复（正常路径）。
             #   注意【模型报错时这里不会执行】，所以还有 after_message_sent 那一路。
@@ -3949,6 +4215,33 @@ class Main(star.Star):
         info["reasoning_stripped_chars"] = self.reasoning_stripped_chars
         return info
 
+    def _usage_stats(self) -> dict[str, Any]:
+        """面板「Token 用量」卡的数据（自插件加载累计）。
+
+        口径与 DSH 面板一致：
+            总用量    = 未缓存输入 + 缓存读取 + 输出
+            缓存命中  = 缓存读取 / (未缓存输入 + 缓存读取)
+        ★ 这里用独立累计器，不对 llm_calls 求和 —— 那个 deque 只有 300 条，
+          滚掉旧记录后总数会跟着缩水。
+        """
+        totals = getattr(self, "_usage_totals", None) or {}
+        try:
+            inp = int(totals.get("input") or 0)
+            cached = max(0, min(int(totals.get("cached") or 0), inp))
+            out = int(totals.get("output") or 0)
+            calls = int(totals.get("calls") or 0)
+        except (TypeError, ValueError):
+            inp = cached = out = calls = 0
+        return {
+            "input": inp,
+            "cached": cached,
+            "uncached": max(0, inp - cached),
+            "output": out,
+            "total": inp + out,
+            "cache_hit_rate": round(cached / inp * 100, 1) if inp else None,
+            "calls": calls,
+        }
+
     def _stats(self) -> dict[str, Any]:
         """汇总统计，给页面顶部的数字卡用。"""
         calls = list(self.llm_calls)
@@ -4011,6 +4304,8 @@ class Main(star.Star):
             "snowluma": sl,
             "live_context": live_context,
             "stats": self._stats(),
+            "usage": self._usage_stats(),
+            "context_breakdown": dict(self._ctx_breakdown),
             "llm_runtime": await self._llm_runtime(),
             "sessions": self._session_usage(max_ctx),
             "context": {
@@ -4264,6 +4559,7 @@ class Main(star.Star):
                 data = json.load(fh)
             if safe == "comfy":
                 self._enrich_comfy(data)
+                await self._attach_comfy_queue(data)
             return json_response(data)
         except Exception as exc:  # noqa: BLE001
             return json_response({"empty": True, "error": f"{type(exc).__name__}: {exc}"})
@@ -4385,6 +4681,66 @@ class Main(star.Star):
             ok = False
         cache[port] = (now, ok)
         return ok
+
+    async def _attach_comfy_queue(self, data: dict) -> None:
+        """用 ComfyUI 的 /queue 覆盖总线里的估算队列（跑/等以实际为准）。"""
+        status = data.get("status") or {}
+        try:
+            port = int(status.get("port") or 8199)
+        except (TypeError, ValueError):
+            port = 8199
+        now = time.time()
+        cache = getattr(self, "_comfy_queue_cache", None)
+        if (
+            isinstance(cache, tuple)
+            and len(cache) == 3
+            and cache[0] == port
+            and now - cache[1] < 0.9
+        ):
+            actual = cache[2]
+        else:
+            def fetch() -> dict:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/queue", timeout=1.2
+                ) as resp:
+                    raw = json.loads(resp.read().decode("utf-8"))
+                return raw if isinstance(raw, dict) else {}
+
+            try:
+                raw = await asyncio.to_thread(fetch)
+                actual = {
+                    "ok": True,
+                    "alive": True,
+                    "port": port,
+                    "running": len(raw.get("queue_running") or []),
+                    "pending": len(raw.get("queue_pending") or []),
+                }
+            except Exception as exc:  # noqa: BLE001
+                actual = {
+                    "ok": False,
+                    "alive": False,
+                    "port": port,
+                    "running": 0,
+                    "pending": 0,
+                    "error": type(exc).__name__,
+                }
+            self._comfy_queue_cache = (port, now, actual)
+        data["actual"] = actual
+        if actual.get("ok"):
+            try:
+                plugin_running = int(status.get("queue_plugin_running") or 0)
+                plugin_pending = int(status.get("queue_plugin_pending") or 0)
+            except (TypeError, ValueError):
+                plugin_running = plugin_pending = 0
+            # ComfyUI 的 /queue 只看已经提交给它的任务；
+            # 插件公平队列里还没提交的那张，必须在面板上补进“等”。
+            actual["plugin_running"] = plugin_running
+            actual["plugin_pending"] = plugin_pending
+            actual["display_running"] = max(actual["running"], plugin_running)
+            actual["display_pending"] = actual["pending"] + plugin_pending
+            status["queue_running"] = actual["display_running"]
+            status["queue_pending"] = actual["display_pending"]
+            data["status"] = status
 
     def _enrich_comfy(self, data: dict) -> None:
         """给 comfy 状态附上内联缩略图：面板一次请求就够，不再二次取图。"""

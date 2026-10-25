@@ -2,5 +2,5 @@ name: astrbot_plugin_ncd_extra
 display_name: 链路扩展
 desc: 四个通用小命令：/compact 把对话压成「摘要 + 最近 N 轮」、/tooldisplay 工具调用气泡开关、/token consumption 看当前对话 token 用量、/get time 让模型拿到真实时间。全部走 AstrBot 公开 API，无本机路径与密钥依赖。
 author: 本地自用
-version: 1.2.0
+version: 1.2.1
 repo: ""

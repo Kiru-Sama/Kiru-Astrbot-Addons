@@ -360,6 +360,7 @@ class Browser:
                     logger.info("[toolbox] Edge 调试端口就绪")
                     return
                 await asyncio.sleep(0.3)
+            self.shutdown()
             raise RuntimeError(
                 f"Edge 已启动但调试端口 {self.debug_port} 一直没就绪。"
                 "可能是该端口被占用，或这个 Edge 配置目录已被别的实例打开。"
@@ -368,10 +369,18 @@ class Browser:
     def shutdown(self) -> None:
         """只回收本模块自己拉起的那个 Edge 进程。"""
         self._tab_id = None
-        if self._proc is not None and self._proc.poll() is None:
-            self._proc.terminate()
-            logger.info("[toolbox] 已回收插件拉起的 Edge 进程")
+        proc = self._proc
         self._proc = None
+        if proc is not None and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:  # noqa: BLE001
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+            logger.info("[toolbox] 已回收插件拉起的 Edge 进程")
 
     async def _work_tab(self) -> dict:
         """复用我们自己那一个标签页。

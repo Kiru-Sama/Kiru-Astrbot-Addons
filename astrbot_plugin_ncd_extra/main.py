@@ -347,6 +347,8 @@ class NcdExtraPlugin(star.Star):
             return "找不到当前对话记录，压缩失败。"
 
         history = self._load_history(conversation)
+        before_updated = int(getattr(conversation, "updated_at", 0) or 0)
+        before_len = len(history)
         rounds = split_rounds(history)
         min_rounds = max(keep + 1, self._cfg_int("compact_min_rounds", 8))
         if len(rounds) <= keep:
@@ -373,6 +375,18 @@ class NcdExtraPlugin(star.Star):
 
         new_history = build_compact_history(summary, recent_rounds)
         try:
+            latest = await manager.get_conversation(umo, conversation_id)
+            latest_history = self._load_history(latest) if latest else []
+            latest_updated = int(getattr(latest, "updated_at", 0) or 0) if latest else 0
+            if (
+                latest is None
+                or len(latest_history) != before_len
+                or (before_updated and latest_updated != before_updated)
+            ):
+                return (
+                    "压缩期间有新消息进来，已取消写入，避免覆盖；"
+                    "稍后再试一次 /compact。"
+                )
             await manager.update_conversation(
                 umo,
                 conversation_id,

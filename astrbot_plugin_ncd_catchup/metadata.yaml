@@ -2,5 +2,5 @@ name: astrbot_plugin_ncd_catchup
 display_name: 链路补台
 desc: 服务重开后，把关闭期间没被回复的私聊补回来（只补私聊；没人发消息就什么都不做）。
 author: 本地自用
-version: 1.0.2
+version: 1.1.0
 repo: ""

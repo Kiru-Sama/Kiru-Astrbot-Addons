@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import time
 from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger, star
-from astrbot.api.event import filter
+from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 
 try:  # AstrBot 以包形式加载
     from .inject import build_message, extract_text
@@ -44,6 +46,7 @@ class NcdCatchupPlugin(star.Star):
         self._beat: asyncio.Task | None = None
         self._catching_up = False
         self._self_id: str = ""
+        self._manual_last: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     def _conf_bool(self, key: str, default: bool) -> bool:
@@ -71,11 +74,79 @@ class NcdCatchupPlugin(star.Star):
         return {}
 
     def _save_state(self, state: dict) -> None:
+        tmp = STATE_PATH.with_suffix(".tmp")
         try:
             STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.write_text(
+                json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            os.replace(tmp, STATE_PATH)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[catchup] 写状态失败: {exc}")
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    # ------------------------------------------------------------------
+    def _blacklist(self) -> set[str]:
+        raw = str(self._conf.get("catchup_blacklist") or "")
+        return {x for x in re.split(r"[\s,，;；]+", raw) if x}
+
+    def _skip_names(self) -> tuple[str, ...]:
+        raw = str(
+            self._conf.get("catchup_skip_names")
+            or "我的电脑,文件传输助手,QQ团队,QQ安全中心,QQ空间"
+        )
+        return tuple(x.strip() for x in re.split(r"[,，;；]+", raw) if x.strip())
+
+    def _friend_skipped(
+        self, friend: dict, me: str, blocked: set[str], skip_names: tuple[str, ...]
+    ) -> bool:
+        uid = str(friend.get("user_id") or "")
+        if not uid or uid == me or uid in blocked:
+            return True
+        name = str(friend.get("nickname") or friend.get("remark") or "")
+        return any(word in name for word in skip_names)
+
+    @filter.command("补台", alias={"catchup"})
+    async def catchup_now(
+        self, event: AstrMessageEvent, minutes: str = ""
+    ) -> None:
+        """手动补一次私聊：/补台 [分钟]，默认最近 30 分钟，仅管理员。"""
+        if str(getattr(event, "role", "")) != "admin":
+            self._reply(event, "只有管理员能手动补台。")
+            return
+        if self._catching_up:
+            self._reply(event, "已经有一轮补台在跑，等它结束。")
+            return
+        try:
+            default_minutes = max(1, min(240, self._conf_int("catchup_manual_minutes", 30)))
+            mins = int(minutes) if str(minutes).strip() else default_minutes
+        except (TypeError, ValueError):
+            mins = 30
+        mins = max(1, min(240, mins))
+        self._catching_up = True
+        try:
+            result = await self._catch_up_inner(manual_minutes=mins)
+        finally:
+            self._catching_up = False
+        if not result.get("ok"):
+            self._reply(event, f"补台失败：{result.get('error') or '未知原因'}")
+            return
+        self._reply(
+            event,
+            f"🩹 手动补台完成（最近 {mins} 分钟）："
+            f"扫描 {result.get('scanned', 0)} 个私聊，补了 {result.get('injected', 0)} 个。"
+            + (
+                f"\n跳过黑名单/系统会话 {result.get('skipped', 0)} 个。"
+                if result.get("skipped")
+                else ""
+            ),
+        )
+
+    def _reply(self, event: AstrMessageEvent, text: str) -> None:
+        event.set_result(MessageEventResult().message(text).use_t2i(False))
 
     # ------------------------------------------------------------------
     @filter.on_astrbot_loaded()
@@ -145,32 +216,38 @@ class NcdCatchupPlugin(star.Star):
         finally:
             self._catching_up = False
 
-    async def _catch_up_inner(self) -> None:
+    async def _catch_up_inner(self, manual_minutes: int | None = None) -> dict:
+        manual = manual_minutes is not None
         platform = self.context.get_platform("aiocqhttp")
         if platform is None:
             logger.warning("[catchup] 没找到 aiocqhttp 平台，跳过")
-            return
+            return {"ok": False, "error": "没找到 aiocqhttp 平台"}
         try:
             bot = platform.get_client()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[catchup] 拿不到 OneBot 客户端: {exc}")
-            return
+            return {"ok": False, "error": f"拿不到 OneBot 客户端：{exc}"}
 
         me = await self._resolve_self_id(bot)
         self._self_id = me
         if not me:
             logger.warning("[catchup] 拿不到登录号，为安全起见这轮不补")
-            return
+            return {"ok": False, "error": "拿不到登录号，已拒绝补台"}
 
-        state = self._load_state()
         now = int(time.time())
-        has_point = "last_ts" in state and state["last_ts"]
-        if has_point:
-            last_ts = int(state["last_ts"])
-        else:
-            minutes = max(1, self._conf_int("catchup_first_minutes", 10))
+        if manual:
+            minutes = max(1, min(240, int(manual_minutes or 30)))
             last_ts = now - minutes * 60
-            logger.info(f"[catchup] 首次运行，只看最近 {minutes} 分钟")
+            logger.info(f"[catchup] 手动补台：最近 {minutes} 分钟")
+        else:
+            state = self._load_state()
+            has_point = "last_ts" in state and state["last_ts"]
+            if has_point:
+                last_ts = int(state["last_ts"])
+            else:
+                minutes = max(1, self._conf_int("catchup_first_minutes", 10))
+                last_ts = now - minutes * 60
+                logger.info(f"[catchup] 首次运行，只看最近 {minutes} 分钟")
         logger.info(
             f"[catchup] 登录号 {me}，处理点 {time.strftime('%m-%d %H:%M:%S', time.localtime(last_ts))}"
         )
@@ -179,21 +256,37 @@ class NcdCatchupPlugin(star.Star):
             friends = await bot.call_action("get_friend_list")
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[catchup] 拉好友列表失败（协议端可能还没连上）: {exc}")
-            return
+            return {"ok": False, "error": f"拉好友列表失败：{exc}"}
         if not isinstance(friends, list):
             logger.warning(f"[catchup] 好友列表格式异常: {type(friends).__name__}")
-            return
+            return {"ok": False, "error": "好友列表格式异常"}
 
         max_friends = max(1, self._conf_int("catchup_max_friends", 30))
         count = max(1, self._conf_int("catchup_count", 20))
         gap = max(0.0, float(self._conf_int("catchup_gap_ms", 1500)) / 1000.0)
-        max_rounds = max(1, self._conf_int("catchup_max_rounds", 10))
+        max_rounds = max(
+            1,
+            self._conf_int(
+                "catchup_manual_max" if manual else "catchup_max_rounds",
+                3 if manual else 10,
+            ),
+        )
+        cooldown = max(0, self._conf_int("catchup_manual_cooldown", 600))
+        blocked = self._blacklist() if manual else set()
+        skip_names = self._skip_names() if manual else ()
 
         injected = 0
+        scanned = 0
+        skipped = 0
         for friend in friends[:max_friends]:
             uid = str(friend.get("user_id") or "")
-            if not uid or uid == me:
+            if self._friend_skipped(friend, me, blocked, skip_names):
+                skipped += 1
                 continue
+            if manual and uid in self._manual_last and now - self._manual_last[uid] < cooldown:
+                skipped += 1
+                continue
+            scanned += 1
             try:
                 hist = await bot.call_action("get_friend_msg_history", user_id=int(uid), count=count)
             except Exception as exc:  # noqa: BLE001
@@ -221,6 +314,11 @@ class NcdCatchupPlugin(star.Star):
                 )
                 platform.commit_event(platform.create_event(msg))
                 injected += 1
+                if manual:
+                    self._manual_last[uid] = now
+                    if len(self._manual_last) > 200:
+                        for old_uid in sorted(self._manual_last, key=self._manual_last.get)[:-100]:
+                            self._manual_last.pop(old_uid, None)
                 logger.info(f"[catchup] 补 {uid}（{len(run)} 条合并）：{text[:40]}")
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"[catchup] 补 {uid} 失败: {type(exc).__name__}: {exc}")
@@ -228,6 +326,17 @@ class NcdCatchupPlugin(star.Star):
                 logger.info(f"[catchup] 达到单次补台上限 {max_rounds}，剩下的下次再说")
                 break
             await asyncio.sleep(gap)
+
+        if manual:
+            logger.info(f"[catchup] 手动补台完成：扫描 {scanned}，补 {injected}，跳过 {skipped}")
+            return {
+                "ok": True,
+                "injected": injected,
+                "scanned": scanned,
+                "skipped": skipped,
+                "since": last_ts,
+                "manual": True,
+            }
 
         state["last_ts"] = now
         state["last_run"] = now
@@ -237,6 +346,7 @@ class NcdCatchupPlugin(star.Star):
             if injected
             else "[catchup] 停机期间没有需要补的私聊"
         )
+        return {"ok": True, "injected": injected, "scanned": scanned, "skipped": skipped}
 
     async def terminate(self) -> None:
         for task in (self._task, self._beat):

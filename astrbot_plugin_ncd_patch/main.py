@@ -30,7 +30,22 @@ META_FILE = PATCH_DIR / "校验值.json"
 
 # AstrBot 包根目录：<AstrBot>\data\plugins\<本插件>\main.py 往上三层
 ASTRBOT_ROOT = PLUGIN_DIR.parent.parent.parent
-PKG_DIR = ASTRBOT_ROOT / ".venv" / "Lib" / "site-packages" / "astrbot"
+
+
+def _find_pkg_dir(root: Path) -> Path:
+    """兼容 Windows/Linux/macOS 的 venv 目录布局。"""
+    windows = root / ".venv" / "Lib" / "site-packages" / "astrbot"
+    candidates = [windows]
+    lib = root / ".venv" / "lib"
+    if lib.is_dir():
+        candidates.extend(sorted(lib.glob("python*/site-packages/astrbot")))
+    for path in candidates:
+        if path.is_dir():
+            return path
+    return windows
+
+
+PKG_DIR = _find_pkg_dir(ASTRBOT_ROOT)
 
 
 def sha16(path: Path) -> str:
