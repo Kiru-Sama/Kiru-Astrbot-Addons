@@ -47,6 +47,12 @@
     "hint": "默认 300。某个会话响应始终没回来时会一直占着并发槽，超过这个秒数强制回收并打 WARNING",
     "default": 300
   },
+  "quote_guard_after": {
+    "type": "float",
+    "description": "延迟回复超过多少秒时校验引用源",
+    "hint": "默认 3 秒。回复延迟超过这个秒数时，发送前用 get_msg 查触发消息；如果消息已被撤回、取不到 sender/time，就去掉引用只发正文，避免 QQ 把失效引用渲染成 1970/01/01 08:00。\n设 0 关闭。正常快速回复不查，不会给每条消息都加 API 调用。",
+    "default": 3.0
+  },
   "lm_studio_base": {
     "type": "string",
     "description": "LM Studio 地址",

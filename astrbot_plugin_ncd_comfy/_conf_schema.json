@@ -305,6 +305,12 @@
     "hint": "目录里放 sfw.txt / nsfw.txt；首次运行会从旧绘图插件的 kb/docs 自动复制一份。",
     "default": ""
   },
+  "comfy_lookup_notify": {
+    "type": "bool",
+    "description": "只读查询工具开工前发一句进度",
+    "hint": "开（默认）：调 comfy_tag_lookup / comfy_prompt_help 时，先往会话发「开始查标签库/法典范本」。关：静默查询，不打扰。",
+    "default": true
+  },
   "comfy_prompt_lib_dir": {
     "type": "string",
     "description": "本地提示词库查询项目目录（留空=自动找工作区）",

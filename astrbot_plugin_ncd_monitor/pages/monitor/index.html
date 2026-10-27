@@ -214,9 +214,56 @@
   }
   .usage-head .u { color: var(--muted); font-size: 12px; }
   .usage-hint { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .usage-split {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 24px;
+  }
+  .usage-col { min-width: 0; }
+  .usage-col + .usage-col {
+    border-left: 1px dashed var(--border); padding-left: 24px;
+  }
+  .usage-col-title {
+    display: flex; align-items: baseline; gap: 8px;
+    font-size: 12px; font-weight: 600; color: var(--muted);
+    margin-bottom: 6px;
+  }
+  @media (max-width: 900px) {
+    .usage-split { grid-template-columns: 1fr; gap: 14px; }
+    .usage-col + .usage-col {
+      border-left: 0; border-top: 1px dashed var(--border);
+      padding-left: 0; padding-top: 14px;
+    }
+  }
+  .usage-days {
+    margin-top: 10px; padding-top: 8px; border-top: 1px dashed var(--border);
+    display: grid; gap: 5px;
+  }
+  .usage-day { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+  .usage-day .d { width: 46px; flex: none; color: var(--muted); }
+  .usage-day .b {
+    flex: 1; height: 4px; background: var(--track);
+    border-radius: 999px; overflow: hidden;
+  }
+  .usage-day .b i { display: block; height: 100%; background: var(--accent); }
+  .usage-day .v {
+    width: 58px; text-align: right; font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+  .usage-mode {
+    display: flex; align-items: center; gap: 6px; margin-top: 10px;
+  }
+  .usage-mode .h2sub { flex: 1; }
+  .mbtn {
+    border: 1px solid var(--border); background: transparent;
+    color: var(--muted); border-radius: 999px; padding: 1px 9px;
+    font-size: 11px; cursor: pointer;
+  }
+  .mbtn.on { background: var(--soft); color: var(--accent); border-color: #c7dbff; }
+  .usage-canvas { width: 100%; display: block; margin-top: 8px; }
 
   /* ---- 缓存诊断：前缀哪一段变了 ---- */
-  .diag-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
+  .diag-scroll { overflow-x: auto; }
+  .diag-table { width: 100%; min-width: 840px; border-collapse: collapse; table-layout: fixed; font-size: 12px; }
   .diag-table th, .diag-table td {
     padding: 4px 0; border-bottom: 1px dashed var(--border); vertical-align: middle;
   }
@@ -226,6 +273,11 @@
   .diag-table td.diag-name {
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 8px;
   }
+  .diag-table td.diag-cause {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-size: 11px; color: var(--muted);
+  }
+  .diag-table td.diag-cause.warn { color: var(--warn); }
   .diag-table tr:last-child td { border-bottom: none; }
   .diag-pill {
     display: inline-block; min-width: 30px; text-align: center;
@@ -508,6 +560,92 @@
     animation: liveblink 1s steps(2, start) infinite;
   }
   @keyframes liveblink { to { visibility: hidden; } }
+
+  /* ---- 本地生成：左右分栏（左边进度/历史，右边排队列表）---- */
+  .comfy-split {
+    display: flex; gap: 12px; align-items: flex-start;
+  }
+  .comfy-left {
+    flex: 1 1 auto; min-width: 0;          /* 允许收缩，不被宽内容撑破 */
+  }
+  .comfy-right {
+    flex: 0 0 200px;                       /* 排队列表固定宽度 */
+    min-width: 160px;
+  }
+  /* 窄屏退回上下排列 */
+  @media (max-width: 720px) {
+    .comfy-split { flex-direction: column; }
+    .comfy-right { flex: none; width: 100%; min-width: 0; }
+  }
+  /* 排队列表容器 */
+  .comfy-queue {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--card-2) 88%, var(--track));
+    overflow: hidden;
+  }
+  .comfy-queue .cq-head {
+    font-size: 11px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em;
+    padding: 7px 10px 5px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .comfy-queue .cq-head .cq-count {
+    margin-left: auto; font-size: 11px; font-weight: 700;
+    color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent);
+    padding: 1px 7px; border-radius: 999px;
+  }
+  .comfy-queue .cq-list {
+    max-height: 300px; overflow-y: auto; padding: 4px 0;
+  }
+  .comfy-queue .cq-empty {
+    padding: 10px; text-align: center; font-size: 12px; color: var(--muted);
+    font-style: italic;
+  }
+  /* 排队卡片：一条一行 */
+  .cq-card {
+    display: flex; align-items: center; gap: 8px;
+    padding: 5px 10px; font-size: 12.5px;
+    border-bottom: 1px dashed color-mix(in srgb, var(--border) 50%, transparent);
+    transition: background .15s;
+  }
+  .cq-card:last-child { border-bottom: none; }
+  .cq-card:hover { background: color-mix(in srgb, var(--accent) 5%, transparent); }
+  .cq-card.running {
+    background: color-mix(in srgb, var(--ok) 8%, transparent);
+  }
+  /* 序号圆圈 */
+  .cq-pos {
+    flex: none; width: 22px; height: 22px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 700; font-variant-numeric: tabular-nums;
+    background: var(--track); color: var(--muted);
+  }
+  .cq-card.running .cq-pos {
+    background: var(--ok); color: #fff;
+  }
+  .cq-card:not(.running) .cq-pos {
+    background: color-mix(in srgb, var(--warn) 18%, transparent);
+    color: var(--warn);
+  }
+  .cq-name {
+    flex: 1 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-weight: 550;
+  }
+  .cq-card.running .cq-name { color: var(--ok); }
+  .cq-preset {
+    flex: none; font-size: 10px; color: var(--muted);
+    background: var(--track); padding: 1px 6px; border-radius: 4px;
+    white-space: nowrap;
+  }
+  /* 正在画的小动画 */
+  .cq-card.running .cq-name::after {
+    content: " ▸"; color: var(--ok); font-weight: 400;
+    animation: cqblink 1.4s steps(2, start) infinite;
+  }
+  @keyframes cqblink { to { opacity: .3; } }
 
   /* ---- 思考过程（reasoning）----
      ★ 刻意做得比正文【弱】：斜体、灰、左边一条虚线。
@@ -984,18 +1122,43 @@
     <div class="ctx-live" id="ctxLive"></div>
   </div>
 
-  <!-- Token 用量：自插件加载累计（口径同 DSH 会话统计） -->
+  <!-- Token 用量：左累计 / 右每日 -->
   <div class="card" style="margin-bottom:14px" data-card="usage" data-title="Token 用量">
-    <h2>Token 用量 <span class="h2sub" id="usageSub">自插件加载</span></h2>
-    <div class="usage-head">
-      <span class="n" id="usageTotal">—</span>
-      <span class="u">tok</span>
+    <h2>Token 用量 <span class="h2sub">累计 / 每日</span></h2>
+    <div class="usage-split">
+      <div class="usage-col">
+        <div class="usage-col-title">本次运行 <span class="h2sub" id="usageSub"></span></div>
+        <div class="usage-head">
+          <span class="n" id="usageTotal">—</span>
+          <span class="u">tok</span>
+        </div>
+        <div class="kv"><span class="k">缓存命中</span><span class="v" id="usageHit">—</span></div>
+        <div class="kv"><span class="k">未缓存输入</span><span class="v" id="usageUncached">—</span></div>
+        <div class="kv"><span class="k">缓存读取</span><span class="v" id="usageCached">—</span></div>
+        <div class="kv"><span class="k">输出</span><span class="v" id="usageOutput">—</span></div>
+        <div class="usage-hint" id="usageHint"></div>
+      </div>
+      <div class="usage-col">
+        <div class="usage-col-title">每日 <span class="h2sub" id="usageDailySub">今天</span></div>
+        <div class="usage-head">
+          <span class="n" id="usageDailyTotal">—</span>
+          <span class="u">tok</span>
+        </div>
+        <div class="kv"><span class="k">未缓存输入</span><span class="v" id="usageDailyUncached">—</span></div>
+        <div class="kv"><span class="k">缓存读取</span><span class="v" id="usageDailyCached">—</span></div>
+        <div class="kv"><span class="k">输出</span><span class="v" id="usageDailyOutput">—</span></div>
+        <div class="kv"><span class="k">请求</span><span class="v" id="usageDailyCalls">—</span></div>
+        <div class="kv"><span class="k">累计（自 <span id="usageTotalSince">—</span>）</span><span class="v" id="usageTotalCum">—</span></div>
+        <div class="usage-mode">
+          <span class="h2sub">最近 30 天</span>
+          <button class="mbtn on" id="usageModeBar" data-mode="bar" onclick="setUsageMode('bar')">条</button>
+          <button class="mbtn" id="usageModeLine" data-mode="line" onclick="setUsageMode('line')">线</button>
+        </div>
+        <div class="usage-days" id="usageDailyDays"></div>
+        <canvas id="usageDailyChart" class="usage-canvas" height="120" hidden></canvas>
+        <div class="usage-hint" id="usageDailyHint"></div>
+      </div>
     </div>
-    <div class="kv"><span class="k">缓存命中</span><span class="v" id="usageHit">—</span></div>
-    <div class="kv"><span class="k">未缓存输入</span><span class="v" id="usageUncached">—</span></div>
-    <div class="kv"><span class="k">缓存读取</span><span class="v" id="usageCached">—</span></div>
-    <div class="kv"><span class="k">输出</span><span class="v" id="usageOutput">—</span></div>
-    <div class="usage-hint" id="usageHint"></div>
   </div>
 
   <!-- 缓存诊断（只读）：看前缀哪一段在变 -->
@@ -1021,7 +1184,15 @@
   <!-- 本地生成（ComfyUI 进度，来自 ncd_bus） -->
   <div class="card" style="margin-bottom:14px" data-card="comfy" data-title="本地生成">
     <h2>本地生成 <span class="h2sub">ComfyUI · 节点进度 · 面板 v5</span></h2>
-    <div id="comfyBox"><div class="empty">加载中…</div></div>
+    <div class="comfy-split">
+      <div class="comfy-left" id="comfyBox"><div class="empty">加载中…</div></div>
+      <div class="comfy-right">
+        <div class="comfy-queue">
+          <div class="cq-head">排队<span class="cq-count" id="cqCount">0</span></div>
+          <div class="cq-list" id="cqList"><div class="cq-empty">暂无排队</div></div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <!-- 思考内容（仅后台可见） -->
@@ -1362,11 +1533,209 @@ function renderUsage(d) {
   $("usageCached").textContent = has ? fmtNum(u.cached) : "—";
   $("usageOutput").textContent = has ? fmtNum(u.output) : "—";
   $("usageSub").textContent = has
-    ? `自插件加载 · ${fmtNum(u.calls)} 次请求`
-    : "自插件加载";
+    ? `· ${fmtNum(u.calls)} 次请求`
+    : "· 0 次";
   $("usageHint").textContent = has
     ? "总用量 = 未缓存输入 + 缓存读取 + 输出；命中率 = 缓存读取 ÷ 输入"
     : "还没有带 usage 的请求 —— 给机器人发条消息就会开始累计";
+}
+
+function renderUsageDaily(d) {
+  const t = (d && d.today) || {};
+  const $ = (id) => document.getElementById(id);
+  // 旧页面缓存/半更新时可能没有这些节点；直接跳过，不能拖垮整页渲染。
+  if (!["usageDailyTotal", "usageDailyUncached", "usageDailyCached",
+        "usageDailyOutput", "usageDailyCalls", "usageDailySub",
+        "usageDailyHint", "usageDailyDays", "usageDailyChart",
+        "usageTotalSince", "usageTotalCum"].every($)) {
+    return;
+  }
+  window.__usageDaily = d || {};
+  const cv0 = $("usageDailyChart");
+  if (cv0 && !cv0.__hover) {
+    cv0.__hover = true;
+    cv0.addEventListener("mousemove", usageDailyHover);
+  }
+  const has = (t.calls || 0) > 0;
+  const rate = has && t.cache_hit_rate != null
+    ? Number(t.cache_hit_rate).toFixed(1) + "%"
+    : "—";
+  $("usageDailyTotal").textContent = has ? fmtNum(t.total) : "—";
+  $("usageDailyUncached").textContent = has ? fmtNum(t.uncached) : "—";
+  $("usageDailyCached").textContent = has ? fmtNum(t.cached) : "—";
+  $("usageDailyOutput").textContent = has ? fmtNum(t.output) : "—";
+  $("usageDailyCalls").textContent = has
+    ? fmtNum(t.calls) + (rate === "—" ? "" : " · 命中 " + rate)
+    : "—";
+  $("usageDailySub").textContent =
+    "今天 · 永久保存 " + fmtNum((d && d.days) || 0) + " 天";
+  $("usageDailyHint").textContent = has
+    ? "总用量 = 未缓存输入 + 缓存读取 + 输出；每天一个文件，不自动删除"
+    : "今天还没有带 usage 的请求";
+
+  const tot = (d && d.total) || {};
+  $("usageTotalSince").textContent = tot.since || "—";
+  $("usageTotalCum").textContent = (tot.calls || 0) > 0
+    ? `${fmtNum(tot.total)} tok · ${fmtNum(tot.calls)} 次`
+    : "—";
+
+  const box = $("usageDailyDays");
+  const cv = $("usageDailyChart");
+  if (_usageDailyMode === "line") {
+    box.hidden = true;
+    cv.hidden = false;
+    const recent = (d && d.recent) || [];
+    _usageDailySeries = (recent.length ? recent : (has ? [t] : [])).slice().reverse();
+    drawUsageDailyChart();
+    return;
+  }
+  cv.hidden = true;
+  box.hidden = false;
+  box.replaceChildren();
+  const recent = (d && d.recent) || [];
+  const rows = (recent.length ? recent : (has ? [t] : [])).slice(0, 7);
+  if (!rows.length) return;
+  const max = Math.max(1, ...rows.map((r) => Number(r.total) || 0));
+  rows.forEach((r) => {
+    const wrap = el("div", "usage-day");
+    wrap.appendChild(el("span", "d", String(r.date || "").slice(5)));
+    const bar = el("div", "b");
+    const fill = el("i");
+    fill.style.width = Math.max(2, (Number(r.total) || 0) / max * 100) + "%";
+    bar.appendChild(fill);
+    wrap.appendChild(bar);
+    wrap.appendChild(el("span", "v", fmtNum(r.total || 0)));
+    wrap.title = `${r.date} · ${fmtNum(r.total || 0)} token · ${r.calls || 0} 次请求`;
+    box.appendChild(wrap);
+  });
+}
+
+/* ---------- 每日 Token 折线图（原生 Canvas）---------- */
+let _usageDailyMode = "bar";
+let _usageDailySeries = [];
+let _usageDailyPts = [];
+
+function setUsageMode(mode) {
+  _usageDailyMode = mode === "line" ? "line" : "bar";
+  document.querySelectorAll(".usage-mode .mbtn").forEach((b) => {
+    b.classList.toggle("on", b.dataset.mode === _usageDailyMode);
+  });
+  renderUsageDaily(window.__usageDaily || {});
+}
+
+function drawUsageDailyChart() {
+  const cv = document.getElementById("usageDailyChart");
+  if (!cv) return;
+  const H = 120;
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth || 320;
+  cv.hidden = false;
+  cv.style.height = H + "px";   // 避免 dpr 把显示高度放大
+  cv.width = W * dpr;
+  cv.height = H * dpr;
+  const g = cv.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+
+  const css = getComputedStyle(document.documentElement);
+  const cMut = css.getPropertyValue("--muted").trim() || "#6b7280";
+  const cAcc = css.getPropertyValue("--accent").trim() || "#3b82f6";
+  const cBorder = css.getPropertyValue("--border").trim() || "#e6e8ec";
+
+  const data = _usageDailySeries.slice(-30);
+  _usageDailyPts = [];
+  if (!data.length) {
+    g.fillStyle = cMut;
+    g.font = "12px system-ui, sans-serif";
+    g.textAlign = "center";
+    g.fillText("还没有每日数据 —— 出现带 usage 的请求后就会有曲线", W / 2, H / 2);
+    return;
+  }
+
+  const padL = 46, padR = 10, padT = 8, padB = 18;
+  const plotW = W - padL - padR;
+  const plotH = H - padT - padB;
+  const vals = data.map((r) => Number(r.total) || 0);
+  const yMax = Math.max(1, ...vals) * 1.1;
+  const x = (i) => padL + (data.length === 1 ? plotW / 2 : (i / (data.length - 1)) * plotW);
+  const y = (v) => padT + plotH - (v / yMax) * plotH;
+
+  // 网格 + Y 轴
+  g.strokeStyle = cBorder;
+  g.fillStyle = cMut;
+  g.font = "10px system-ui, sans-serif";
+  g.textAlign = "right";
+  for (let i = 0; i <= 2; i++) {
+    const v = (yMax / 2) * i;
+    const yy = y(v);
+    g.beginPath();
+    g.moveTo(padL, yy);
+    g.lineTo(W - padR, yy);
+    g.stroke();
+    g.fillText(fmtNum(Math.round(v)), padL - 6, yy + 3);
+  }
+
+  // 面积
+  g.beginPath();
+  data.forEach((r, i) => {
+    const px = x(i);
+    const py = y(Number(r.total) || 0);
+    if (!i) g.moveTo(px, py);
+    else g.lineTo(px, py);
+    _usageDailyPts.push({ x: px, y: py, row: r });
+  });
+  g.lineTo(x(data.length - 1), padT + plotH);
+  g.lineTo(x(0), padT + plotH);
+  g.closePath();
+  g.fillStyle = "rgba(59,130,246,0.10)";
+  g.fill();
+
+  // 折线
+  g.beginPath();
+  data.forEach((r, i) => {
+    const px = x(i);
+    const py = y(Number(r.total) || 0);
+    if (!i) g.moveTo(px, py);
+    else g.lineTo(px, py);
+  });
+  g.strokeStyle = cAcc;
+  g.lineWidth = 2;
+  g.lineJoin = "round";
+  g.stroke();
+
+  // 点
+  _usageDailyPts.forEach((p, i) => {
+    g.beginPath();
+    g.arc(p.x, p.y, i === _usageDailyPts.length - 1 ? 3.2 : 2, 0, Math.PI * 2);
+    g.fillStyle = cAcc;
+    g.fill();
+  });
+
+  // X 轴日期
+  g.fillStyle = cMut;
+  g.textAlign = "left";
+  g.fillText(String(data[0].date || "").slice(5), padL, H - 4);
+  g.textAlign = "right";
+  g.fillText(String(data[data.length - 1].date || "").slice(5), W - padR, H - 4);
+}
+
+function usageDailyHover(ev) {
+  const cv = document.getElementById("usageDailyChart");
+  if (!cv || !_usageDailyPts.length) return;
+  const rect = cv.getBoundingClientRect();
+  const mx = ev.clientX - rect.left;
+  let best = null;
+  let bestD = Infinity;
+  _usageDailyPts.forEach((p) => {
+    const d = Math.abs(p.x - mx);
+    if (d < bestD) {
+      bestD = d;
+      best = p;
+    }
+  });
+  if (best) {
+    cv.title = `${best.row.date} · ${fmtNum(best.row.total || 0)} token · ${best.row.calls || 0} 次请求`;
+  }
 }
 
 /* ---------- 缓存诊断（只读） ----------
@@ -1403,11 +1772,11 @@ function renderCacheDiag(calls) {
   };
   const head = '<table class="diag-table">' +
     '<colgroup><col style="width:66px"><col><col style="width:62px">' +
-    '<col style="width:46px"><col style="width:46px"><col style="width:64px">' +
-    '<col style="width:54px"></colgroup>' +
+    '<col style="width:46px"><col style="width:46px"><col style="width:46px">' +
+    '<col style="width:64px"><col style="width:54px"><col style="width:112px"></colgroup>' +
     '<thead><tr><th>时间</th><th>会话</th><th class="num">命中</th>' +
-    '<th class="c">系统</th><th class="c">工具</th><th class="c">首差</th>' +
-    '<th class="num">消息Δ</th></tr></thead><tbody>';
+    '<th class="c">系统</th><th class="c">首条</th><th class="c">工具</th><th class="c">首差</th>' +
+    '<th class="num">消息Δ</th><th>判定</th></tr></thead><tbody>';
   const body = rows.map((c) => {
     const f = c.prefix_flags || {};
     const p = c.prefix || {};
@@ -1416,21 +1785,39 @@ function renderCacheDiag(calls) {
     const delta = f.msg_delta === undefined
       ? "—"
       : (f.msg_delta > 0 ? "+" : "") + f.msg_delta;
-    const title = `系统 ${p.system} · 工具 ${p.tools} · 首条 ${p.head} · 历史 ${p.history}` +
-      ` · 首差 ${f.first_diff === undefined ? "—" : f.first_diff}`;
+    const prevChars = f.prev_head_chars || 0;
+    const curChars = Number.isFinite(Number(p.head_chars))
+      ? Number(p.head_chars)
+      : null;
+    const headInfo = p.head_role
+      ? `${p.head_role} ${prevChars ? prevChars + "→" : ""}${curChars === null ? "?" : curChars} 字`
+      : "";
+    const cause = f.cause || (p.head
+      ? (f.first_diff === undefined ? "首次请求" : "—")
+      : "—");
+    const causeCls = /改写|未命中|历史/.test(cause)
+      ? "diag-cause warn"
+      : "diag-cause";
+    const title = `系统 ${p.system} · 工具 ${p.tools} · 首条 ${p.head}` +
+      (headInfo ? `（${headInfo}）` : "") +
+      ` · 历史 ${p.history} · 首差 ${f.first_diff === undefined ? "—" : f.first_diff}` +
+      (p.head_preview ? ` · 首条预览 ${p.head_preview}` : "");
     return `<tr title="${esc(title)}">
       <td class="nowrap">${fmtTime(c.time)}</td>
       <td class="diag-name">${esc(sourceLabel(c))}</td>
       <td class="num">${hit}</td>
       <td class="c">${pill(f.system)}</td>
+      <td class="c">${pill(f.head)}</td>
       <td class="c">${pill(f.tools)}</td>
       <td class="c">${diffCell(f)}</td>
       <td class="num">${delta}</td>
+      <td class="${causeCls}" title="${esc(cause)}">${esc(cause)}</td>
     </tr>`;
   }).join("");
-  box.innerHTML = head + body + '</tbody></table>' +
+  box.innerHTML = '<div class="diag-scroll">' + head + body + '</tbody></table></div>' +
     '<div class="diag-note">「首差」= 与同会话上一条相比，第一处不同的消息位置：' +
-    '「尾+N」只在尾部追加，缓存不受影响；「#k」表示头/中间变了，缓存从 k 断开。</div>';
+    '「尾+N」只在尾部追加，缓存不受影响；「#k」表示头/中间变了，缓存从 k 断开。' +
+    '「首条」= contexts[0] 的角色/内容指纹；首条+系统字段都同、但命中仍低，通常是服务端缓存未命中。</div>';
 }
 
 /* ---------- 模型信息 ---------- */
@@ -2321,6 +2708,7 @@ async function refreshChart() {
 window.addEventListener("resize", () => {
   drawChart();
   paintRes();   // 迷你趋势图也要按新宽度重画
+  if (_usageDailyMode === "line") drawUsageDailyChart();
 });
 
 /* ---------- 发给模型的完整上下文（纵向聊天形式）---------- */
@@ -2780,6 +3168,7 @@ function thumbErr(img) {
 }
 
 let _comfySig = "";
+let _comfyQueueSig = "";
 document.addEventListener("click", function (e) {
   const btn = e.target.closest ? e.target.closest("button.copyBtn") : null;
   if (!btn) return;
@@ -2803,6 +3192,8 @@ document.addEventListener("click", function (e) {
 function renderComfy(d) {
   const box = document.getElementById("comfyBox");
   if (!box) return;
+  // 排队列表独立更新：即使主卡片因为 empty / 没变化提前 return，也要清掉旧队列。
+  renderComfyQueue(d);
   if (!d || d.empty) {
     if (_comfySig !== "empty") { _comfySig = "empty"; box.innerHTML = '<div class="empty">还没有生成记录。</div>'; }
     return;
@@ -2880,6 +3271,37 @@ function renderComfy(d) {
     img.src = blobFor(img.getAttribute("data-thumb") || "");
   });
   loadGenThumbs();
+}
+
+/* ---------- 排队列表（卡片式） ---------- */
+function renderComfyQueue(d) {
+  var listEl = document.getElementById("cqList");
+  var countEl = document.getElementById("cqCount");
+  if (!listEl || !countEl) return;
+  var entries = (d && Array.isArray(d.queue_entries)) ? d.queue_entries : [];
+  var sig = JSON.stringify(entries);
+  if (sig === _comfyQueueSig) return;
+  _comfyQueueSig = sig;
+  // 标题写的是“排队”，所以胶囊只数 pending；正在画的那张在列表里单独高亮。
+  var pending = entries.filter(function (e) {
+    return e && e.status === "pending";
+  }).length;
+  countEl.textContent = String(pending);
+  if (!entries.length) {
+    listEl.innerHTML = '<div class="cq-empty">暂无排队</div>';
+    return;
+  }
+  listEl.innerHTML = entries.map(function (e) {
+    var cls = e.status === "running" ? "cq-card running" : "cq-card";
+    var preset = e.preset
+      ? '<span class="cq-preset">' + esc(e.preset) + "</span>"
+      : "";
+    return '<div class="' + cls + '">' +
+      '<span class="cq-pos">' + esc(e.pos) + "</span>" +
+      '<span class="cq-name">' + esc(e.name || "未知") + "</span>" +
+      preset +
+      "</div>";
+  }).join("");
 }
 
 
@@ -3100,44 +3522,66 @@ function openGenFull(i) {
 }
 
 /* ---------- 主循环 ---------- */
+function safe(name, fn) {
+  try {
+    const r = fn();
+    if (r && typeof r.catch === "function") {
+      r.catch((e) => console.error("[monitor]", name, e));
+    }
+    return r;
+  } catch (e) {
+    console.error("[monitor]", name, e);
+  }
+}
+
 async function tick() {
   try {
+    const get = (path) => P.apiGet(path).catch((e) => {
+      console.error("[monitor] api", path, e);
+      return {};
+    });
     const [ov, hi, sm] = await Promise.all([
-      P.apiGet("/ncd-monitor/overview"),
-      P.apiGet("/ncd-monitor/history"),
-      P.apiGet("/ncd-monitor/summaries"),
+      get("/ncd-monitor/overview"),
+      get("/ncd-monitor/history"),
+      get("/ncd-monitor/summaries"),
     ]);
-    renderLinks(ov);
-    renderContext(ov);
-    renderUsage(ov);
-    renderModel(ov);
+    safe("links", () => renderLinks(ov));
+    safe("context", () => renderContext(ov));
+    safe("usage", () => renderUsage(ov));
+    safe("usageDaily", () => renderUsageDaily(ov.usage_daily));
+    safe("model", () => renderModel(ov));
     // 资源卡不在这里渲染 —— 它走 1 秒的 refreshSys()，
     // 这里再写一次 #resBox 会把它的趋势图和数据一起冲掉
-    renderSL(ov);
-    renderSessions(ov);
-    renderSummaries(sm.items, ov);
-    renderCalls(hi.llm_calls);
-    renderCacheDiag(hi.llm_calls);
-    renderStats(ov);
-    refreshTools();
-    refreshThinking();
-    refreshTimeline();
-    refreshSearchBox();
+    safe("sl", () => renderSL(ov));
+    safe("sessions", () => renderSessions(ov));
+    safe("summaries", () => renderSummaries(sm.items, ov));
+    safe("calls", () => renderCalls(hi.llm_calls));
+    safe("cacheDiag", () => renderCacheDiag(hi.llm_calls));
+    safe("stats", () => renderStats(ov));
+    safe("tools", refreshTools);
+    safe("thinking", refreshThinking);
+    safe("timeline", refreshTimeline);
+    safe("search", refreshSearchBox);
     window.__maxCtx = (ov.context || {}).max || 32768;
     _ctxSeries = hi.context_series || [];
-    drawChart();
+    safe("chart", drawChart);
 
     // 上下文快照单独拉（数据大）
-    await refreshContexts();
+    await refreshContexts().catch((e) => console.error("[monitor] contexts", e));
 
-    document.getElementById("meta").textContent =
-      `更新于 ${fmtTime(ov.server_time)} · 每 5 秒自动刷新`;
-    document.getElementById("liveDot").style.background = "var(--ok)";
+    safe("meta", () => {
+      document.getElementById("meta").textContent =
+        `更新于 ${fmtTime(ov.server_time)} · 每 5 秒自动刷新`;
+      document.getElementById("liveDot").style.background = "var(--ok)";
+    });
     first = false;
   } catch (e) {
     console.error(e);
-    document.getElementById("meta").textContent = "拉取失败：" + (e && e.message ? e.message : e);
-    document.getElementById("liveDot").style.background = "var(--bad)";
+    try {
+      document.getElementById("meta").textContent =
+        "拉取失败：" + (e && e.message ? e.message : e);
+      document.getElementById("liveDot").style.background = "var(--bad)";
+    } catch (_) { /* 页面被旧缓存弄坏时也不要再抛 */ }
   }
 }
 

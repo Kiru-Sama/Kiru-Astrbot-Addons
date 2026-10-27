@@ -423,6 +423,63 @@ class QuotaEngine:
             )
         return rows
 
+    def ranking_total(self, now: float | None = None) -> list[dict]:
+        """生图总榜（累计张数），不参与限流。"""
+        now = self._now(now)
+        self._ensure_window(now)
+        rows = [
+            (u, int(c))
+            for u, c in self.state.total_counts.items()
+            if int(c) > 0
+        ]
+        rows.sort(
+            key=lambda item: (
+                -item[1],
+                float(self.state.last_success.get(item[0], 0.0)),
+                item[0],
+            )
+        )
+        return [
+            {
+                "user_id": user_id,
+                "rank": i + 1,
+                "count": count,
+                "last_success": self.state.last_success.get(user_id),
+            }
+            for i, (user_id, count) in enumerate(rows)
+        ]
+
+    def speech_ranking(
+        self, kind: str = "daily", now: float | None = None
+    ) -> list[dict]:
+        """发言榜：kind=daily 日榜 / total 总榜。"""
+        now = self._now(now)
+        self._ensure_window(now)
+        daily = str(kind or "daily").lower() != "total"
+        source = (
+            self.state.speech_counts if daily else self.state.speech_totals
+        )
+        rows = [(u, int(c)) for u, c in source.items() if int(c) > 0]
+        rows.sort(
+            key=lambda item: (
+                -item[1],
+                float(self.state.speech_last.get(item[0], 0.0)),
+                item[0],
+            )
+        )
+        return [
+            {
+                "user_id": user_id,
+                "rank": i + 1,
+                "count": count,
+                "total_count": int(
+                    self.state.speech_totals.get(user_id, 0)
+                ),
+                "last_success": self.state.speech_last.get(user_id),
+            }
+            for i, (user_id, count) in enumerate(rows)
+        ]
+
     def dashboard(self, now: float | None = None) -> dict:
         """面板一次取全：窗口、全局、池、日榜、禁生图名单。"""
         now = self._now(now)
@@ -442,6 +499,13 @@ class QuotaEngine:
                 self.state.bans.items(), key=lambda kv: kv[1]
             )
         ]
+        daily = [asdict(row) for row in self.ranking(now)]
+        rankings = {
+            "daily": daily,
+            "total": self.ranking_total(now),
+            "speech_daily": self.speech_ranking("daily", now),
+            "speech_total": self.speech_ranking("total", now),
+        }
         return {
             "window": {
                 "start": self.state.window_start,
@@ -463,7 +527,8 @@ class QuotaEngine:
                 "throttle": list(self.state.throttle_pool),
                 "canvas": list(self.state.canvas_pool),
             },
-            "ranking": [asdict(row) for row in self.ranking(now)],
+            "ranking": daily,
+            "rankings": rankings,
             "bans": bans,
             "totals": {
                 "users": len(self.state.total_counts),

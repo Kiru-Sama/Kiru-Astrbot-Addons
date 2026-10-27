@@ -23,6 +23,11 @@
   button { font:inherit; border:1px solid var(--border); border-radius:8px;
     padding:7px 12px; background:var(--card); color:var(--text); cursor:pointer; }
   button:hover { background:var(--track); }
+  .tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+  .tabs button { padding:4px 9px; font-size:12px; border-radius:999px;
+    color:var(--muted); }
+  .tabs button.on { background:var(--soft); color:var(--accent);
+    border-color:#c7dbff; }
   .cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
     gap:12px; margin-bottom:12px; }
   .card { background:var(--card); border:1px solid var(--border);
@@ -92,7 +97,8 @@
 
 <div class="grid">
   <section class="card">
-    <h2>单日榜 <span class="sub">前 5 限流 · 前 3 画幅</span></h2>
+    <h2>排行榜 <span class="sub">生图 / 发言 · 日榜 / 总榜</span></h2>
+    <div class="tabs" id="rank-tabs"></div>
     <div id="rank"><div class="empty">加载中…</div></div>
   </section>
   <section class="card">
@@ -112,6 +118,14 @@
 const P = window.AstrBotPluginPage;
 const $ = (id) => document.getElementById(id);
 let timer = null;
+let lastData = null;
+let board = "daily";
+const BOARDS = [
+  { key: "daily", label: "生图日榜" },
+  { key: "total", label: "生图总榜" },
+  { key: "speech_daily", label: "发言日榜" },
+  { key: "speech_total", label: "发言总榜" },
+];
 
 function setStatus(text, cls) {
   const el = $("status");
@@ -163,12 +177,94 @@ function badge(text, cls) {
   return el("span", "badge" + (cls ? " " + cls : ""), text);
 }
 
+function renderTabs() {
+  const box = $("rank-tabs");
+  if (!box) return;
+  box.replaceChildren();
+  BOARDS.forEach((item) => {
+    const btn = el("button", board === item.key ? "on" : "", item.label);
+    btn.type = "button";
+    btn.onclick = () => {
+      board = item.key;
+      renderTabs();
+      renderBoard(lastData);
+    };
+    box.appendChild(btn);
+  });
+}
+
+function renderBoard(data) {
+  const box = $("rank");
+  if (!box) return;
+  box.replaceChildren();
+  const rankings = (data && data.rankings) || {};
+  const rows = Array.isArray(rankings[board])
+    ? rankings[board]
+    : (board === "daily" && data && Array.isArray(data.ranking)
+      ? data.ranking : []);
+  if (!rows.length) {
+    box.appendChild(el("div", "empty",
+      board === "daily" ? "本时段还没有成功生图。" : "还没有数据。"));
+    return;
+  }
+  const heads = board === "daily"
+    ? ["名次", "用户", "今日", "间隔", "队列", "状态"]
+    : board === "total"
+      ? ["名次", "用户", "累计", "最近"]
+      : board === "speech_daily"
+        ? ["名次", "用户", "今日发言", "累计"]
+        : ["名次", "用户", "累计发言"];
+  const table = el("table");
+  const thead = el("thead");
+  const hr = el("tr");
+  heads.forEach((t) => hr.appendChild(el("th", "", t)));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  rows.forEach((row) => {
+    const tr = el("tr");
+    tr.appendChild(el("td", "num", "#" + (row.rank || "—")));
+    const who = el("td");
+    const nm = nameOf(row);
+    who.appendChild(el("div", "name", nm.name));
+    if (nm.uid) who.appendChild(el("div", "uid", nm.uid));
+    tr.appendChild(who);
+    if (board === "daily") {
+      tr.appendChild(el("td", "num", String(row.count || 0)));
+      tr.appendChild(el("td", "num",
+        row.interval_seconds ? row.interval_seconds + "s" : "—"));
+      tr.appendChild(el("td", "num",
+        row.queue_cap === null || row.queue_cap === undefined ? "—" : row.queue_cap));
+      const st = el("td");
+      if (row.banned) st.appendChild(badge("禁生", "bad"));
+      if (row.throttled) st.appendChild(badge("限流", "warn"));
+      if (row.canvas_limited) st.appendChild(badge("1080", "blue"));
+      if (row.degraded) st.appendChild(badge("20 步", "warn"));
+      if (!st.childNodes.length) st.appendChild(badge("正常", "ok"));
+      tr.appendChild(st);
+    } else if (board === "total") {
+      tr.appendChild(el("td", "num", String(row.count || 0)));
+      tr.appendChild(el("td", "num", fmtTime(row.last_success)));
+    } else if (board === "speech_daily") {
+      tr.appendChild(el("td", "num", String(row.count || 0)));
+      tr.appendChild(el("td", "num", String(row.total_count || 0)));
+    } else {
+      tr.appendChild(el("td", "num", String(row.count || 0)));
+    }
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  box.appendChild(table);
+}
+
 function render(data) {
   const g = data.global || {};
   const w = data.window || {};
   const totals = data.totals || {};
   const bans = Array.isArray(data.bans) ? data.bans : [];
-  const rows = Array.isArray(data.ranking) ? data.ranking : [];
+  const dailyRows = Array.isArray(data.ranking) ? data.ranking : [];
+  lastData = data;
+  renderTabs();
 
   $("window").textContent = (w.label || "—") +
     (w.remaining ? " · 距重置 " + fmtDur(w.remaining) : "");
@@ -201,49 +297,11 @@ function render(data) {
     "前 5 名 / 前 3 名"
   ));
 
-  const rankBox = $("rank");
-  rankBox.replaceChildren();
-  if (!rows.length) {
-    rankBox.appendChild(el("div", "empty", "本时段还没有成功生图。"));
-  } else {
-    const table = el("table");
-    const thead = el("thead");
-    const hr = el("tr");
-    ["名次", "用户", "今日", "间隔", "队列", "状态"].forEach((t) => {
-      hr.appendChild(el("th", "", t));
-    });
-    thead.appendChild(hr);
-    table.appendChild(thead);
-    const tbody = el("tbody");
-    rows.forEach((row) => {
-      const tr = el("tr");
-      tr.appendChild(el("td", "num", "#" + (row.rank || "—")));
-      const who = el("td");
-      const nm = nameOf(row);
-      who.appendChild(el("div", "name", nm.name));
-      if (nm.uid) who.appendChild(el("div", "uid", nm.uid));
-      tr.appendChild(who);
-      tr.appendChild(el("td", "num", String(row.count || 0)));
-      tr.appendChild(el("td", "num",
-        row.interval_seconds ? row.interval_seconds + "s" : "—"));
-      tr.appendChild(el("td", "num",
-        row.queue_cap === null || row.queue_cap === undefined ? "—" : row.queue_cap));
-      const st = el("td");
-      if (row.banned) st.appendChild(badge("禁生", "bad"));
-      if (row.throttled) st.appendChild(badge("限流", "warn"));
-      if (row.canvas_limited) st.appendChild(badge("1080", "blue"));
-      if (row.degraded) st.appendChild(badge("20 步", "warn"));
-      if (!st.childNodes.length) st.appendChild(badge("正常", "ok"));
-      tr.appendChild(st);
-      tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    rankBox.appendChild(table);
-  }
+  renderBoard(data);
 
   const watchBox = $("watch");
   watchBox.replaceChildren();
-  const watch = rows.filter((r) => (r.count || 0) > 0).slice(0, 14);
+  const watch = dailyRows.filter((r) => (r.count || 0) > 0).slice(0, 14);
   if (!watch.length) {
     watchBox.appendChild(el("div", "empty", "还没有需要盯的用户。"));
   } else {

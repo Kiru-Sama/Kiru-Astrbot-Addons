@@ -40,6 +40,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -771,6 +772,11 @@ class Main(star.Star):
             "time": 0,
             "umo": "",
         }
+        # 每日 Token 账本：按天一个文件，永久保留
+        self._token_day_cache: dict[str, dict[str, int]] = {}
+        self._token_daily_cache: dict[str, Any] | None = None
+        self._token_daily_cache_ts = 0.0
+        self._token_day_lock = threading.Lock()
         # 「无模型可用」现场（见 _patch_lm_diag）：只留最近 10 次
         self._lm_unavailable: deque[dict[str, Any]] = deque(maxlen=10)
 
@@ -787,6 +793,9 @@ class Main(star.Star):
         # 最近一次真正发出去的请求前缀指纹（umo -> 指纹）。
         # ★ 只读诊断：不参与任何请求构造，只用来回答"缓存断在哪一段"。
         self._prefix_by_umo: dict[str, dict[str, Any]] = {}
+        # 最近一次请求的 umo：contextvar 在个别 provider/线程上下文里会丢，
+        # 用它给前缀指纹兜底，避免缓存诊断整块空白。
+        self._last_umo = ""
         # 群号 -> 群名，来自 SnowLuma 的身份库（惰性加载）
         self._group_names: dict[str, str] = {}
         self._group_names_loaded = False
@@ -942,6 +951,7 @@ class Main(star.Star):
         self._patch_lm_diag()
         self._patch_persona()
         self._patch_kb()
+        self._patch_quote_guard()
         # ★ 把自己登记成"当前活着的实例" —— 三个包装都通过 _ACTIVE 派发，
         #   而不是把 self 捕获进闭包。重载时新实例会覆盖它，
         #   于是数据自然流向新实例（详见模块顶部 _ACTIVE 的说明）。
@@ -998,6 +1008,17 @@ class Main(star.Star):
                 logger.warning(f"[ncd-monitor] 结束 nvidia-smi 失败: {exc}")
         self._sys_task = None
         self._gpu_proc = None
+        srv = getattr(self, "_file_srv", None)
+        if srv is not None:
+            try:
+                await asyncio.to_thread(srv.shutdown)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[ncd-monitor] 关闭图片服务失败: {exc}")
+            try:
+                srv.server_close()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[ncd-monitor] 关闭图片服务 socket 失败: {exc}")
+            self._file_srv = None
         logger.info("[ncd-monitor] 资源采样已停止，nvidia-smi 已结束")
 
     # =================================================================
@@ -1313,7 +1334,15 @@ class Main(star.Star):
                 #   _ncd_monitor_patched=True，子类 getattr 也会读到 True，
                 #   结果所有子类都被跳过（实测踩到的就是这个）。
                 if cls.__dict__.get("_ncd_monitor_patched", False):
-                    return
+                    # 只有【本模块实例】登记过的包装才算数。重载时旧模块可能只还原了一部分，
+                    # 类上留下标记却不在这份 _WRAPS 里；此时必须清标记重包，否则新实例
+                    # 永远跳过 Provider，缓存诊断/实时输出会整块空白。
+                    if any(c is cls and a == "text_chat" for c, a, _, _ in _WRAPS):
+                        return
+                    try:
+                        delattr(cls, "_ncd_monitor_patched")
+                    except AttributeError:
+                        pass
                 if "text_chat" not in cls.__dict__:
                     return
                 original = cls.__dict__["text_chat"]
@@ -1383,7 +1412,15 @@ class Main(star.Star):
                   AstrBot 的流式解析、工具调用累积都会跟着变。
                 """
                 if cls.__dict__.get("_ncd_stream_patched", False):
-                    return
+                    if any(
+                        c is cls and a == "text_chat_stream"
+                        for c, a, _, _ in _WRAPS
+                    ):
+                        return
+                    try:
+                        delattr(cls, "_ncd_stream_patched")
+                    except AttributeError:
+                        pass
                 if "text_chat_stream" not in cls.__dict__:
                     return
                 original = cls.__dict__["text_chat_stream"]
@@ -1774,6 +1811,36 @@ class Main(star.Star):
             return next(iter(self._pending.values()))
         return {}
 
+    @staticmethod
+    def _cache_cause(
+        flags: dict[str, Any],
+        first_diff: int | None,
+        prev_len: int,
+        hit_pct: float | None,
+    ) -> str:
+        """把前缀 flag 翻成面板上的一句人话；只做归因，不参与请求。"""
+        changed = []
+        if flags.get("system"):
+            changed.append("系统字段")
+        if flags.get("head"):
+            changed.append("首条")
+        if flags.get("tools"):
+            changed.append("工具集")
+        if changed:
+            cause = "+".join(changed) + "改写"
+        elif first_diff == 0:
+            cause = "完全一致"
+        elif first_diff == prev_len + 1:
+            cause = "尾部追加"
+        elif first_diff:
+            cause = f"第 {first_diff} 条历史改写"
+        else:
+            cause = "—"
+        # 前缀没变却低命中，多半是服务端缓存被挤掉，不是本地改坏了。
+        if hit_pct is not None and hit_pct < 80 and cause in ("完全一致", "尾部追加"):
+            cause += " · 服务端未命中"
+        return cause
+
     def _prefix_diag(self, kwargs: dict[str, Any]) -> dict[str, Any]:
         """对【真正发出去】的前缀做指纹（只读，不改请求）。
 
@@ -1806,6 +1873,8 @@ class Main(star.Star):
 
         head_text = ""
         head_preview = ""
+        head_role = ""
+        head_chars = 0
         if contexts:
             try:
                 head_text = json.dumps(contexts[0], ensure_ascii=False, sort_keys=True)
@@ -1819,6 +1888,15 @@ class Main(star.Star):
                 )
             except Exception:  # noqa: BLE001
                 head_preview = ""
+            try:
+                head_role = str(
+                    contexts[0].get("role")
+                    if isinstance(contexts[0], dict)
+                    else getattr(contexts[0], "role", "")
+                )
+            except Exception:  # noqa: BLE001
+                head_role = ""
+            head_chars = len(head_preview)
 
         def _h(text: str) -> str:
             return hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()[:10]
@@ -1842,6 +1920,8 @@ class Main(star.Star):
             "system_chars": len(system_prompt),
             "tools_count": len(schema),
             "ctx_count": len(contexts),
+            "head_role": head_role,
+            "head_chars": head_chars,
             "head_preview": " ".join(head_preview.split())[:60],
             "time": time.time(),
         }
@@ -1863,7 +1943,7 @@ class Main(star.Star):
 
         # 前缀指纹：必须在【真正调用 provider 之前】量，才是实际发出去的版本。
         try:
-            umo_now = _CURRENT_UMO.get() or ""
+            umo_now = _CURRENT_UMO.get() or getattr(self, "_last_umo", "")
             if umo_now:
                 self._prefix_by_umo[umo_now] = self._prefix_diag(kwargs)
                 if len(self._prefix_by_umo) > 100:
@@ -2744,6 +2824,99 @@ class Main(star.Star):
 
         text = (result or {}).get("context_text", "")
         return True, (text or None)
+
+    def _patch_quote_guard(self) -> None:
+        """发送前校验引用源：源消息被撤回/取不到时，去掉引用只发正文。
+
+        AstrBot 的 ResultDecorateStage 在插件 on_decorating_result 之后才插
+        Reply，插件钩子拦不住；这里包住 aiocqhttp 的最终 send，在真正发出前
+        做一次检查。只检查“延迟超过 quote_guard_after 秒”的回复，避免每条
+        消息都多打一次 get_msg；0 关闭。
+        """
+        try:
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+                AiocqhttpMessageEvent,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 引用守卫导入失败（跳过）: {exc}")
+            return
+        cls = AiocqhttpMessageEvent
+        if cls.__dict__.get("_ncd_monitor_patched_quote", False):
+            return
+        original = cls.__dict__.get("send")
+        if original is None:
+            logger.warning("[ncd-monitor] 找不到 AiocqhttpMessageEvent.send，引用守卫未启用")
+            return
+
+        async def patched(self_, message):  # noqa: ANN001, ANN202
+            plugin = _ACTIVE
+            if plugin is not None:
+                try:
+                    await plugin._strip_broken_quote(self_, message)
+                except Exception as exc:  # noqa: BLE001
+                    # 守卫失败绝不能把正常发送搞挂。
+                    logger.debug(f"[ncd-monitor] 引用守卫失败（按原样发送）: {exc}")
+            return await original(self_, message)
+
+        cls.send = patched  # type: ignore[method-assign]
+        cls._ncd_monitor_patched_quote = True  # type: ignore[attr-defined]
+        _WRAPS.append(
+            (cls, "send", original, "_ncd_monitor_patched_quote")
+        )
+        logger.info("[ncd-monitor] 已包装 AiocqhttpMessageEvent.send，可剔除失效引用")
+
+    async def _strip_broken_quote(self, event: Any, message: Any) -> None:
+        """延迟回复的触发消息若已撤回，去掉 Reply，正文继续发。"""
+        after = self._conf_float("quote_guard_after", 3.0)
+        if after <= 0:
+            return
+        try:
+            from astrbot.core.message.components import Reply
+        except Exception:  # noqa: BLE001
+            return
+        chain = getattr(message, "chain", None)
+        if not chain:
+            return
+        msg = getattr(event, "message_obj", None)
+        mid = str(getattr(msg, "message_id", "") or "")
+        if not mid:
+            return
+        try:
+            ts = float(getattr(msg, "timestamp", 0) or 0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        if not ts or time.time() - ts < after:
+            return
+        targets = [
+            c
+            for c in chain
+            if isinstance(c, Reply) and str(getattr(c, "id", "")) == mid
+        ]
+        if not targets:
+            return
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return
+        routing: dict[str, Any] = {}
+        raw = getattr(msg, "raw_message", None)
+        if isinstance(raw, dict) and raw.get("self_id"):
+            routing["self_id"] = raw["self_id"]
+        ok = False
+        try:
+            data = await asyncio.wait_for(
+                bot.call_action("get_msg", message_id=int(mid), **routing),
+                timeout=1.2,
+            )
+            # 被撤回的消息通常取不到 sender/time；只有两者都在才保留引用。
+            ok = bool(
+                isinstance(data, dict) and data.get("sender") and data.get("time")
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 引用源校验失败（按失效处理）: {exc}")
+            ok = False
+        if not ok:
+            chain[:] = [c for c in chain if c not in targets]
+            logger.info("[ncd-monitor] 引用源消息已失效，发送时降级为纯文本")
 
     def _patch_kb(self) -> None:
         """包装 astr_main_agent.retrieve_knowledge_base()：按会话类型分流知识库。
@@ -3629,6 +3802,7 @@ class Main(star.Star):
             gid = self._group_id_from_umo(umo) if is_group else ""
             # ★ 记下"当前会话"，让 Provider 的包装知道这次调用属于谁
             _CURRENT_UMO.set(umo)
+            self._last_umo = umo
             # 清掉过期记录：请求发了但响应始终没回来时不能无限堆积
             cutoff = time.time() - _PENDING_TTL
             for stale in [k for k, v in self._pending.items() if v.get("time", 0) < cutoff]:
@@ -3724,6 +3898,12 @@ class Main(star.Star):
                     totals["cached"] += cached
                     totals["output"] += out
                     totals["calls"] += 1
+                    try:
+                        await asyncio.to_thread(
+                            self._token_daily_add, inp, cached, out
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(f"[ncd-monitor] 每日 Token 记账失败: {exc}")
             self.context_series.append(
                 {
                     "time": now,
@@ -3818,10 +3998,23 @@ class Main(star.Star):
                 flags["first_diff"] = first_diff
                 flags["prev_ctx"] = len(prev_h)
                 flags["cur_ctx"] = len(cur_h)
+                flags["head_chars"] = int(prefix.get("head_chars") or 0)
+                flags["prev_head_chars"] = int(pp.get("head_chars") or 0)
                 if prev.get("input_tokens"):
                     flags["prev_hit"] = round(
                         (prev.get("cached_tokens") or 0) / prev["input_tokens"] * 100, 1
                     )
+                hit_pct = None
+                if real_in:
+                    try:
+                        hit_pct = round((real_cached or 0) / real_in * 100, 1)
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        hit_pct = None
+                flags["hit_pct"] = hit_pct
+                # 把「哪一段变了」翻成人话；只做归因，不改变任何请求。
+                flags["cause"] = self._cache_cause(
+                    flags, first_diff, len(prev_h), hit_pct
+                )
             record["prefix_flags"] = flags
             self.llm_calls.append(record)
             # ★ 释放点之一：拿到模型回复（正常路径）。
@@ -4215,6 +4408,166 @@ class Main(star.Star):
         info["reasoning_stripped_chars"] = self.reasoning_stripped_chars
         return info
 
+    def _token_daily_dir(self) -> Path:
+        override = getattr(self, "_token_daily_override", "")
+        if override:
+            return Path(override)
+        return Path(ASTRBOT_ROOT) / "data" / "plugin_data" / "ncd_monitor" / "token_daily"
+
+    @staticmethod
+    def _token_day_key(ts: float | None = None) -> str:
+        return time.strftime("%Y-%m-%d", time.localtime(ts or time.time()))
+
+    def _token_day_path(self, day: str) -> Path:
+        return self._token_daily_dir() / f"{day}.json"
+
+    def _token_day_load(self, day: str) -> dict[str, int]:
+        cache = getattr(self, "_token_day_cache", None)
+        if cache is None:
+            cache = {}
+            self._token_day_cache = cache
+        if day in cache:
+            return cache[day]
+        data = {"input": 0, "cached": 0, "output": 0, "calls": 0}
+        try:
+            raw = json.loads(self._token_day_path(day).read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                for key in data:
+                    data[key] = max(0, int(raw.get(key) or 0))
+        except FileNotFoundError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[ncd-monitor] 读每日 Token 失败 {day}: {exc}")
+        cache[day] = data
+        return data
+
+    def _token_daily_add(self, inp: int, cached: int, out: int) -> None:
+        """把一次真实 usage 计入当天；累计由每日文件求和得到，不另存文件。"""
+        lock = getattr(self, "_token_day_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._token_day_lock = lock
+        with lock:
+            day = self._token_day_key()
+            data = self._token_day_load(day)
+            data["input"] += max(0, int(inp))
+            data["cached"] += max(0, min(int(cached), int(inp)))
+            data["output"] += max(0, int(out))
+            data["calls"] += 1
+            self._token_day_write(day, data)
+            self._token_daily_cache_ts = 0.0
+
+    def _token_day_write(self, day: str, data: dict) -> None:
+        path = self._token_day_path(day)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+        try:
+            tmp.write_text(
+                json.dumps({"date": day, **data}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError as exc:
+            logger.warning(f"[ncd-monitor] 写每日 Token 失败 {day}: {exc}")
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _token_day_stats(self, day: str) -> dict[str, Any]:
+        data = self._token_day_load(day)
+        inp = int(data.get("input") or 0)
+        cached = max(0, min(int(data.get("cached") or 0), inp))
+        out = int(data.get("output") or 0)
+        return {
+            "date": day,
+            "input": inp,
+            "cached": cached,
+            "uncached": max(0, inp - cached),
+            "output": out,
+            "total": inp + out,
+            "calls": int(data.get("calls") or 0),
+            "cache_hit_rate": round(cached / inp * 100, 1) if inp else None,
+        }
+
+    def _token_total_stats(self) -> dict[str, Any]:
+        """真正的累计：所有每日账本求和（永久账本为准，重载不清零）。
+
+        ★ 不另存一个累计文件：单独存会和每日文件不一致（补记/改文件后会漂），
+          按天文件求和才是真值。文件数 = 天数，很小，跟着 payload 一起缓存。
+        """
+        try:
+            days = sorted(
+                p.stem
+                for p in self._token_daily_dir().glob("*.json")
+                if p.stem[:4].isdigit()
+            )
+        except OSError:
+            days = []
+        inp = cached = out = calls = 0
+        for day in days:
+            raw = self._token_day_load(day)
+            v_in = int(raw.get("input") or 0)
+            cached += max(0, min(int(raw.get("cached") or 0), v_in))
+            inp += v_in
+            out += int(raw.get("output") or 0)
+            calls += int(raw.get("calls") or 0)
+        return {
+            "since": days[0] if days else "",
+            "days": len(days),
+            "input": inp,
+            "cached": cached,
+            "uncached": max(0, inp - cached),
+            "output": out,
+            "total": inp + out,
+            "calls": calls,
+            "cache_hit_rate": round(cached / inp * 100, 1) if inp else None,
+        }
+
+    def _token_daily_payload(self) -> dict[str, Any]:
+        """今日 + 最近 30 天；文件按天永久保留，不自动清理。"""
+        now = time.time()
+        cached = getattr(self, "_token_daily_cache", None)
+        if cached is not None and now - getattr(
+            self, "_token_daily_cache_ts", 0.0
+        ) < 10:
+            return cached
+        try:
+            days = sorted(
+                (
+                    p.stem
+                    for p in self._token_daily_dir().glob("*.json")
+                    if p.stem[:4].isdigit()
+                ),
+                reverse=True,
+            )
+        except OSError:
+            days = []
+        recent = [self._token_day_stats(day) for day in days[:30]]
+        today_key = self._token_day_key()
+        today = next(
+            (row for row in recent if row["date"] == today_key),
+            {
+                "date": today_key,
+                "input": 0,
+                "cached": 0,
+                "uncached": 0,
+                "output": 0,
+                "total": 0,
+                "calls": 0,
+                "cache_hit_rate": None,
+            },
+        )
+        payload = {
+            "today": today,
+            "recent": recent,
+            "days": len(days),
+            "total": self._token_total_stats(),
+        }
+        self._token_daily_cache = payload
+        self._token_daily_cache_ts = now
+        return payload
+
     def _usage_stats(self) -> dict[str, Any]:
         """面板「Token 用量」卡的数据（自插件加载累计）。
 
@@ -4305,6 +4658,7 @@ class Main(star.Star):
             "live_context": live_context,
             "stats": self._stats(),
             "usage": self._usage_stats(),
+            "usage_daily": self._token_daily_payload(),
             "context_breakdown": dict(self._ctx_breakdown),
             "llm_runtime": await self._llm_runtime(),
             "sessions": self._session_usage(max_ctx),
@@ -4565,6 +4919,15 @@ class Main(star.Star):
             return json_response({"empty": True, "error": f"{type(exc).__name__}: {exc}"})
 
     def _ensure_file_server(self) -> int:
+        """启动本地图片服务；用锁保证并发首次请求只起一个 server。"""
+        lock = self.__dict__.setdefault("_file_srv_lock", threading.Lock())
+        with lock:
+            srv = getattr(self, "_file_srv", None)
+            if srv is not None:
+                return srv.server_address[1]
+            return self._start_file_server()
+
+    def _start_file_server(self) -> int:
         """启动本地图片服务（127.0.0.1 随机端口，签名校验，只读临时目录里的图）。"""
         srv = getattr(self, "_file_srv", None)
         if srv is not None:
@@ -4811,14 +5174,21 @@ class Main(star.Star):
             return {}
 
     def _gpu_write(self, **fields) -> None:
+        tmp = ""
         try:
             data = self._gpu_read()
             data.update(fields)
             os.makedirs(os.path.dirname(self.GPU_GATE), exist_ok=True)
-            with open(self.GPU_GATE, "w", encoding="utf-8") as fh:
+            tmp = f"{self.GPU_GATE}.{os.getpid()}.{time.time_ns()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False)
+            os.replace(tmp, self.GPU_GATE)
         except Exception:  # noqa: BLE001
-            pass
+            if tmp:
+                try:
+                    Path(tmp).unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def _comfy_active(self) -> bool:
         data = self._gpu_read()

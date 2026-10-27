@@ -1,6 +1,6 @@
 # 链路扩展（astrbot_plugin_ncd_extra）
 
-补 AstrBot 原生没做的四个「对话层」快捷开关。全部只依赖 AstrBot 公开 API，
+补 AstrBot 原生没做的五个「对话层」快捷开关。全部只依赖 AstrBot 公开 API，
 没有本机路径、没有密钥、没有私有服务，拿走就能用。
 
 | 命令 | 作用 |
@@ -9,6 +9,7 @@
 | `/tooldisplay on\|off\|status` | 工具调用气泡开关（`🔨 调用工具: xxx`） |
 | `/token consumption` | 当前对话的 token 用量（累计 + 上下文估算） |
 | `/get time [on\|off]` | 让模型拿到真实时间（每轮注入 `system_reminder`） |
+| `/公告 内容` | 单向广播（别名 `/广播`）；默认只发好友，尾部自动补“此消息不会进入bot上下文” |
 
 ---
 
@@ -132,6 +133,29 @@ WebUI 保存配置（走 `reload_pipeline_scheduler` 重建 pipeline）才行，
 
 ---
 
+## 5. `/公告` —— 单向广播
+
+```
+/公告 今晚 2 点停服维护，预计 30 分钟。
+/广播 第一行
+第二行
+```
+
+* **只发好友**是默认值（`announce_scope=friend`）；要发群必须显式改配置，
+  不存在“手滑把公告发进所有群”的默认路径。
+* 正文末尾自动补一行：`此消息不会进入bot上下文`；正文已经带了就不重复。
+* 命令立即回“开始广播，目标 N 个”，发送在后台跑，完成后私聊发起人结果。
+* 每条间隔至少 1.5 秒，再叠 0.15–0.45 秒随机抖动；单次最多 50 个目标。
+* 相同内容 60 秒内只发一次，防手滑双击。
+* 审计落盘：`data/plugin_data/ncd_announce/history.json`；用 `/公告记录` 看最近 5 次。
+* 权限：AstrBot `admins_id` + `announce_admins` 白名单；其他号发 `/公告` 直接拒绝。
+* **自动跳过 QQ 多端设备号**（`我的电脑/手机/Pad`，含已知 ID 和名称兜底）；发过一次 `result=15` 这类“本来发不了”的账号会记进 `ncd_announce/skip_learned.json`，下轮收集阶段直接过滤。
+* 网络超时/限流不算“发不了”，仍记失败并重试；设备号与黑名单在回执和审计里归到“已跳过”，不拉低成功率分母。
+* 好友与群共用 `announce_max_targets`；切到 `all` 且好友占满名额时，回执会明确提示“本轮没有群被发送”。
+* 公告通过协议端直发，不写会话历史；但别人回复公告的内容仍会进上下文，所以尾部免责声明是必要的。
+
+---
+
 ## 配置项
 
 `data/config/astrbot_plugin_ncd_extra_config.json`（也可在 WebUI 插件页里改）
@@ -147,6 +171,14 @@ WebUI 保存配置（走 `reload_pipeline_scheduler` 重建 pipeline）才行，
 | `compact_chunk_chars` | `12000` | 单次摘要请求最大字符（下限 2000） |
 | `compact_summary_chars` | `1200` | 摘要目标字数 |
 | `time_inject` | `false` | 时间注入开关状态（`/get time` 也会写这里） |
+| `announce_scope` | `friend` | 公告范围：`friend` / `group` / `all`；默认只发好友 |
+| `announce_admins` | 空 | 额外允许发公告的 QQ 号，逗号分隔 |
+| `announce_blacklist` | 空 | 公告排除的 QQ 号/群号 |
+| `announce_skip_names` | 空 | 公告排除的昵称/群名关键词 |
+| `announce_max_targets` | `50` | 单次最多目标数（硬上限 200） |
+| `announce_gap_ms` | `1500` | 每条最小间隔毫秒（硬下限 1500） |
+| `announce_max_chars` | `1500` | 正文最大字数（不含 footer） |
+| `announce_dedup_seconds` | `60` | 相同内容去重窗口（硬下限 10 秒） |
 
 ---
 
@@ -159,6 +191,8 @@ WebUI 保存配置（走 `reload_pipeline_scheduler` 重建 pipeline）才行，
 * **工具气泡的到达顺序**：NapCat 侧流式回复是「整段缓存、最后一次性发」，所以气泡会先到、
   正文后到。要「先正文后气泡」需要改成 AstrBot 原生的 break 分段机制，代价是要改它的配置并重启。
 * **`/tooldisplay`、`/get time` 是全局开关**，不是按群/按人。需要按会话区分的话得再改。
+* **`/公告` 不会让 bot 知道公告内容**；别人围绕公告提问时，模型只能靠上下文猜。需要应急知情时用 `ncd_inject` 手动塞一句，不要改成每轮注入。
+* **`/公告` 的完成通知走私聊**；如果发起人在群里且 bot 不能私聊他，结果只会写审计和日志。
 
 ---
 

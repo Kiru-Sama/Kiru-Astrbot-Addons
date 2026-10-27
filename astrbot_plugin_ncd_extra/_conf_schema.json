@@ -52,5 +52,53 @@
     "default": false,
     "description": "把真实时间注入给模型（/get time 的开关状态）",
     "hint": "开启后每轮在系统提示词末尾追加：\n<system_reminder>当前时间：2026-10-21 12:31:05（周三，Asia/Shanghai）</system_reminder>\n\n★ 时区取 AstrBot 主配置里的 timezone（当前是 Asia/Shanghai），配错会退回本机时区。\n★ 同样不用重启：下一轮立即生效。\n★ AstrBot 自己也有个 datetime_system_prompt 开关，开了的话本插件会自动让路，不会注入两次。\n★ 也能用 /get time on|off 切，切完值会写回这里。"
+  },
+  "announce_scope": {
+    "type": "string",
+    "default": "friend",
+    "description": "/公告 默认发送范围",
+    "hint": "friend = 只发好友（默认，推荐）；group = 只发群；all = 好友+群。\n★ 用户明确要求默认只发好友、不发群。\n★ 群发是高风险外发动作，只有把这里改成 group/all 才会发生。"
+  },
+  "announce_admins": {
+    "type": "string",
+    "default": "",
+    "description": "额外允许使用 /公告 的 QQ 号",
+    "hint": "逗号分隔。AstrBot 主配置里的 admins_id 始终有效；这里只用于给别的管理号开口子。留空即可。"
+  },
+  "announce_blacklist": {
+    "type": "string",
+    "default": "",
+    "description": "公告排除的 QQ 号/群号",
+    "hint": "逗号分隔。好友和群共用这个名单，按 user_id / group_id 精确排除。"
+  },
+  "announce_skip_names": {
+    "type": "string",
+    "default": "",
+    "description": "公告排除的昵称/群名关键词",
+    "hint": "逗号分隔，昵称或群名包含任一关键词就跳过。和 catchup 的 skip_names 口径一致。"
+  },
+  "announce_max_targets": {
+    "type": "int",
+    "default": 50,
+    "description": "单次公告最多发多少个目标",
+    "hint": "默认 50，硬上限 200。超过就截断，并在确认消息里告诉实际目标数。"
+  },
+  "announce_gap_ms": {
+    "type": "int",
+    "default": 1500,
+    "description": "公告每条之间的最小间隔（毫秒）",
+    "hint": "默认 1500ms，代码硬下限也是 1500ms；实际还会加 0.15–0.45 秒随机抖动。别调太低，QQ 对短时间大量相同内容很敏感。"
+  },
+  "announce_max_chars": {
+    "type": "int",
+    "default": 1500,
+    "description": "公告正文最大字数（不含免责声明）",
+    "hint": "默认 1500 字。超了直接拒绝，不截断，避免发出去一半。"
+  },
+  "announce_dedup_seconds": {
+    "type": "int",
+    "default": 60,
+    "description": "相同公告的去重窗口（秒）",
+    "hint": "默认 60 秒。防手滑双击导致全员收到两份；代码下限 10 秒。"
   }
 }

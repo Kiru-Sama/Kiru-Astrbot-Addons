@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -171,10 +172,12 @@ class NcdPatchPlugin(star.Star):
         patch = PATCH_DIR / str(item.get("patch"))
         if not patch.is_file():
             return f"补丁文件不存在：{patch}"
-        ok, out = git_apply(patch, revert=False, check_only=True)
+        ok, out = await asyncio.to_thread(
+            git_apply, patch, revert=False, check_only=True
+        )
         if not ok:
             return f"{item['id']} 预检失败（没有改动任何文件）：{out}"
-        ok, out = git_apply(patch, revert=False)
+        ok, out = await asyncio.to_thread(git_apply, patch, revert=False)
         after = state_of({**item, "sha_before": ""})[0]
         return (
             f"{item['id']} 已应用。" if ok else f"{item['id']} 应用失败：{out}"
@@ -196,8 +199,10 @@ class NcdPatchPlugin(star.Star):
         patch = PATCH_DIR / str(item.get("patch"))
         if not patch.is_file():
             return f"补丁文件不存在：{patch}"
-        ok, out = git_apply(patch, revert=True, check_only=True)
+        ok, out = await asyncio.to_thread(
+            git_apply, patch, revert=True, check_only=True
+        )
         if not ok:
             return f"{item['id']} 预检失败（没有改动任何文件）：{out}"
-        ok, out = git_apply(patch, revert=True)
+        ok, out = await asyncio.to_thread(git_apply, patch, revert=True)
         return f"{item['id']} 已回滚。" if ok else f"{item['id']} 回滚失败：{out}"

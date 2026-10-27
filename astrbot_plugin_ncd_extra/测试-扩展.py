@@ -104,6 +104,12 @@ class FakeEvent:
         self.replies.append(text)
         return text
 
+    def get_sender_id(self):
+        return "10001"
+
+    def is_admin(self):
+        return True
+
     async def send(self, chain):
         self.sent.append(chain)
 

@@ -150,6 +150,8 @@ class NcdComfyPlugin(star.Star):
         self._client_obj: ComfyClient | None = None
         self._client_key: tuple | None = None
         self._revealed: dict[str, float] = {}
+        self._lookup_seen: dict[str, float] = {}
+        self._lookup_warned: dict[str, float] = {}
         self._render_lock = asyncio.Lock()
         # 正在排队等出图的数量（对话不排队，生图才排队）
         self._gen_waiting = 0
@@ -724,6 +726,11 @@ class NcdComfyPlugin(star.Star):
             names = await self._quota_name_map()
             for row in data.get("ranking") or []:
                 row["name"] = names.get(str(row.get("user_id") or ""), "")
+            for rows in (data.get("rankings") or {}).values():
+                for row in rows or []:
+                    row["name"] = names.get(
+                        str(row.get("user_id") or ""), ""
+                    )
             for ban in data.get("bans") or []:
                 ban["name"] = names.get(str(ban.get("user_id") or ""), "")
             return data
@@ -757,6 +764,17 @@ class NcdComfyPlugin(star.Star):
                 lines.append(f"日榜：第 {snap.rank} 名")
             else:
                 lines.append("日榜：未上榜")
+            total_rank = next(
+                (
+                    row["rank"]
+                    for row in eng.ranking_total()
+                    if row.get("user_id") == sender
+                ),
+                None,
+            )
+            lines.append(
+                f"总榜：第 {total_rank} 名" if total_rank else "总榜：未上榜"
+            )
             if snap.banned:
                 lines.append("限流：—（禁生图中）")
             elif snap.throttled:
@@ -798,9 +816,20 @@ class NcdComfyPlugin(star.Star):
             )
             speech_daily, speech_total, speech_rank = eng.speech_stats(sender)
             speech_part = f"第 {speech_rank} 名" if speech_rank else "未上榜"
+            speech_total_rank = next(
+                (
+                    row["rank"]
+                    for row in eng.speech_ranking("total")
+                    if row.get("user_id") == sender
+                ),
+                None,
+            )
+            speech_total_part = (
+                f"第 {speech_total_rank} 名" if speech_total_rank else "未上榜"
+            )
             lines.append(
                 f"发言：今日 {speech_daily} 条（{speech_part}）"
-                f"｜累计 {speech_total} 条"
+                f"｜累计 {speech_total} 条（{speech_total_part}）"
             )
         if not snap.global_enabled:
             lines.append("全局：未启用")
@@ -1281,14 +1310,21 @@ class NcdComfyPlugin(star.Star):
             return {}
 
     def _gpu_write(self, **fields) -> None:
+        tmp = ""
         try:
             data = self._gpu_read()
             data.update(fields)
             os.makedirs(os.path.dirname(self._GPU_GATE), exist_ok=True)
-            with open(self._GPU_GATE, "w", encoding="utf-8") as fh:
+            tmp = f"{self._GPU_GATE}.{os.getpid()}.{time.time_ns()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(data, fh, ensure_ascii=False)
+            os.replace(tmp, self._GPU_GATE)
         except Exception:  # noqa: BLE001
-            pass
+            if tmp:
+                try:
+                    Path(tmp).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
     async def _wait_llm_idle(self, timeout: float = 90.0) -> None:
         """本地模型在推理时别开画（会抢显存）。最近 2 秒有 LLM 请求就等。"""
@@ -2521,6 +2557,26 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 后台提示发送失败: {exc}")
 
+    async def _lookup_notice(self, event: AstrMessageEvent, text: str) -> None:
+        """只读查询工具开工前，先往会话发一句进度（和 toolbox 的搜索提示一致）。
+
+        ★ 这两个工具都是 async 函数直接返回结果，没有 yield；
+          进度提示走 send_message 旁路，不影响工具返回值，也不经过 LLM。
+        """
+        try:
+            enabled = self._conf_bool("comfy_lookup_notify", True)
+        except Exception:  # 配置缺失/异常不能把查询工具拖崩
+            enabled = True
+        if not enabled:
+            return
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if not umo:
+            return
+        try:
+            await self._send_chat(umo, text)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 查询进度提示发送失败（忽略）: {exc}")
+
     @staticmethod
     def _image_data_url(path: Path) -> str:
         """把会话图压到 1024px，供写进历史时控制视觉 token。"""
@@ -2624,6 +2680,59 @@ class NcdComfyPlugin(star.Star):
             return None
         logger.info(f"[comfy] {tool} 被直接调用（未先调 comfy_tools），已返回指正")
         return GATE_ERROR.format(tool=tool)
+
+    def _mark_lookup(self, event: AstrMessageEvent) -> None:
+        """本会话查过角色/标签或法典范本，软门禁放行。"""
+        if not hasattr(self, "_lookup_seen"):
+            self._lookup_seen = {}
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if umo:
+            self._lookup_seen[umo] = time.time()
+
+    def _lookup_gate(self, event: AstrMessageEvent) -> str | None:
+        """第一次出图前没查过标签/法典：只提醒一次，不硬拒。
+
+        复用 comfy_tools 的会话入口；这里只补“查过没有”这一层。
+        用户明确要求直接画时，模型第二次调用即可放行。
+        """
+        if not hasattr(self, "_lookup_seen"):
+            self._lookup_seen = {}
+        if not hasattr(self, "_lookup_warned"):
+            self._lookup_warned = {}
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if not umo or self._is_admin_event(event):
+            return None
+        # 后台 worker 会再次进入 comfy_generate；不能在那里重复提醒。
+        if _ASYNC_RUN.get():
+            return None
+        now = time.time()
+        # 会话状态做 TTL，避免长期占内存
+        old = [
+            key
+            for key, ts in self._lookup_seen.items()
+            if now - ts > 1800
+        ]
+        for key in old:
+            self._lookup_seen.pop(key, None)
+        if self._lookup_seen.get(umo):
+            return None
+        if self._lookup_warned.get(umo):
+            # 已经提醒过一次，第二次放行
+            self._lookup_warned.pop(umo, None)
+            return None
+        self._lookup_warned[umo] = now
+        if len(self._lookup_warned) > 200:
+            keep = sorted(
+                self._lookup_warned.items(), key=lambda kv: kv[1]
+            )[-100:]
+            self._lookup_warned = dict(keep)
+        logger.info(f"[comfy] 首次出图未查标签/法典，已提醒一次 → {umo}")
+        return (
+            "出图前先查一下：角色/标签用 comfy_tag_lookup"
+            "（scope=character/profile/tag），动作/场景/构图用 comfy_prompt_help。\n"
+            "查完再调 comfy_generate；如果你确认不需要查、要直接画，"
+            "就再调一次 comfy_generate。"
+        )
 
     # ------------------------------------------------------------------
     #  提示词法典（本地只读检索）
@@ -2896,6 +3005,9 @@ class NcdComfyPlugin(star.Star):
             enqueue_error = self._quota_enqueue_error(event)
             if enqueue_error:
                 return enqueue_error
+        lookup_gate = self._lookup_gate(event)
+        if lookup_gate:
+            return lookup_gate
         if _ASYNC_RUN.get():
             logger.info("[comfy] 后台参数解析开始")
         else:
@@ -3520,6 +3632,7 @@ class NcdComfyPlugin(star.Star):
                 {"error": "给个关键词，比如：初音未来 / choker / 女仆"},
                 ensure_ascii=False,
             )
+        await self._lookup_notice(event, f"🔎 开始查标签库：{q}")
         try:
             n = max(1, min(12, int(limit or 8)))
             lib = self._promptlib()
@@ -3536,10 +3649,13 @@ class NcdComfyPlugin(star.Star):
                         },
                         ensure_ascii=False,
                     )
+                self._mark_lookup(event)
                 return json.dumps(profile, ensure_ascii=False)
             result = await asyncio.to_thread(
                 lib.query, q, limit=n, codex_limit=min(5, n), scope=scope_low
             )
+            if result.characters or result.tags or result.templates:
+                self._mark_lookup(event)
             return json.dumps(result.to_dict(), ensure_ascii=False)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[comfy] 标签库查询失败: {exc}", exc_info=True)
@@ -3577,6 +3693,7 @@ class NcdComfyPlugin(star.Star):
                 {"error": "给个关键词，比如：银发 红瞳 / school uniform / cinematic lighting"},
                 ensure_ascii=False,
             )
+        await self._lookup_notice(event, f"📚 开始查法典范本：{q}")
         cat = str(category or "").strip().lower() or "auto"
         cats, cat_err = self._codex_categories(cat, event)
         if cat_err:
@@ -3650,6 +3767,7 @@ class NcdComfyPlugin(star.Star):
         if tags:
             suggested = "masterpiece, best quality, " + ", ".join(tags)
 
+        self._mark_lookup(event)
         return json.dumps(
             {
                 "query": q,
@@ -4376,6 +4494,8 @@ class NcdComfyPlugin(star.Star):
         pending = list(self._bg_tasks)
         for task in pending:
             task.cancel()
+        if pending:
+            await asyncio.wait(pending, timeout=5)
         for umo, count in interrupted.items():
             try:
                 if count > 1:

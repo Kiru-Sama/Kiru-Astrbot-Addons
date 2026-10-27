@@ -29,8 +29,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import os
+import random
+import re
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -46,6 +52,10 @@ try:  # AstrBot 以包形式加载
     from . import files as attach_files
 except ImportError:  # 离线单测
     import files as attach_files
+
+# 审计目录按插件位置反推，避免依赖进程 cwd
+PLUGIN_DIR = Path(__file__).resolve().parent
+ANNOUNCE_DIR = PLUGIN_DIR.parents[1] / "plugin_data" / "ncd_announce"
 
 
 # AstrBot 自带的轮次切分 / 渲染；私有路径，拿不到就用下面的本地实现顶上。
@@ -104,6 +114,172 @@ def parse_onoff(text: str) -> bool | None:
     if word in {"off", "0", "false", "no", "关", "关闭", "禁用", "关掉"}:
         return False
     return None
+
+
+ANNOUNCE_FOOTER = "此消息不会进入bot上下文"
+ANNOUNCE_COMMANDS = ("公告", "广播", "announce", "broadcast")
+ANNOUNCE_PREFIXES = ("/", "／", "\\", "＼")
+
+# QQ 自带的「我的电脑 / 我的手机 / 我的Pad」多端设备号。
+# 它们出现在 get_friend_list 里，但发不了消息：
+#   retcode=100, wording='send device message rejected: result=15'
+# 不跳过的话每次广播都稳定失败 3 次（实测 2026-10-26 13:18 那轮就是），
+# 白白多耗 ~5 秒间隔，还让 /公告记录 的成功率永远显示 23/26。
+QQ_DEVICE_IDS = frozenset({"2113929217", "2113929218", "2113929219"})
+QQ_DEVICE_NAME_WORDS = ("我的电脑", "我的手机", "我的Pad", "我的平板", "MyComputer")
+
+
+def is_device_target(uid: str, name: str) -> bool:
+    """是否 QQ 多端设备号（按已知 ID 或设备名判定）。"""
+    if str(uid or "") in QQ_DEVICE_IDS:
+        return True
+    n = str(name or "")
+    return any(w and w in n for w in QQ_DEVICE_NAME_WORDS)
+
+
+def strip_announce_command(text: str) -> str:
+    """从原始消息里剥掉命令头和前缀，保留正文换行。
+
+    不用 GreedyStr 取正文：AstrBot 的 CommandFilter 会把连续空白压成空格，
+    多行公告会被压成一行。这里直接读 event.get_message_str() 的原文。
+    """
+    raw = str(text or "").strip()
+    for prefix in ANNOUNCE_PREFIXES:
+        if raw.startswith(prefix):
+            raw = raw[len(prefix) :].strip()
+            break
+    for name in ANNOUNCE_COMMANDS:
+        if raw.lower().startswith(name.lower()):
+            raw = raw[len(name) :]
+            break
+    return raw.strip()
+
+
+def compose_announcement(content: str) -> str:
+    """公告正文 + 固定免责声明；正文里已经带了就不重复追加。"""
+    body = str(content or "").strip()
+    if not body:
+        return ""
+    if body.endswith(ANNOUNCE_FOOTER):
+        return body
+    return f"{body}\n\n{ANNOUNCE_FOOTER}"
+
+
+def parse_csv_set(raw: Any) -> set[str]:
+    """逗号/空白分隔的配置列表 → 字符串集合。"""
+    return {item for item in re.split(r"[,，、\s]+", str(raw or "")) if item}
+
+
+def select_announce_targets(
+    items: list[dict] | None,
+    kind: str,
+    me: str,
+    blocked: set[str],
+    skip_names: tuple[str, ...],
+    max_targets: int,
+    skipped: dict[str, list[str]] | None = None,
+    learned: set[str] | None = None,
+) -> list[dict]:
+    """从好友/群列表里筛出可发目标，保持接口返回顺序，最多 max_targets 个。
+
+    skipped: 传入则按原因收集被跳过的「名称(QQ号)」，用于回执和审计里说明，
+             避免设备号这类必然失败的目标被当成「失败」吓人。
+    learned: 上次发送时实测发不了的账号（自动学习来的），这轮直接不再试。
+    """
+    targets: list[dict] = []
+    learned = learned or set()
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        if kind == "friend":
+            uid = str(item.get("user_id") or "")
+            name = str(item.get("nickname") or item.get("remark") or uid)
+            if not uid:
+                continue
+            if uid == me:
+                continue
+            if uid in blocked:
+                _note_skip(skipped, "blacklist", name, uid)
+                continue
+            # QQ 多端设备号：在收集阶段就滤掉，分母才准（否则成功率永远差 3）
+            if is_device_target(uid, name):
+                _note_skip(skipped, "device", name, uid)
+                continue
+            if uid in learned:
+                _note_skip(skipped, "learned", name, uid)
+                continue
+        else:
+            uid = str(item.get("group_id") or "")
+            name = str(item.get("group_name") or uid)
+            if not uid:
+                continue
+            if uid in blocked:
+                _note_skip(skipped, "blacklist", name, uid)
+                continue
+            if uid in learned:
+                _note_skip(skipped, "learned", name, uid)
+                continue
+        if any(word and word in name for word in skip_names):
+            _note_skip(skipped, "skip_names", name, uid)
+            continue
+        targets.append({"kind": kind, "id": uid, "name": name})
+        if len(targets) >= max_targets:
+            break
+    return targets
+
+
+def _note_skip(
+    skipped: dict[str, list[str]] | None, reason: str, name: str, uid: str
+) -> None:
+    if skipped is None:
+        return
+    skipped.setdefault(reason, []).append(f"{name}({uid})")
+
+
+SKIP_REASON_CN = {
+    "device": "QQ 设备号（我的电脑/手机/Pad）",
+    "blacklist": "在 announce_blacklist 里",
+    "skip_names": "命中 announce_skip_names",
+    "learned": "上次实测发不了（已自动记住）",
+    "quota": "名额被占满",
+}
+
+# 发不了的账号特征：QQ 设备号、已解除好友、对方拒收等。
+# 命中就归到「跳过」而不是「失败」，并记进 skip_learned 下轮直接滤掉。
+_UNSENDABLE_MARKERS = (
+    "device message rejected",
+    "result=15",
+    "not friend",
+    "不是好友",
+    "好友关系",
+    "receiver rejected",
+)
+
+
+def _is_unsendable_error(detail: str) -> bool:
+    """这条发送失败是否属于「这个账号本来就发不了」，而非临时网络问题。"""
+    low = str(detail or "").lower()
+    return any(m.lower() in low for m in _UNSENDABLE_MARKERS)
+
+
+def _skipped_summary(skipped: dict[str, list[str]] | None) -> str:
+    """把跳过原因拼成一段人话，附在广播结果后面。"""
+    if not skipped:
+        return ""
+    parts = []
+    for reason, items in skipped.items():
+        if not items:
+            continue
+        label = SKIP_REASON_CN.get(reason, reason)
+        # 设备号/黑名单逐个列名字太长，只报数量和前两个
+        if reason == "quota":
+            parts.append(f"\n⚠ {items[0]}")
+        else:
+            sample = "、".join(items[:2])
+            more = f" 等 {len(items)} 个" if len(items) > 2 else ""
+            parts.append(f"\n已跳过 {label}：{sample}{more}")
+    return "".join(parts)
+
 
 
 def estimate_tokens(text: str) -> int:
@@ -239,6 +415,8 @@ def weekday_cn(moment: datetime) -> str:
 # 插件本体
 # --------------------------------------------------------------------------- #
 class NcdExtraPlugin(star.Star):
+    WAKE_SYMBOLS = ("／", "\\", "＼")
+
     def __init__(
         self, context: star.Context, config: dict[str, Any] | None = None
     ) -> None:
@@ -246,6 +424,50 @@ class NcdExtraPlugin(star.Star):
         self.context = context
         # Star.__init__ 自己不保存 config，得我们存
         self._conf: dict[str, Any] = config or {}
+        self._announce_task: asyncio.Task | None = None
+        self._announce_recent: dict[str, float] = {}
+        self._announce_lock = asyncio.Lock()
+        self._ensure_wake_symbols()
+
+    async def terminate(self) -> None:
+        """卸载/重载时取消还在广播的公告，避免旧实例继续发消息。"""
+        task = self._announce_task
+        self._announce_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[extra] 公告任务收尾异常: {exc}")
+
+    def _ensure_wake_symbols(self) -> None:
+        """把全角斜杠/反斜杠也纳入唤醒前缀，覆盖所有插件与内置命令。
+
+        AstrBot 只把配置里的 ASCII '/' 当命令前缀；中文输入法很容易打出
+        '／'，Windows 习惯又可能打 '\\'。只给某个命令加 alias 覆盖不全，
+        所以在这里补进 wake_prefix，waking_check 会先剥掉再交给命令匹配。
+        """
+        try:
+            cfg = self.context.get_config()
+            prefixes = list(cfg.get("wake_prefix") or [])
+            changed = False
+            for symbol in self.WAKE_SYMBOLS:
+                if symbol not in prefixes:
+                    prefixes.append(symbol)
+                    changed = True
+            if not changed:
+                return
+            cfg["wake_prefix"] = prefixes
+            if hasattr(cfg, "save_config"):
+                cfg.save_config()
+            logger.info(
+                "[extra] 已补充唤醒前缀："
+                + " ".join(repr(x) for x in self.WAKE_SYMBOLS)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 补充唤醒前缀失败（不影响其它功能）: {exc}")
 
     # ---------------------------- 配置读写 ---------------------------- #
     def _cfg(self, key: str, default: Any = None) -> Any:
@@ -261,6 +483,24 @@ class NcdExtraPlugin(star.Star):
         except Exception:  # noqa: BLE001
             return default
 
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """先看 AstrBot 角色，再按 admins_id 直接兜底。
+
+        实测在某些私聊里 event.role 没被标成 admin，@filter.permission_type
+        会把命令静默丢掉、落到模型；这里改成命令内判断，至少能明确回一句。
+        """
+        try:
+            if event.is_admin():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            sender = str(event.get_sender_id())
+            admins = self.context.get_config().get("admins_id") or []
+            return sender in {str(x) for x in admins}
+        except Exception:  # noqa: BLE001
+            return False
+
     def _save_cfg(self, **values: Any) -> None:
         """写内存 + 落盘。AstrBot 的 AstrBotConfig 有 save_config；普通 dict 就只写内存。"""
         for key, value in values.items():
@@ -274,6 +514,258 @@ class NcdExtraPlugin(star.Star):
                 save(dict(values))
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[extra] 配置落盘失败：{exc}")
+
+    # ---------------------------- 公告 ---------------------------- #
+    def _announce_admin(self, event: AstrMessageEvent) -> bool:
+        if self._is_admin(event):
+            return True
+        extra = parse_csv_set(self._cfg("announce_admins", ""))
+        try:
+            return str(event.get_sender_id()) in extra
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _announce_scope(self) -> str:
+        raw = str(self._cfg("announce_scope", "friend") or "friend").strip().lower()
+        if raw in {"group", "群", "群聊", "groups"}:
+            return "group"
+        if raw in {"all", "全部", "所有", "both"}:
+            return "all"
+        return "friend"
+
+    async def _resolve_bot(self, event: AstrMessageEvent):
+        bot = getattr(event, "bot", None)
+        if bot is not None:
+            return bot
+        platform = self.context.get_platform("aiocqhttp")
+        if platform is None:
+            raise RuntimeError("没找到 aiocqhttp 平台")
+        return platform.get_client()
+
+    async def _announce_self_id(self, bot) -> str:
+        try:
+            info = await bot.call_action("get_login_info")
+            uid = str((info or {}).get("user_id") or "")
+            if uid:
+                return uid
+        except Exception:  # noqa: BLE001
+            pass
+        return str(getattr(bot, "self_id", "") or "")
+
+    async def _collect_announce_targets(
+        self, event: AstrMessageEvent
+    ) -> tuple[Any, list[dict], str, dict[str, list[str]]]:
+        bot = await self._resolve_bot(event)
+        me = await self._announce_self_id(bot)
+        scope = self._announce_scope()
+        blocked = parse_csv_set(self._cfg("announce_blacklist", ""))
+        skip_names = tuple(parse_csv_set(self._cfg("announce_skip_names", "")))
+        learned = self._load_skip_learned()
+        max_targets = max(1, min(200, self._cfg_int("announce_max_targets", 50)))
+        targets: list[dict] = []
+        skipped: dict[str, list[str]] = {}
+
+        if scope in {"friend", "all"}:
+            friends = await bot.call_action("get_friend_list")
+            if not isinstance(friends, list):
+                raise RuntimeError("好友列表格式异常")
+            targets.extend(
+                select_announce_targets(
+                    friends,
+                    "friend",
+                    me,
+                    blocked,
+                    skip_names,
+                    max_targets,
+                    skipped,
+                    learned,
+                )
+            )
+        # ★ 好友与群共用 max_targets（用户明确要求保持现状，不拆配额）：
+        #   好友超过 max_targets 时群会一个都发不到，这里如实记进 skipped 提示，
+        #   不静默 —— 否则切到 all 后会以为发到群了。
+        if scope in {"group", "all"}:
+            left = max_targets - len(targets)
+            if left > 0:
+                groups = await bot.call_action("get_group_list")
+                if not isinstance(groups, list):
+                    raise RuntimeError("群列表格式异常")
+                targets.extend(
+                    select_announce_targets(
+                        groups,
+                        "group",
+                        me,
+                        blocked,
+                        skip_names,
+                        left,
+                        skipped,
+                        learned,
+                    )
+                )
+            elif scope == "all":
+                skipped.setdefault("quota", []).append(
+                    f"好友已占满 {max_targets} 个名额，本轮没有群被发送"
+                    "（好友与群共用 announce_max_targets）"
+                )
+        label = {"friend": "好友", "group": "群", "all": "好友+群"}[scope]
+        return bot, targets[:max_targets], label, skipped
+
+    async def _send_announce_one(self, bot, target: dict, text: str) -> None:
+        if target.get("kind") == "group":
+            await bot.call_action(
+                "send_group_msg", group_id=int(target["id"]), message=text
+            )
+        else:
+            await bot.call_action(
+                "send_private_msg", user_id=int(target["id"]), message=text
+            )
+
+    def _announce_history_path(self) -> Path:
+        return ANNOUNCE_DIR / "history.json"
+
+    def _load_announce_history(self) -> list[dict]:
+        try:
+            path = self._announce_history_path()
+            if not path.is_file():
+                return []
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, list) else []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 读公告审计失败: {exc}")
+            return []
+
+    def _append_announce_history(self, record: dict) -> None:
+        try:
+            path = self._announce_history_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            items = self._load_announce_history()
+            items.append(record)
+            items = items[-100:]
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 写公告审计失败: {exc}")
+
+    # ---- 发不了的账号自学习：失败一次后记住，下轮收集阶段就滤掉 ----
+    def _skip_learned_path(self) -> Path:
+        return ANNOUNCE_DIR / "skip_learned.json"
+
+    def _load_skip_learned(self) -> set[str]:
+        try:
+            path = self._skip_learned_path()
+            if not path.is_file():
+                return set()
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return {str(x) for x in data if str(x).isdigit()}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 读自学习跳过名单失败: {exc}")
+        return set()
+
+    def _remember_skip_learned(self, uid: str) -> None:
+        """把发不了的账号记下来。只存纯数字 QQ/群号，上限 200 条防爆。"""
+        uid = str(uid or "").strip()
+        if not uid.isdigit():
+            return
+        try:
+            known = self._load_skip_learned()
+            if uid in known:
+                return
+            known.add(uid)
+            if len(known) > 200:
+                known = set(sorted(known)[-200:])
+            path = self._skip_learned_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(sorted(known), ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 写自学习跳过名单失败: {exc}")
+
+    async def _run_announce(
+        self,
+        bot,
+        sender: str,
+        text: str,
+        targets: list[dict],
+        scope_label: str,
+        skipped: dict[str, list[str]] | None = None,
+    ) -> None:
+        started = time.time()
+        success = 0
+        errors: list[str] = []
+        devices: list[str] = []
+        gap = max(1500, self._cfg_int("announce_gap_ms", 1500)) / 1000.0
+        try:
+            for idx, target in enumerate(targets):
+                try:
+                    await self._send_announce_one(bot, target, text)
+                    success += 1
+                except Exception as exc:  # noqa: BLE001
+                    detail = str(exc)
+                    # 设备号 / 其他发不了的账号：归到「跳过」而不是「失败」，
+                    # 并记进 skip_learned，下轮在收集阶段就滤掉（自愈，不再重复失败）
+                    if _is_unsendable_error(detail):
+                        devices.append(
+                            f"{target.get('name')}({target.get('id')})"
+                        )
+                        self._remember_skip_learned(str(target.get("id") or ""))
+                        logger.info(
+                            "[extra] 公告跳过发不了的账号 "
+                            f"{target.get('kind')}:{target.get('id')}（已记住，下轮不再试）"
+                        )
+                    else:
+                        errors.append(
+                            f"{target.get('kind')}:{target.get('id')} "
+                            f"{type(exc).__name__}: {detail[:200]}"
+                        )
+                        logger.warning(
+                            f"[extra] 公告发送失败 {target.get('kind')}:{target.get('id')}: {exc}"
+                        )
+                if idx < len(targets) - 1:
+                    await asyncio.sleep(gap + random.uniform(0.15, 0.45))
+        finally:
+            skipped = dict(skipped or {})
+            if devices:
+                skipped.setdefault("device", []).extend(devices)
+            failed = len(targets) - success - len(devices)
+            record = {
+                "time": int(started),
+                "sender": sender,
+                "scope": scope_label,
+                "content": text,
+                "targets": targets,
+                "success": success,
+                "failed": max(0, failed),
+                "skipped": skipped,
+                "errors": errors[:20],
+                "elapsed_sec": round(time.time() - started, 1),
+            }
+            self._append_announce_history(record)
+            summary = (
+                f"公告广播完成：成功 {success} / 失败 {max(0, failed)} / "
+                f"目标 {len(targets)}（{scope_label}）"
+            )
+            summary += _skipped_summary(skipped)
+            if errors:
+                summary += "\n首批错误：\n" + "\n".join(errors[:3])
+                summary += (
+                    "\n（发送失败多半是对端屏蔽了 bot 或好友关系已解除；"
+                    "确认无误后可把该号加进 announce_blacklist 不再重试）"
+                )
+            try:
+                await bot.call_action(
+                    "send_private_msg", user_id=int(sender), message=summary
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[extra] 公告结果私聊发送失败: {exc}")
+            self._announce_task = None
 
     # ---------------------------- 时区 ---------------------------- #
     def _tz_name(self, umo: str | None = None) -> str:
@@ -501,12 +993,158 @@ class NcdExtraPlugin(star.Star):
             return None
 
     # ====================================================================== #
+    # /公告 —— 单向广播（默认只发好友，不进 bot 上下文）
+    # ====================================================================== #
+    @filter.command(
+        "公告",
+        alias={"广播", "broadcast", "announce"},
+    )
+    async def announce(self, event: AstrMessageEvent, args: GreedyStr = ""):
+        """单向公告：/公告 内容；默认只发好友，发完私聊结果。"""
+        if not self._announce_admin(event):
+            yield event.plain_result(
+                "这个指令只有管理员能用。\n"
+                "如果你是管理员：把你的 QQ 号加进 AstrBot 主配置的 admins_id，"
+                "或填到插件配置 announce_admins 里。"
+            )
+            return
+
+        raw = event.get_message_str()
+        content = strip_announce_command(raw)
+        if not content:
+            content = str(args or "").strip()
+        body = compose_announcement(content)
+        if not body:
+            yield event.plain_result(
+                "用法：/公告 内容\n正文末尾会自动补一行：此消息不会进入bot上下文"
+            )
+            return
+
+        max_chars = max(100, self._cfg_int("announce_max_chars", 1500))
+        if len(body) > max_chars + len(ANNOUNCE_FOOTER) + 2:
+            yield event.plain_result(
+                f"公告太长了：正文最多 {max_chars} 字，当前 {len(content)} 字。"
+                f"\n请缩短正文，或调大配置 announce_max_chars。"
+            )
+            return
+
+        sender = str(event.get_sender_id())
+        digest = hashlib.sha1(body.encode("utf-8")).hexdigest()
+        now = time.time()
+        cooldown = max(10, self._cfg_int("announce_dedup_seconds", 60))
+        ack = ""
+        error = ""
+        async with self._announce_lock:
+            if self._announce_task is not None and not self._announce_task.done():
+                error = "上一轮公告还在发，等它结束。"
+            else:
+                last = self._announce_recent.get(digest)
+                if last and now - last < cooldown:
+                    error = (
+                        f"这条公告 {cooldown} 秒内已经发过，先不重复。"
+                        f"\n改一个字再发，或调小 announce_dedup_seconds。"
+                    )
+                else:
+                    try:
+                        bot, targets, scope_label, skipped = (
+                            await self._collect_announce_targets(event)
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        error = (
+                            f"公告没有发出：{type(exc).__name__}: {exc}"
+                            "\n常见原因：QQ 协议端（NapCat）没连上，"
+                            "或好友/群列表拉不到。"
+                        )
+                    else:
+                        if not targets:
+                            scope = self._announce_scope()
+                            detail = _skipped_summary(skipped)
+                            error = (
+                                f"公告没有发出：scope={scope}，"
+                                "没有可发送的目标。"
+                                + (detail or "")
+                                + "\n检查 announce_blacklist / announce_skip_names "
+                                "是否排得太狠，或改 announce_scope。"
+                            )
+                        else:
+                            self._announce_recent[digest] = now
+                            if len(self._announce_recent) > 200:
+                                self._announce_recent = dict(
+                                    sorted(
+                                        self._announce_recent.items(),
+                                        key=lambda item: item[1],
+                                    )[-100:]
+                                )
+                            self._announce_task = asyncio.create_task(
+                                self._run_announce(
+                                    bot,
+                                    sender,
+                                    body,
+                                    targets,
+                                    scope_label,
+                                    skipped,
+                                )
+                            )
+                            skip_line = _skipped_summary(skipped)
+                            ack = (
+                                f"公告开始广播：{scope_label} "
+                                f"{len(targets)} 个目标，"
+                                "发送完成后会私聊你结果。"
+                                + skip_line
+                            )
+
+        if error:
+            yield event.plain_result(error)
+            return
+        yield event.plain_result(ack)
+
+    @filter.command(
+        "公告记录",
+        alias={"广播记录", "broadcast_log", "announce_log"},
+    )
+    async def announce_log(self, event: AstrMessageEvent):
+        """查看最近几次公告审计。"""
+        if not self._announce_admin(event):
+            yield event.plain_result(
+                "这个指令只有管理员能用。\n"
+                "如果你是管理员：把你的 QQ 号加进 AstrBot 主配置的 admins_id，"
+                "或填到插件配置 announce_admins 里。"
+            )
+            return
+        items = self._load_announce_history()
+        if not items:
+            yield event.plain_result("还没有公告记录。")
+            return
+        lines = ["最近公告："]
+        for item in items[-5:][::-1]:
+            stamp = time.strftime(
+                "%m-%d %H:%M", time.localtime(int(item.get("time") or 0))
+            )
+            text = " ".join(str(item.get("content") or "").split())
+            if len(text) > 50:
+                text = text[:50].rstrip() + "…"
+            # 分母只算真正尝试发送的目标：设备号在收集阶段就被滤掉了，
+            # 不再让它们把成功率拉低（实测曾长期显示 23/26）。
+            attempted = len(item.get("targets") or [])
+            skipped_n = sum(
+                len(v) for v in (item.get("skipped") or {}).values() if isinstance(v, list)
+            )
+            tail = f" · 跳过{skipped_n}" if skipped_n else ""
+            lines.append(
+                f"· {stamp} · {item.get('scope', '?')} "
+                f"{item.get('success', 0)}/{attempted}{tail} · {text}"
+            )
+        yield event.plain_result("\n".join(lines))
+
+    # ====================================================================== #
     # /tooldisplay —— 工具调用气泡开关
     # ====================================================================== #
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("tooldisplay")
     async def tooldisplay(self, event: AstrMessageEvent, args: GreedyStr):
         """开关工具调用气泡：/tooldisplay on|off|status"""
+        if not self._is_admin(event):
+            yield event.plain_result("这个指令只有管理员能用。")
+            return
         word = str(args or "").strip()
         enabled = as_bool(self._cfg("tooldisplay", False), False)
         if not word or word.lower() in {"status", "状态"}:
