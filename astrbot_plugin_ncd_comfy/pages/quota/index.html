@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>绘图额度</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root {
+    --bg:#f6f7f9; --card:#fff; --border:#e5e8ee; --text:#1f2329;
+    --muted:#8a919b; --accent:#3b82f6; --ok:#16a34a; --bad:#dc2626;
+    --warn:#d97706; --track:#f1f3f6; --soft:#eef2f8;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif; padding:16px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  h1 { font-size:17px; margin:0; }
+  h2 { font-size:12px; color:var(--muted); margin:0 0 10px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.04em; }
+  .sub { color:var(--muted); font-size:12px; }
+  .spacer { flex:1; }
+  button { font:inherit; border:1px solid var(--border); border-radius:8px;
+    padding:7px 12px; background:var(--card); color:var(--text); cursor:pointer; }
+  button:hover { background:var(--track); }
+  .cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:12px; margin-bottom:12px; }
+  .card { background:var(--card); border:1px solid var(--border);
+    border-radius:12px; padding:12px; }
+  .kpi .num { font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .kpi .label { color:var(--muted); font-size:12px; }
+  .kpi .hint { color:var(--muted); font-size:11px; margin-top:2px; }
+  .bar { height:7px; background:var(--track); border-radius:999px; overflow:hidden; margin-top:8px; }
+  .bar > i { display:block; height:100%; background:var(--accent); border-radius:999px; }
+  .bar.hot > i { background:var(--warn); }
+  .bar.over > i { background:var(--bad); }
+  .grid { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(0,1fr); gap:12px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--border);
+    font-size:13px; vertical-align:middle; }
+  th { color:var(--muted); font-size:11px; font-weight:600; }
+  tr:last-child td { border-bottom:none; }
+  .num { font-variant-numeric:tabular-nums; }
+  .name { font-weight:600; }
+  .uid { color:var(--muted); font-size:11px; }
+  .badge { display:inline-block; font-size:11px; padding:1px 7px; border-radius:999px;
+    background:var(--track); color:var(--muted); margin-right:4px; white-space:nowrap; }
+  .badge.bad { background:#fdecec; color:var(--bad); }
+  .badge.warn { background:#fff7e6; color:var(--warn); }
+  .badge.ok { background:#eaf7ee; color:var(--ok); }
+  .badge.blue { background:#eaf2ff; color:#1d4ed8; }
+  .empty { color:var(--muted); text-align:center; padding:22px 8px; }
+  .watch-row { display:flex; align-items:center; gap:8px; padding:6px 0;
+    border-bottom:1px solid var(--border); }
+  .watch-row:last-child { border-bottom:none; }
+  .watch-main { min-width:0; flex:1; }
+  .watch-top { display:flex; align-items:baseline; gap:8px; }
+  .watch-top .n { font-weight:600; font-size:13px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .watch-top .c { margin-left:auto; color:var(--muted); font-size:11px;
+    font-variant-numeric:tabular-nums; }
+  .mini { height:5px; background:var(--track); border-radius:999px;
+    overflow:hidden; margin-top:3px; }
+  .mini > i { display:block; height:100%; background:var(--accent); }
+  .mini > i.warn { background:var(--warn); }
+  .mini > i.bad { background:var(--bad); }
+  .status { margin-top:10px; font-size:12px; color:var(--muted); min-height:18px; }
+  .status.err { color:var(--bad); }
+  .status.ok { color:var(--ok); }
+  .notice { background:#fff7e6; border:1px solid #f5d9a8; color:#8a5a00;
+    border-radius:10px; padding:9px 12px; font-size:12px; margin-bottom:12px; }
+  .notice b { font-weight:700; }
+  @media (max-width:860px) {
+    .cards { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .grid { grid-template-columns:1fr; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>绘图额度</h1>
+  <span class="sub" id="window">加载中…</span>
+  <span class="spacer"></span>
+  <button id="refresh" type="button">刷新</button>
+</header>
+
+<div class="notice" id="notice">
+  <b>统计阶段：</b>队列上限、间隔、画幅尚未拦截；50 张降质、70 张禁生图已拦截。
+</div>
+
+<div class="cards" id="cards"></div>
+
+<div class="grid">
+  <section class="card">
+    <h2>单日榜 <span class="sub">前 5 限流 · 前 3 画幅</span></h2>
+    <div id="rank"><div class="empty">加载中…</div></div>
+  </section>
+  <section class="card">
+    <h2>50 / 70 进度</h2>
+    <div id="watch"><div class="empty">加载中…</div></div>
+  </section>
+</div>
+
+<section class="card" style="margin-top:12px">
+  <h2>禁生图</h2>
+  <div id="bans"><div class="empty">加载中…</div></div>
+</section>
+
+<div class="status" id="status"></div>
+
+<script>
+const P = window.AstrBotPluginPage;
+const $ = (id) => document.getElementById(id);
+let timer = null;
+
+function setStatus(text, cls) {
+  const el = $("status");
+  el.textContent = text || "";
+  el.className = "status" + (cls ? " " + cls : "");
+}
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+function fmtTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(Number(ts) * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " +
+    p(d.getHours()) + ":" + p(d.getMinutes());
+}
+function fmtDur(sec) {
+  sec = Math.max(0, Number(sec) || 0);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h && m) return h + " 小时 " + m + " 分";
+  if (h) return h + " 小时";
+  if (m) return m + " 分钟";
+  return Math.floor(sec) + " 秒";
+}
+function nameOf(row) {
+  const name = (row.name || "").trim();
+  const uid = String(row.user_id || "");
+  return { name: name || uid || "未知", uid: uid && name ? uid : "" };
+}
+function kpi(label, num, hint, percent, tone) {
+  const card = el("div", "card kpi");
+  card.appendChild(el("div", "label", label));
+  card.appendChild(el("div", "num", num));
+  if (hint) card.appendChild(el("div", "hint", hint));
+  if (percent !== null && percent !== undefined) {
+    const bar = el("div", "bar" + (tone ? " " + tone : ""));
+    const fill = el("i");
+    fill.style.width = Math.max(0, Math.min(100, Number(percent) || 0)) + "%";
+    bar.appendChild(fill);
+    card.appendChild(bar);
+  }
+  return card;
+}
+function badge(text, cls) {
+  return el("span", "badge" + (cls ? " " + cls : ""), text);
+}
+
+function render(data) {
+  const g = data.global || {};
+  const w = data.window || {};
+  const totals = data.totals || {};
+  const bans = Array.isArray(data.bans) ? data.bans : [];
+  const rows = Array.isArray(data.ranking) ? data.ranking : [];
+
+  $("window").textContent = (w.label || "—") +
+    (w.remaining ? " · 距重置 " + fmtDur(w.remaining) : "");
+
+  const notice = $("notice");
+  if (notice) notice.style.display = data.enforce === false ? "" : "none";
+
+  const cards = $("cards");
+  cards.replaceChildren();
+  cards.appendChild(kpi(
+    "全局成功生图",
+    (g.count || 0) + " / " + (g.limit || 30),
+    g.enabled === false ? "全局 30 已关闭" :
+      (g.triggered ? "已触发前 5 限流" : "未触发限流池"),
+    g.enabled === false ? null : (g.percent || 0),
+    g.triggered ? "over" : ""
+  ));
+  cards.appendChild(kpi(
+    "本时段参与用户", totals.users || 0,
+    "累计成功 " + (totals.images || 0) + " 张"
+  ));
+  cards.appendChild(kpi(
+    "禁生图", bans.length,
+    bans.length ? "到期自动恢复" : "暂无"
+  ));
+  cards.appendChild(kpi(
+    "限流池 / 画幅池",
+    ((data.pools && data.pools.throttle) || []).length + " / " +
+      ((data.pools && data.pools.canvas) || []).length,
+    "前 5 名 / 前 3 名"
+  ));
+
+  const rankBox = $("rank");
+  rankBox.replaceChildren();
+  if (!rows.length) {
+    rankBox.appendChild(el("div", "empty", "本时段还没有成功生图。"));
+  } else {
+    const table = el("table");
+    const thead = el("thead");
+    const hr = el("tr");
+    ["名次", "用户", "今日", "间隔", "队列", "状态"].forEach((t) => {
+      hr.appendChild(el("th", "", t));
+    });
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    rows.forEach((row) => {
+      const tr = el("tr");
+      tr.appendChild(el("td", "num", "#" + (row.rank || "—")));
+      const who = el("td");
+      const nm = nameOf(row);
+      who.appendChild(el("div", "name", nm.name));
+      if (nm.uid) who.appendChild(el("div", "uid", nm.uid));
+      tr.appendChild(who);
+      tr.appendChild(el("td", "num", String(row.count || 0)));
+      tr.appendChild(el("td", "num",
+        row.interval_seconds ? row.interval_seconds + "s" : "—"));
+      tr.appendChild(el("td", "num",
+        row.queue_cap === null || row.queue_cap === undefined ? "—" : row.queue_cap));
+      const st = el("td");
+      if (row.banned) st.appendChild(badge("禁生", "bad"));
+      if (row.throttled) st.appendChild(badge("限流", "warn"));
+      if (row.canvas_limited) st.appendChild(badge("1080", "blue"));
+      if (row.degraded) st.appendChild(badge("20 步", "warn"));
+      if (!st.childNodes.length) st.appendChild(badge("正常", "ok"));
+      tr.appendChild(st);
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    rankBox.appendChild(table);
+  }
+
+  const watchBox = $("watch");
+  watchBox.replaceChildren();
+  const watch = rows.filter((r) => (r.count || 0) > 0).slice(0, 14);
+  if (!watch.length) {
+    watchBox.appendChild(el("div", "empty", "还没有需要盯的用户。"));
+  } else {
+    watch.forEach((row) => {
+      const wrap = el("div", "watch-row");
+      const main = el("div", "watch-main");
+      const top = el("div", "watch-top");
+      const nm = nameOf(row);
+      top.appendChild(el("span", "n", nm.name));
+      top.appendChild(el("span", "c",
+        (row.count || 0) + "/50 · " + (row.count || 0) + "/70"));
+      main.appendChild(top);
+      const bar = el("div", "mini");
+      const fill = el("i");
+      fill.style.width = Math.max(0, Math.min(100,
+        (Number(row.count) || 0) / 70 * 100)) + "%";
+      if ((row.count || 0) >= 70) fill.className = "bad";
+      else if ((row.count || 0) >= 50) fill.className = "warn";
+      bar.appendChild(fill);
+      main.appendChild(bar);
+      wrap.appendChild(main);
+      watchBox.appendChild(wrap);
+    });
+  }
+
+  const banBox = $("bans");
+  banBox.replaceChildren();
+  if (!bans.length) {
+    banBox.appendChild(el("div", "empty", "当前没有禁生图用户。"));
+  } else {
+    const table = el("table");
+    const thead = el("thead");
+    const hr = el("tr");
+    ["用户", "截止", "剩余"].forEach((t) => hr.appendChild(el("th", "", t)));
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    bans.forEach((ban) => {
+      const tr = el("tr");
+      const who = el("td");
+      const nm = nameOf(ban);
+      who.appendChild(el("div", "name", nm.name));
+      if (nm.uid) who.appendChild(el("div", "uid", nm.uid));
+      tr.appendChild(who);
+      tr.appendChild(el("td", "num", fmtTime(ban.until)));
+      tr.appendChild(el("td", "num", fmtDur(ban.remaining)));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    banBox.appendChild(table);
+  }
+}
+
+async function load() {
+  try {
+    const data = await P.apiGet("/ncd-comfy/quota");
+    if (data && data.error) throw new Error(data.error);
+    render(data || {});
+    setStatus("已刷新 " + new Date().toLocaleTimeString(), "ok");
+  } catch (err) {
+    setStatus("拉取失败：" + (err && err.message ? err.message : err), "err");
+  }
+}
+
+$("refresh").addEventListener("click", load);
+load();
+timer = setInterval(load, 5000);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && timer) { clearInterval(timer); timer = null; }
+  else if (!document.hidden && !timer) { load(); timer = setInterval(load, 5000); }
+});
+</script>
+</body>
+</html>

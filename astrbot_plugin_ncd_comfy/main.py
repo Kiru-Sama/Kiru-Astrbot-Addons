@@ -51,11 +51,14 @@ except ImportError:  # 离线单测
 from astrbot.core.message.message_event_result import MessageChain
 
 try:  # AstrBot 以包的形式加载插件
-    from . import model_paths, presets, sizing, tts
+    from . import model_paths, presets, promptlib, quota, quota_store, sizing, tts
     from .comfy_backend import ComfyClient, ComfyError
 except ImportError:  # 离线单测
     import model_paths
     import presets
+    import promptlib
+    import quota
+    import quota_store
     import sizing
     import tts
     from comfy_backend import ComfyClient, ComfyError
@@ -74,6 +77,17 @@ RELOAD_NOTICE = (
     / "ncd_comfy"
     / "reload_notice.json"
 )
+# 绘图额度状态：日榜 / 累计 / 禁生图。面板和 /排名 都读它。
+QUOTA_STATE = (
+    Path(PLUGIN_DIR).parents[2]
+    / "data"
+    / "plugin_data"
+    / "ncd_comfy"
+    / "quota"
+    / "state.json"
+)
+# P2/P3 已接：队列上限、间隔、画幅、降质、禁生图。
+QUOTA_ENFORCE = True
 
 # 出错时给模型的保底建议：别让它继续瞎试
 RECOMMENDED_HINT = (
@@ -81,22 +95,31 @@ RECOMMENDED_HINT = (
     "不要手动指定 model / lora。"
 )
 
-TOOL_NAMES = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help")
+TOOL_NAMES = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help", "comfy_tag_lookup")
 
 TOOL_SUMMARY = {
     "comfy_tools": "comfy_tools() —— 出图入口（必须先调）：四个工作流、参数范围、当前默认值",
-    "comfy_generate": "comfy_generate(prompt, ...) —— 按预设工作流出图并发到会话",
+    "comfy_generate": "comfy_generate(prompt, ...) —— 按预设工作流出图并发到会话（先查 tag_lookup/prompt_help）",
     "comfy_models": "comfy_models(kind) —— 列底模 / 列 LoRA",
-    "comfy_status": "comfy_status() —— ComfyUI 起没起来、显存、队列",
+    "comfy_status": "comfy_status() —— ComfyUI 起没起来、显存、队列（问进度/排队前必须先调）",
     "comfy_say": "comfy_say(text) —— 用参考音频的克隆音色合成一条语音发出去（慢，按需用）",
     "comfy_output": "comfy_output(index, hours, file) —— 发本会话画过的图（不用重画）",
     "comfy_gallery": "comfy_gallery(query, limit) —— 按提示词/时间翻本会话的历史图",
-    "comfy_prompt_help": "comfy_prompt_help(query, category=auto) —— 查本地画图法典：私聊两套 sfw+nsfw，群聊只查 sfw",
+    "comfy_prompt_help": "comfy_prompt_help(query, category=auto) —— 查法典范本：动作/场景/构图/风格，不查角色",
+    "comfy_tag_lookup": "comfy_tag_lookup(query, scope=auto) —— 查标签库：角色/标签/别名/皮肤/头脸/身体/衣服",
 }
 
 # 后台任务里会再次调用 comfy_generate，用这个标记避免无限套娃
 _ASYNC_RUN: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "ncd_comfy_async_job", default=False
+)
+# 异步公平队列里的任务 id：画完计数时用它做幂等。
+_QUOTA_JOB_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "ncd_comfy_quota_job", default=""
+)
+# 出队时固定的额度快照：画幅/降质用这份，运行中不追溯。
+_QUOTA_SNAPSHOT: contextvars.ContextVar[object | None] = contextvars.ContextVar(
+    "ncd_comfy_quota_snapshot", default=None
 )
 HISTORY_FILE = "history.json"
 
@@ -178,12 +201,29 @@ class NcdComfyPlugin(star.Star):
         self._img_consecutive = 0
         self._img_seq = 0
         self._closing = False
+        # 绘图额度：懒加载；状态落在 plugin_data/ncd_comfy/quota/state.json
+        self._quota_engine_obj: quota.QuotaEngine | None = None
+        self._quota_names: dict[str, str] = {}
+        self._quota_names_ts = 0.0
+        self._promptlib_obj: promptlib.PromptLibrary | None = None
+        # 同步出图（引用图/控制图）也在排队，按用户单独计数
+        self._quota_sync_waiting: dict[str, int] = {}
+        # 发言统计：同一事件可能触发多轮 LLM（工具循环），按消息 id 去重
+        self._speech_seen: dict[str, float] = {}
+        self._speech_save_at = 0.0
         # 异步审核失败后，下一轮给模型的提醒（umo -> (ts, note)）
         self._pending_notes: dict[str, tuple[float, str]] = {}
         # 审核失败自动拉起 bot 回复：每会话 10 分钟最多一次，防止循环
         self._audit_nudge_at: dict[str, float] = {}
         # 异步图写入会话历史时串行，避免并发写坏 content
         self._conv_lock = asyncio.Lock()
+        # ★ 启动/重载时先发一次空状态：旧进程可能留下“正在画”的总线快照，
+        #   不清掉的话，面板会一直挂着上一张已经结束（或被重载取消）的图。
+        try:
+            self._publish_state(force=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 初始化面板状态失败（忽略）: {exc}")
+        self._register_quota_api()
 
     # ------------------------------------------------------------------
     #  配置
@@ -222,6 +262,558 @@ class NcdComfyPlugin(star.Star):
         if isinstance(raw, bool):
             return raw
         return str(raw).strip().lower() in ("1", "true", "yes", "on", "是")
+
+    # ------------------------------------------------------------------
+    #  绘图额度 / 排名面板
+    # ------------------------------------------------------------------
+    def _quota_config(self) -> quota.QuotaConfig:
+        raw = self._conf.get("comfy_quota_bypass_ids") or ""
+        if isinstance(raw, str):
+            bypass = tuple(x for x in re.split(r"[,，\s]+", raw) if x)
+        else:
+            bypass = tuple(str(x) for x in raw)
+        return quota.QuotaConfig(
+            window_hour=self._conf_int("comfy_quota_window_hour", 8),
+            global_enabled=self._conf_bool("comfy_quota_global_enabled", True),
+            global_limit=self._conf_int("comfy_quota_global_limit", 30),
+            throttle_top=self._conf_int("comfy_quota_throttle_top", 5),
+            canvas_top=self._conf_int("comfy_quota_canvas_top", 3),
+            canvas_max_side=self._conf_int("comfy_quota_canvas_max_side", 1080),
+            queue_limited=self._conf_int("comfy_quota_queue_limited", 1),
+            queue_normal=self._conf_int("comfy_quota_queue_normal", 3),
+            interval_base=self._conf_int("comfy_quota_interval_base", 120),
+            interval_step=self._conf_int("comfy_quota_interval_step", 10),
+            degrade_after=self._conf_int("comfy_quota_degrade_after", 50),
+            degrade_steps=self._conf_int("comfy_quota_degrade_steps", 20),
+            ban_after=self._conf_int("comfy_quota_ban_after", 70),
+            ban_hours=self._conf_int("comfy_quota_ban_hours", 36),
+            bypass_ids=bypass,
+            counted_jobs_limit=self._conf_int(
+                "comfy_quota_counted_jobs_limit", 2000
+            ),
+        )
+
+    def _quota_engine(self) -> quota.QuotaEngine:
+        """懒加载；配置每次重新读，改开关不用重载插件。"""
+        eng = getattr(self, "_quota_engine_obj", None)
+        if eng is None:
+            data = None
+            try:
+                data = quota_store.load_state(QUOTA_STATE)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 读限流状态失败，从空开始: {exc}")
+            try:
+                eng = quota.QuotaEngine.from_dict(
+                    data, config=self._quota_config()
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 限流状态内容异常，从空开始: {exc}")
+                eng = quota.QuotaEngine(config=self._quota_config())
+            self._quota_engine_obj = eng
+            logger.info(
+                f"[comfy] 限流状态已加载：窗口 {eng.current_window_key()}，"
+                f"{len(eng.state.counts)} 人有计数"
+            )
+        else:
+            eng.config = self._quota_config()
+        return eng
+
+    def _quota_save(self) -> None:
+        eng = getattr(self, "_quota_engine_obj", None)
+        if eng is None:
+            return
+        try:
+            quota_store.save_state(QUOTA_STATE, eng.to_dict())
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 写限流状态失败: {exc}")
+
+    def _is_admin_event(self, event: AstrMessageEvent) -> bool:
+        try:
+            if getattr(event, "is_admin", lambda: False)():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        try:
+            admins = self.context.get_config().get("admins_id") or []
+        except Exception:  # noqa: BLE001
+            admins = []
+        return sender in {str(x) for x in admins}
+
+    def _cancel_quota_pending(self, user_id: str) -> tuple[int, set[str]]:
+        """70 张触发时取消该用户还没出队的任务；运行中的那张不动。"""
+        removed = 0
+        umos: set[str] = set()
+        queues = getattr(self, "_img_queues", {}) or {}
+        for umo, jobs in list(queues.items()):
+            keep = []
+            for job in jobs:
+                if (
+                    str(job.get("sender_id") or "") == user_id
+                    and bool(job.get("private", True))
+                ):
+                    removed += 1
+                    umos.add(umo)
+                else:
+                    keep.append(job)
+            if keep:
+                queues[umo] = keep
+            else:
+                queues.pop(umo, None)
+        if removed and not getattr(self, "_closing", False):
+            try:
+                self._publish_state(force=True)
+            except Exception:  # noqa: BLE001
+                pass
+        return removed, umos
+
+    def _quota_snapshot(self, event: AstrMessageEvent, *, force_private: bool = False, fresh: bool = False):
+        """当前出图人的额度快照；拿不到身份/状态异常就返回 None（放行）。
+
+        fresh=False 时优先用出队时存下的快照（画幅/降质不追溯运行中任务）；
+        查禁生图必须 fresh=True，因为禁生图可能在排队期间才触发。
+        """
+        try:
+            if not fresh:
+                cached = _QUOTA_SNAPSHOT.get()
+                if cached is not None:
+                    return cached
+            sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+            if not sender:
+                return None
+            admin = self._is_admin_event(event)
+            private = True if force_private else not self._is_group_chat(event)
+            return self._quota_engine().snapshot(
+                sender, private=private, admin=admin
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 取额度快照失败（放行）: {exc}")
+            return None
+
+    def _quota_effective_steps(
+        self, event: AstrMessageEvent, steps: int
+    ) -> int:
+        """50 张后强制降质步数；群聊/管理员不受影响。"""
+        snap = self._quota_snapshot(event)
+        if snap is not None and snap.degraded:
+            return max(
+                1, min(150, int(self._quota_engine().config.degrade_steps))
+            )
+        return steps
+
+    def _quota_block_message(self, event: AstrMessageEvent) -> str:
+        """70 张禁生图：私聊新任务直接拒绝；群聊/管理员不拦。"""
+        try:
+            sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+            if not sender:
+                return ""
+            if self._is_admin_event(event) or self._is_group_chat(event):
+                return ""
+            snap = self._quota_engine().snapshot(sender, private=True, admin=False)
+            if not snap.banned or not snap.ban_until:
+                return ""
+            left = max(0.0, snap.ban_until - time.time())
+            logger.info(
+                f"[comfy] 禁生图拦截 user={sender} "
+                f"until={quota.format_local(snap.ban_until)}"
+            )
+            return (
+                f"这张先不能画：本时段私聊生图已到 {snap.daily_count} 张，"
+                f"暂停生图至 {quota.format_local(snap.ban_until)}"
+                f"（剩 {quota.format_duration(left)}）。"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 禁生图检查失败（放行）: {exc}")
+            return ""
+
+    def _quota_pending_count(self, user_id: str) -> int:
+        total = int((getattr(self, "_quota_sync_waiting", {}) or {}).get(user_id, 0))
+        for jobs in (getattr(self, "_img_queues", {}) or {}).values():
+            for job in jobs:
+                if (
+                    str(job.get("sender_id") or "") == user_id
+                    and bool(job.get("private", True))
+                ):
+                    total += 1
+        return total
+
+    def _quota_enqueue_error(self, event: AstrMessageEvent) -> str:
+        """提交时的队列上限：私聊普通 3、限流 1；群聊/管理员放行。"""
+        try:
+            sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+            if not sender:
+                return ""
+            if self._is_admin_event(event) or self._is_group_chat(event):
+                return ""
+            eng = self._quota_engine()
+            pending = self._quota_pending_count(sender)
+            decision = eng.check_enqueue(
+                sender, pending, private=True, admin=False
+            )
+            if decision.allowed:
+                return ""
+            if decision.reason == "banned":
+                return self._quota_block_message(event) or (
+                    "这张先不能画：当前在禁生图期。"
+                )
+            return (
+                f"这张先排不上：当前还有 {pending} 张在排队，"
+                f"上限 {decision.cap} 张。等前面的画完再发。"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 队列上限检查失败（放行）: {exc}")
+            return ""
+
+    def _quota_sync_reserve(self, event: AstrMessageEvent) -> str:
+        """同步出图在真正排队前再原子地占一个名额，返回非空=拒绝。"""
+        try:
+            sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+            if not sender:
+                return ""
+            if self._is_admin_event(event) or self._is_group_chat(event):
+                return ""
+            eng = self._quota_engine()
+            pending = self._quota_pending_count(sender)
+            decision = eng.check_enqueue(
+                sender, pending, private=True, admin=False
+            )
+            if decision.allowed:
+                self._quota_sync_waiting[sender] = (
+                    int(self._quota_sync_waiting.get(sender, 0)) + 1
+                )
+                return ""
+            if decision.reason == "banned":
+                return self._quota_block_message(event) or (
+                    "这张先不能画：当前在禁生图期。"
+                )
+            return (
+                f"这张先排不上：当前还有 {pending} 张在排队，"
+                f"上限 {decision.cap} 张。等前面的画完再发。"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 同步出图占位失败（放行）: {exc}")
+            return ""
+
+    def _quota_sync_wait_seconds(self, event: AstrMessageEvent) -> int:
+        """同步出图也要守 70–110 秒间隔；群聊/管理员为 0。"""
+        snap = self._quota_snapshot(event, fresh=True)
+        if snap is None:
+            return 0
+        return max(0, int(snap.spacing_remaining))
+
+    def _quota_sync_leave(self, event: AstrMessageEvent) -> None:
+        try:
+            sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+            if not sender:
+                return
+            waiting = getattr(self, "_quota_sync_waiting", {}) or {}
+            n = int(waiting.get(sender, 0))
+            if n <= 0:
+                return
+            if n <= 1:
+                waiting.pop(sender, None)
+            else:
+                waiting[sender] = n - 1
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 同步出图释放占位失败（忽略）: {exc}")
+
+    def _quota_job_snapshot(self, job: dict):
+        """队列任务对应的额度快照；任务 dict 里已经存了 sender/private/admin。"""
+        try:
+            sender = str(job.get("sender_id") or "")
+            if not sender:
+                return None
+            return self._quota_engine().snapshot(
+                sender,
+                private=bool(job.get("private", True)),
+                admin=bool(job.get("admin", False)),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 队列任务取额度快照失败（放行）: {exc}")
+            return None
+
+    def _quota_job_wait(self, job: dict) -> int:
+        """任务还要等几秒才能出队；同时把出队快照写进 job。"""
+        snap = self._quota_job_snapshot(job)
+        if snap is None:
+            job.pop("quota", None)
+            return 0
+        job["quota"] = snap
+        if snap.banned:
+            # 正常路径会被 70 张取消；真漏了也别让它跑。
+            return 3600
+        return int(snap.spacing_remaining)
+
+    def _quota_worker_wait(self) -> float:
+        waits = []
+        for jobs in (getattr(self, "_img_queues", {}) or {}).values():
+            if jobs:
+                waits.append(self._quota_job_wait(jobs[0]))
+        waits = [w for w in waits if w > 0]
+        if not waits:
+            return 1.0
+        return max(0.2, min(5.0, float(min(waits))))
+
+    def _quota_record_end(self, event: AstrMessageEvent) -> None:
+        """真正出图结束（成功/失败/超时）后记结束时间，供下一次间隔用。"""
+        try:
+            sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+            if not sender:
+                return
+            if self._is_admin_event(event) or self._is_group_chat(event):
+                return
+            self._quota_engine().record_end(sender, private=True, admin=False)
+            self._quota_save()
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 记录出图结束失败（忽略）: {exc}")
+
+    def _quota_clamp_size(
+        self, event: AstrMessageEvent, width: int, height: int
+    ) -> tuple[int, int]:
+        """前 3 名最长边钳到 1080；等比缩放，保持 8 的倍数。"""
+        snap = self._quota_snapshot(event)
+        cap = int(getattr(snap, "canvas_max_side", 0) or 0) if snap else 0
+        if cap <= 0 or max(width, height) <= cap:
+            return width, height
+        scale = cap / float(max(width, height))
+
+        def snap8(value: float) -> int:
+            return max(64, int(round(value * scale / 8.0)) * 8)
+
+        new_w, new_h = snap8(width), snap8(height)
+        while max(new_w, new_h) > cap and min(new_w, new_h) > 64:
+            if new_w >= new_h:
+                new_w -= 8
+            else:
+                new_h -= 8
+        return new_w, new_h
+
+    async def _quota_on_success(self, event: AstrMessageEvent, job_id: str = "") -> None:
+        """图已成功发出后调用；任何异常都不能影响出图。"""
+        try:
+            sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+            if not sender:
+                return
+            admin = self._is_admin_event(event)
+            private = not self._is_group_chat(event)
+            eng = self._quota_engine()
+            result = eng.record_success(
+                sender, job_id, private=private, admin=admin
+            )
+            if not result.counted:
+                return
+            self._quota_save()
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if result.reminder_due:
+                await self._send_chat(
+                    umo,
+                    f"本时段私聊生图已到 {result.daily_count} 张，"
+                    f"后续出图统一按 {eng.config.degrade_steps} 步生成，"
+                    "明日 08:00 恢复。",
+                )
+            if result.ban_triggered:
+                cancelled, umos = self._cancel_quota_pending(sender)
+                if umo:
+                    umos.add(umo)
+                until = result.ban_until or 0.0
+                left = max(0.0, until - time.time())
+                text = (
+                    f"本时段私聊生图已到 {result.daily_count} 张，"
+                    f"已暂停生图至 {quota.format_local(until)}"
+                    f"（{quota.format_duration(left)}）。"
+                )
+                if cancelled:
+                    text += (
+                        f"已取消排队中的 {cancelled} 张；"
+                        "正在画的这张会正常完成。"
+                    )
+                else:
+                    text += "正在画的这张会正常完成。"
+                for target in sorted(umos):
+                    await self._send_chat(target, text)
+            logger.info(
+                f"[comfy] 额度 +1 user={sender} daily={result.daily_count} "
+                f"total={result.total_count} private={private} admin={admin}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                f"[comfy] 额度计数失败（不影响出图）: {exc}", exc_info=True
+            )
+
+    @filter.on_llm_request()
+    async def quota_count_speech(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
+        """统计“发言”：有文本、非命令、非 bot 自己、非管理员。"""
+        try:
+            text = str(getattr(event, "message_str", "") or "").strip()
+            if not text or text.startswith(("/", "／", "\\", "＼")):
+                return
+            sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+            if not sender or sender == "0":
+                return
+            self_id = str(getattr(event, "get_self_id", lambda: "")() or "")
+            if self_id and sender == self_id:
+                return
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            msg = getattr(event, "message_obj", None)
+            mid = str(getattr(msg, "message_id", "") or "")
+            key = f"{umo}:{mid}" if mid else f"{umo}:obj:{id(event)}"
+            now = time.time()
+            if key in self._speech_seen:
+                return
+            self._speech_seen[key] = now
+            if len(self._speech_seen) > 2000:
+                for old in sorted(
+                    self._speech_seen, key=self._speech_seen.get
+                )[:-1500]:
+                    self._speech_seen.pop(old, None)
+            daily = self._quota_engine().record_speech(
+                sender, admin=self._is_admin_event(event)
+            )
+            if daily and now - self._speech_save_at >= 30:
+                self._speech_save_at = now
+                self._quota_save()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 发言统计失败（忽略）: {exc}")
+
+    def _register_quota_api(self) -> None:
+        try:
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/quota",
+                self.api_quota,
+                ["GET"],
+                "绘图额度面板",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 注册额度面板 API 失败: {exc}")
+
+    async def _quota_name_map(self) -> dict[str, str]:
+        """好友昵称缓存 10 分钟；拉不到就只显示 QQ 号。"""
+        now = time.time()
+        if self._quota_names and now - self._quota_names_ts < 600:
+            return self._quota_names
+        names: dict[str, str] = {}
+        try:
+            platform = self.context.get_platform("aiocqhttp")
+            bot = platform.get_client() if platform is not None else None
+            if bot is not None:
+                friends = await asyncio.wait_for(
+                    bot.call_action("get_friend_list"), timeout=5
+                )
+                if isinstance(friends, list):
+                    for item in friends:
+                        item = item or {}
+                        uid = str(item.get("user_id") or "")
+                        name = str(
+                            item.get("nickname") or item.get("remark") or ""
+                        ).strip()
+                        if uid and name:
+                            names[uid] = name
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 拉好友昵称失败: {exc}")
+        if names:
+            self._quota_names = names
+            self._quota_names_ts = now
+        return self._quota_names or names
+
+    async def api_quota(self):
+        try:
+            data = self._quota_engine().dashboard()
+            data["enforce"] = QUOTA_ENFORCE
+            names = await self._quota_name_map()
+            for row in data.get("ranking") or []:
+                row["name"] = names.get(str(row.get("user_id") or ""), "")
+            for ban in data.get("bans") or []:
+                ban["name"] = names.get(str(ban.get("user_id") or ""), "")
+            return data
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 额度面板取数失败: {exc}", exc_info=True)
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
+    @filter.command("排名", alias={"我的排名", "绘图排名"})
+    async def quota_rank_cmd(self, event: AstrMessageEvent):
+        """查看自己的绘图额度、日榜名次和限流状态。"""
+        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        if not sender:
+            yield event.plain_result("拿不到你的 QQ 号，稍后再试。")
+            return
+        admin = self._is_admin_event(event)
+        try:
+            eng = self._quota_engine()
+            snap = eng.snapshot(sender, private=True, admin=admin)
+        except Exception as exc:  # noqa: BLE001
+            yield event.plain_result(f"查询失败：{type(exc).__name__}: {exc}")
+            return
+        lines = [f"📊 绘图额度（{eng.current_window_label()}）"]
+        if admin:
+            lines.append("管理员：不参与统计和限流")
+        else:
+            lines.append(
+                f"成功生图：{snap.daily_count} 张"
+                f"（累计 {snap.total_count} 张）"
+            )
+            if snap.rank:
+                lines.append(f"日榜：第 {snap.rank} 名")
+            else:
+                lines.append("日榜：未上榜")
+            if snap.banned:
+                lines.append("限流：—（禁生图中）")
+            elif snap.throttled:
+                lines.append(
+                    f"限流：是（间隔 {snap.interval_seconds} 秒，"
+                    f"队列 {snap.queue_cap}）"
+                )
+            else:
+                lines.append(f"限流：否（队列 {snap.queue_cap}）")
+            if snap.canvas_max_side:
+                lines.append(f"画幅上限：{snap.canvas_max_side}（前 3）")
+            else:
+                lines.append(
+                    f"画幅上限：{self._conf_int('comfy_max_side', 1920)}（默认）"
+                )
+            if snap.degraded:
+                lines.append(f"降质：是（{eng.config.degrade_steps} 步）")
+            else:
+                lines.append(
+                    f"降质：否（满 {eng.config.degrade_after} 张后 "
+                    f"{eng.config.degrade_steps} 步）"
+                )
+            if snap.banned and snap.ban_until:
+                left = max(0.0, snap.ban_until - time.time())
+                lines.append(
+                    f"禁生图：至 {quota.format_local(snap.ban_until)}"
+                    f"（剩 {quota.format_duration(left)}）"
+                )
+            else:
+                lines.append("禁生图：无")
+            if snap.spacing_remaining > 0:
+                lines.append(
+                    "距下次可出图："
+                    + quota.format_duration(snap.spacing_remaining)
+                )
+            lines.append(
+                f"50 张：{snap.daily_count}/{eng.config.degrade_after}｜"
+                f"70 张：{snap.daily_count}/{eng.config.ban_after}"
+            )
+            speech_daily, speech_total, speech_rank = eng.speech_stats(sender)
+            speech_part = f"第 {speech_rank} 名" if speech_rank else "未上榜"
+            lines.append(
+                f"发言：今日 {speech_daily} 条（{speech_part}）"
+                f"｜累计 {speech_total} 条"
+            )
+        if not snap.global_enabled:
+            lines.append("全局：未启用")
+        else:
+            state = "已触发" if snap.global_triggered else "未触发"
+            lines.append(
+                f"全局：{snap.global_count}/{snap.global_limit}（{state}）"
+            )
+        if not QUOTA_ENFORCE:
+            lines.append(
+                "执行：统计阶段（队列/画幅未拦截；降质/禁生图已拦截）"
+            )
+        yield event.plain_result("\n".join(lines))
 
     # ------------------------------------------------------------------
     #  后端客户端
@@ -426,6 +1018,12 @@ class NcdComfyPlugin(star.Star):
             len(jobs) for jobs in (getattr(self, "_img_queues", {}) or {}).values()
         )
         plugin_running = 1 if getattr(self, "_img_current", None) else 0
+        try:
+            queue_entries = self._build_queue_entries()
+        except Exception as exc:  # noqa: BLE001
+            # 面板排队列表只是展示，绝不能因为一个坏任务把出图状态发布搞挂。
+            logger.debug(f"[comfy] 构建排队列表失败（忽略）: {exc}")
+            queue_entries = []
         data = {
             "schema_version": 1,
             "ts": now,
@@ -446,6 +1044,7 @@ class NcdComfyPlugin(star.Star):
             "recent": self._recent[-8:],
             "audit": dict(self._audit_counts),
             "audit_recent": self._audit_recent[-10:],
+            "queue_entries": queue_entries,
         }
         try:
             BUS_STATE.parent.mkdir(parents=True, exist_ok=True)
@@ -454,6 +1053,82 @@ class NcdComfyPlugin(star.Star):
             os.replace(tmp, BUS_STATE)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 写面板状态失败: {exc}")
+
+    def _build_queue_entries(self) -> list[dict]:
+        """构建排队列表（按队列顺序展开为每张一条），给面板做卡片式可视化。
+
+        公平队列是按用户的 FIFO 轮转，顺序不是简单的按时间排：
+        正在画的那张排第 1 位，之后按 _pick_next_job 的轮转规则推算。
+        """
+        entries: list[dict] = []
+        # 正在画的那张
+        current = getattr(self, "_img_current", None)
+        if current:
+            nick = self._job_nickname(current)
+            entries.append({
+                "pos": 1,
+                "name": nick,
+                "preset": (current.get("kwargs") or {}).get("preset") or "",
+                "status": "running",
+            })
+        # 待画：模拟轮转顺序展开
+        queues = {u: list(jobs) for u, jobs in
+                  (getattr(self, "_img_queues", {}) or {}).items() if jobs}
+        order = list(getattr(self, "_img_user_order", []))
+        last = getattr(self, "_img_last_user", "")
+        consecutive = int(getattr(self, "_img_consecutive", 0) or 0)
+        batch = self._fair_batch()
+        pos = 2 if current else 1
+        while queues:
+            users = [u for u in order if queues.get(u)]
+            if not users:
+                break
+            if last in users and (consecutive < batch or len(users) == 1):
+                user = last
+            else:
+                try:
+                    base = order.index(last)
+                except ValueError:
+                    base = -1
+                user = users[0]
+                for offset in range(1, len(order) + 1):
+                    cand = order[(base + offset) % len(order)]
+                    if queues.get(cand):
+                        user = cand
+                        break
+            job = queues[user].pop(0)
+            if not queues[user]:
+                queues.pop(user, None)
+            nick = self._job_nickname(job)
+            entries.append({
+                "pos": pos,
+                "name": nick,
+                "preset": (job.get("kwargs") or {}).get("preset") or "",
+                "status": "pending",
+            })
+            pos += 1
+            if user == last:
+                consecutive += 1
+            else:
+                last = user
+                consecutive = 1
+        return entries
+
+    @staticmethod
+    def _job_nickname(job: dict) -> str:
+        """从任务里提取用户昵称；取不到就回退到 umo 标识。"""
+        event = job.get("event")
+        if event is not None:
+            try:
+                sender = getattr(getattr(event, "message_obj", None), "sender", None)
+                if sender is not None:
+                    nick = str(getattr(sender, "nickname", "") or "")
+                    if nick:
+                        return nick
+            except Exception:  # noqa: BLE001
+                pass
+        umo = str(job.get("umo") or "")
+        return umo or "未知"
 
     async def _on_progress(self, info: dict) -> None:
         self._progress = info
@@ -1041,10 +1716,11 @@ class NcdComfyPlugin(star.Star):
             logger.warning(f"[comfy] 释放显存失败（忽略）: {exc}")
 
     @asynccontextmanager
-    async def _gen_slot(self, event: AstrMessageEvent):
+    async def _gen_slot(self, event: AstrMessageEvent, *, sync_quota: bool = False):
         """生图串行槽：同一块 GPU 一次只画一张，后面来的先告诉用户排第几。
 
         ★ 对话（LLM 回复）不排队 —— 这条只串行【出图】这一段。
+        ★ sync_quota=True：同步出图占的队列名额在离开槽时释放。
         """
         self._gen_waiting += 1
         try:
@@ -1076,6 +1752,8 @@ class NcdComfyPlugin(star.Star):
                         await self._free_comfy()
         finally:
             self._gen_waiting = max(0, self._gen_waiting - 1)
+            if sync_quota:
+                self._quota_sync_leave(event)
 
     # ------------------------------------------------------------------
     #  参考图（图生图）
@@ -1139,7 +1817,106 @@ class NcdComfyPlugin(star.Star):
             if not name or not (self._session_image_dir(umo) / name).is_file():
                 return f"出图失败：本会话历史里没有「{name}」，先 comfy_gallery 查文件名。"
             return None
+        # 模型可能直接给本地图片路径（例如上一条用户图的 temp 路径）。
+        raw_ref = str(reference or "").strip()
+        try:
+            if Path(raw_ref).is_file():
+                return None
+        except OSError:
+            pass
+        if re.match(r"^[A-Za-z]:[\\/]", raw_ref) or raw_ref.startswith(("/", "\\")):
+            return f"出图失败：参考图路径不存在：{raw_ref}"
         return None
+
+    def _ref_cache_root(self) -> Path:
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "ref_cache"
+        )
+
+    def _save_ref_bytes(self, data: bytes, prefix: str) -> str:
+        """按内容哈希落盘；同一张图复用同一路径，重复提交仍能去重。"""
+        if not data:
+            return ""
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            suffix = ".png"
+        elif data[:2] == b"\xff\xd8":
+            suffix = ".jpg"
+        else:
+            suffix = ".png"
+        root = self._ref_cache_root()
+        root.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha1(data).hexdigest()[:16]
+        path = root / f"{prefix}_{digest}{suffix}"
+        if not path.is_file():
+            path.write_bytes(data)
+        self._prune_ref_cache(root)
+        return str(path)
+
+    def _prune_ref_cache(self, root: Path, keep: int = 300) -> None:
+        try:
+            files = sorted(
+                list(root.glob("ref_*")) + list(root.glob("ctrl_*")),
+                key=lambda p: p.stat().st_mtime,
+            )
+            for old in files[:-keep]:
+                old.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    async def _freeze_reference(
+        self, value: str, event: AstrMessageEvent, prefix: str
+    ) -> str:
+        """把 message/auto 等易失图先解析成字节，再落成稳定路径。"""
+        try:
+            data = await self._reference_bytes(value, event)
+            if not data:
+                return ""
+            return self._save_ref_bytes(data, prefix)
+        except OSError as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 冻结参考图失败: {exc}")
+            return ""
+
+    def _stabilize_reference(self, reference: str) -> str:
+        """异步入队前把 temp 参考图复制成稳定副本，避免 worker 启动时已被清理。"""
+        ref = str(reference or "").strip()
+        if not ref:
+            return ref
+        low = ref.lower()
+        if low in (
+            "auto",
+            "自动",
+            "自己选",
+            "自动选",
+            "last",
+            "previous",
+            "上一张",
+            "刚才那张",
+            "message",
+            "msg",
+            "image",
+            "图",
+            "这张",
+            "消息图",
+        ) or low.startswith(
+            ("index:", "history:", "file:", "data:", "http://", "https://")
+        ):
+            return ref
+        try:
+            path = Path(ref)
+            if not path.is_file():
+                return ref
+            if "temp" not in [part.lower() for part in path.parts]:
+                return ref
+            dst = self._save_ref_bytes(path.read_bytes(), "ref")
+            logger.info(f"[comfy] 参考图已固定副本: {path.name} -> {Path(dst).name}")
+            return dst
+        except OSError as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 固定参考图失败（保留原路径）: {exc}")
+            return ref
 
     async def _image_url_bytes(self, url: str) -> bytes | None:
         """把历史里的 image_url（data URL / 本地路径 / http）变成字节。"""
@@ -1175,7 +1952,7 @@ class NcdComfyPlugin(star.Star):
         return None
 
     async def _history_image_bytes(
-        self, umo: str, user_only: bool = True
+        self, umo: str, user_only: bool = True, allow_generated: bool = True
     ) -> bytes | None:
         """从当前会话历史里找最近一张图。
 
@@ -1219,13 +1996,17 @@ class NcdComfyPlugin(star.Star):
                             "用户图" if user_only else "生成图",
                         )
                         return data
-            if user_only:
-                return await self._history_image_bytes(umo, user_only=False)
+            if user_only and allow_generated:
+                return await self._history_image_bytes(
+                    umo, user_only=False, allow_generated=False
+                )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 读取会话历史参考图失败: {exc}")
         return None
 
-    async def _reference_bytes(self, reference: str, event: AstrMessageEvent) -> bytes | None:
+    async def _reference_bytes(
+        self, reference: str, event: AstrMessageEvent
+    ) -> bytes | None:
         """把 reference 解析成图片字节。
 
         · ""            → 不用参考图（走文生图）
@@ -1298,6 +2079,26 @@ class NcdComfyPlugin(star.Star):
                                 return Path(str(p)).read_bytes()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[comfy] 异步取图失败: {exc}")
+            # ★ 12:27 的实际坑：引用消息只解析出 Reply，chain 为空，图在
+            #   上一条用户消息里。message 取不到时回退到历史最近一张用户图。
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            data = await self._history_image_bytes(
+                umo, user_only=True, allow_generated=False
+            )
+            if data:
+                logger.info(
+                    "[comfy] reference=message 当前/引用没图，回退到历史最近用户图"
+                )
+                return data
+        # 模型有时会把用户发的临时图路径直接塞进 reference；它不是上面
+        # 任何关键字，但文件真实存在，就直接读，别再报"没找到"。
+        if ref and not ref.startswith(("data:", "http://", "https://")):
+            p = Path(str(reference).strip())
+            try:
+                if p.is_file():
+                    return p.read_bytes()[: 12 * 1024 * 1024]
+            except OSError:
+                pass
         return None
 
     # ------------------------------------------------------------------
@@ -1401,9 +2202,21 @@ class NcdComfyPlugin(star.Star):
         self._bg_umo[task] = fallback_umo
         task.add_done_callback(self._on_bg_done)
 
-    def _spawn_image_job(self, event: AstrMessageEvent, kwargs: dict) -> None:
-        """只入公平队列，不再每个请求各起一个后台任务。"""
+    def _spawn_image_job(self, event: AstrMessageEvent, kwargs: dict) -> str | None:
+        """只入公平队列，不再每个请求各起一个后台任务。
+
+        返回非空字符串 = 队列上限/禁生图拒绝；返回 None = 已入队。
+        """
+        denied = self._quota_enqueue_error(event)
+        if denied:
+            return denied
         umo = str(getattr(event, "unified_msg_origin", "") or "")
+        try:
+            sender_id = str(event.get_sender_id() or "")
+        except Exception:  # noqa: BLE001
+            sender_id = ""
+        # 新任务覆盖旧失败提醒，避免上一张的“失败”串到这一张。
+        self._pending_notes.pop(umo, None)
         self._img_seq += 1
         self._img_queues.setdefault(umo, []).append(
             {
@@ -1411,15 +2224,25 @@ class NcdComfyPlugin(star.Star):
                 "kwargs": kwargs,
                 "umo": umo,
                 "seq": self._img_seq,
+                # 额度计数/70 禁生图取消队列都要知道是谁的任务
+                "job_id": uuid.uuid4().hex,
+                "sender_id": sender_id,
+                "private": not self._is_group_chat(event),
+                "admin": self._is_admin_event(event),
             }
         )
         if umo not in self._img_user_order:
             self._img_user_order.append(umo)
         self._ensure_image_worker(umo)
+        # 入队后立刻发布：否则当前任务在加载模型/预处理、没有进度回调时，
+        # 面板排队列表要等到下一次 progress 才会看到新任务。
+        if not getattr(self, "_closing", False):
+            self._publish_state(force=True)
         logger.info(
             f"[comfy] 后台任务已入队 preset={kwargs.get('preset') or '默认'} "
             f"reference={kwargs.get('reference') or '-'}"
         )
+        return None
 
     @staticmethod
     def _image_job_fingerprint(kwargs: dict) -> str:
@@ -1466,27 +2289,33 @@ class NcdComfyPlugin(star.Star):
         return None
 
     def _pick_next_job(self) -> dict | None:
-        """选下一个任务：同一用户最多连续 3 张；只有一个人时不限。"""
+        """在“现在就能画”的用户里轮转；间隔没到的先跳过。"""
         queues = getattr(self, "_img_queues", {})
         order = getattr(self, "_img_user_order", [])
         users = [u for u in order if queues.get(u)]
         if not users:
             return None
+        ready = []
+        for user in users:
+            if self._quota_job_wait(queues[user][0]) <= 0:
+                ready.append(user)
+        if not ready:
+            return None
         batch = self._fair_batch()
         last = getattr(self, "_img_last_user", "")
         consecutive = int(getattr(self, "_img_consecutive", 0) or 0)
 
-        if last in users and (consecutive < batch or len(users) == 1):
+        if last in ready and (consecutive < batch or len(ready) == 1):
             user = last
         else:
             try:
                 base = order.index(last)
             except ValueError:
                 base = -1
-            user = users[0]
+            user = ready[0]
             for offset in range(1, len(order) + 1):
                 cand = order[(base + offset) % len(order)]
-                if queues.get(cand):
+                if cand in ready:
                     user = cand
                     break
 
@@ -1505,14 +2334,20 @@ class NcdComfyPlugin(star.Star):
             while True:
                 job = self._pick_next_job()
                 if job is None:
-                    break
+                    if not any((getattr(self, "_img_queues", {}) or {}).values()):
+                        break
+                    # 还有任务，只是都在间隔里：睡到最早可出队，别让 worker 退出。
+                    await asyncio.sleep(self._quota_worker_wait())
+                    continue
                 self._img_current = job
+                if not getattr(self, "_closing", False):
+                    self._publish_state(force=True)
                 try:
                     # ★ 看门狗：单张任务不能无限占住公平队列。
                     #   MOSS 50 步 + 首次加载可能 2 分钟，给 10 分钟上限；
                     #   真超时就发一条提示并继续下一张，不让 worker 静默卡死。
                     await asyncio.wait_for(
-                        self._image_job(job["event"], job["kwargs"]),
+                        self._image_job(job["event"], job["kwargs"], job),
                         timeout=max(600.0, float(self._conf_int("comfy_timeout", 300)) + 120.0),
                     )
                 except asyncio.TimeoutError:
@@ -1521,6 +2356,10 @@ class NcdComfyPlugin(star.Star):
                     # _image_job 的 CancelledError 分支会发“被中断”提示，避免重复发。
                 finally:
                     self._img_current = None
+                    # 出图完成/失败/超时后立刻刷新：否则面板会把刚结束的那张
+                    # 一直显示成“正在画”，直到下一次 progress 或新任务。
+                    if not getattr(self, "_closing", False):
+                        self._publish_state(force=True)
         except asyncio.CancelledError:
             logger.warning("[comfy] 公平出图 worker 被取消")
             raise
@@ -1543,9 +2382,13 @@ class NcdComfyPlugin(star.Star):
         if exc:
             logger.error(f"[comfy] 后台出图任务异常: {exc}", exc_info=exc)
 
-    async def _image_job(self, event: AstrMessageEvent, kwargs: dict) -> None:
+    async def _image_job(
+        self, event: AstrMessageEvent, kwargs: dict, job: dict | None = None
+    ) -> None:
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         token = _ASYNC_RUN.set(True)
+        quota_token = _QUOTA_JOB_ID.set(str((job or {}).get("job_id") or ""))
+        snap_token = _QUOTA_SNAPSHOT.set((job or {}).get("quota"))
         logger.info(f"[comfy] 后台任务开始 → {umo}")
         try:
             result = await self.comfy_generate(event, **kwargs)
@@ -1565,6 +2408,8 @@ class NcdComfyPlugin(star.Star):
             return
         finally:
             _ASYNC_RUN.reset(token)
+            _QUOTA_JOB_ID.reset(quota_token)
+            _QUOTA_SNAPSHOT.reset(snap_token)
         if isinstance(result, str):
             # ★ 后台任务提前返回文字（参数被拒/画幅提醒）时，日志里必须留下一行，
             #   否则表现就是“入队后凭空消失”，前面那五次就是这么查不出来的。
@@ -1641,12 +2486,30 @@ class NcdComfyPlugin(star.Star):
             return
         if "这张图先不发了" in result:
             await self._send_chat(umo, first)
+            self._pending_notes[umo] = (
+                time.time(),
+                f"上一张图没有发出去：{first[:160]}。"
+                "任务已经结束，不要再声称它还在排队/在画；需要时让用户重发。",
+            )
             return
         if result.startswith("出图失败"):
             await self._send_chat(umo, first)
+            # ★ 关键：失败必须进模型下一轮的上下文。否则模型只记得
+            #   “已经交给后台画了”，会一直编“还在排队/还在画”。
+            self._pending_notes[umo] = (
+                time.time(),
+                f"后台出图失败：{first[:200]}。任务已经结束，"
+                "不要再声称它还在排队/在画；让用户改参数重发或取消。",
+            )
             return
-        # 画幅提醒、参数校验之类的文字结果：也得让人看见，不能静默
+        # 画幅提醒、参数校验之类的文字结果：也得让人看见，不能静默；
+        # 同时留一条 note，避免模型下一轮仍以为任务在跑。
         await self._send_chat(umo, first or "图画失败了，稍后再试。")
+        self._pending_notes[umo] = (
+            time.time(),
+            f"后台出图没有开始：{first[:160] or '未知原因'}。"
+            "任务已经结束，不要再声称它还在排队/在画。",
+        )
 
     async def _send_chat(self, umo: str, text: str) -> None:
         if not umo or not text:
@@ -1765,6 +2628,19 @@ class NcdComfyPlugin(star.Star):
     # ------------------------------------------------------------------
     #  提示词法典（本地只读检索）
     # ------------------------------------------------------------------
+    def _promptlib(self) -> promptlib.PromptLibrary:
+        """懒加载融合查询库；路径可配置，留空自动找工作区。"""
+        lib = getattr(self, "_promptlib_obj", None)
+        if lib is None:
+            root = self._conf_str("comfy_prompt_lib_dir") or None
+            lib = promptlib.PromptLibrary(root, self._codex_root())
+            self._promptlib_obj = lib
+            logger.info(
+                f"[comfy] 提示词库已加载：available={lib.available} "
+                f"root={lib.tag_root or '-'}"
+            )
+        return lib
+
     def _codex_root(self) -> Path:
         custom = self._conf_str("comfy_codex_dir")
         if custom:
@@ -1858,9 +2734,8 @@ class NcdComfyPlugin(star.Star):
         if notice:
             lines.insert(0, notice)
         lines.append(
-            "★ 法典先查：comfy_prompt_help(query, category=auto)。"
-            "私聊 auto 会查两套（sfw 常规 + nsfw 色色），群聊只查 sfw。"
-            "写角色/服装/姿势/光影/画风前先查，别凭印象编。"
+            "★ 动作/场景/构图/风格先查 comfy_prompt_help；"
+            "角色/服装/标签先查 comfy_tag_lookup(scope=character/tag)。"
         )
         for name, meta in presets.PRESETS.items():
             try:
@@ -1879,8 +2754,6 @@ class NcdComfyPlugin(star.Star):
             "",
             f"默认工作流：{default}（{presets.PRESETS[default]['label']}）",
             "",
-            "★ 法典：写 prompt 前先调 comfy_prompt_help(query, category=auto) "
-            "—— 私聊两套（sfw+nsfw）都查，群聊只查 sfw；返回匹配 tag + 一条示范成品。",
             "另外：comfy_say(text) 可以用克隆音色说一句话、发成语音（约 6 秒一条）。",
             "云端 API：comfy_generate 会立即返回，图在后台画、画完直接发；不要等，也不要重复调。",
             "翻旧图：comfy_gallery(query) 看列表，comfy_output(index/file) 直接发；本会话保留 "
@@ -1889,8 +2762,16 @@ class NcdComfyPlugin(star.Star):
             "默认风格：sdxl 预设默认底模 waiIllustriousSDXL_v170，不自动叠 LoRA；要加风格用 lora 参数。",
             "推荐组合：sdxl + waiIllustriousSDXL_v170（无 LoRA，默认即此）。非用户特别要求，别手动指定 model / lora。",
             "",
+            "绘图 SOP（按这个顺序判断，不要直接套模板）：",
+            "1. 参考图先认人：先问清图上是谁/要画谁，不猜角色。",
+            "2. 角色先查 comfy_tag_lookup(scope=character) 找正式 tag；确定后用 scope=profile 看皮肤/头脸/身体/衣服；查不到再联网搜长相，再确认。",
+            "3. 写法按模型：sdxl 用英文标签；krea2/anima/moss 可用自然语言，但角色名/标志特征保留英文 tag。",
+            "4. 动作/场景/构图查 comfy_prompt_help；先确认 SFW/NSFW 与具体要求。",
+            "5. 画风优先用 LoRA；6. 默认文生图，改图用 reference，锁姿势/结构用 control；",
+            "7. 普通用 sdxl，细节要求高再换底模；8. 反复不像就换模型/LoRA，不要死磕同一串 prompt。",
+            "",
             "comfy_generate 参数（都能留空 = 用工作流里的默认值）：",
-            "· prompt      英文标签式描述（10~15 个逗号分隔的短标签；中文会出废图）",
+            "· prompt      sdxl 用英文标签（10~15 个逗号分隔短标签）；krea2/anima/moss 可用自然语言，角色/标志特征保留英文 tag",
             "· negative    负面词；留空 = 工作流里那个（通常是空的）",
             "· preset      sdxl / krea2 / anima / moss",
             "· size        画幅，如 720x960，或 竖/横/方",
@@ -1911,9 +2792,6 @@ class NcdComfyPlugin(star.Star):
             "control_preprocess=true 自动预处理，false=你给的是处理好的控制图",
             "★ 文生图是主线；只有用户明确要改图/锁结构才用图生图。"
             "普通降噪选 reference，结构控制选 control——由你按用户意图判断，插件不猜。",
-            "",
-            "prompt 硬规则：① 只写英文；② 逗号分隔短标签，别写长句；",
-            "③ 开头写 masterpiece, best quality, highres；④ 别堆 8k / ultra detailed。",
             "",
             "★ 第一次出图、换工作流、换底模都会先往会话发一条加载提示，",
             "  调用后会有「加载权重 / 开始采样」两条进度提示，不用重复调用。",
@@ -1964,12 +2842,18 @@ class NcdComfyPlugin(star.Star):
     ) -> str:
         """按预设工作流画一张图并发到当前会话。★ 必须先调用 comfy_tools。
 
+        ★ 写 prompt 前先查：
+          · 角色/标签/皮肤/衣服 → comfy_tag_lookup(scope=character/profile/tag)
+          · 动作/场景/构图/风格 → comfy_prompt_help
+          查到的 tag/短描述组合进 prompt，不要把整段法典原文塞进来。
+
         ★ 云端 API 下本工具会立即返回：图在后台画，画完直接发到会话。
           所以这一轮不要等、不要再调一次，也不要说“图已经画好了/我看到了”。
 
         Args:
-            prompt(string): 英文【标签式】描述（逗号分隔短标签，10~15 个，
-                开头写 masterpiece, best quality, highres）。中文会出废图。
+            prompt(string): 按模型族写：sdxl 用英文【标签式】（逗号分隔短标签，
+                10~15 个，开头 masterpiece, best quality, highres）；krea2/anima/moss
+                可用自然语言，但角色名/标志特征保留英文 tag。
             negative(string): 负面提示词；留空 = 工作流里那个（通常为空）。
             preset(string): 工作流：sdxl（约25s）/ krea2（约30s）/ anima（约40s）/
                 moss（约60s）；留空 = 配置里的默认。
@@ -2005,6 +2889,13 @@ class NcdComfyPlugin(star.Star):
         gate = self._gate(event, "comfy_generate")
         if gate:
             return gate
+        blocked = self._quota_block_message(event)
+        if blocked:
+            return blocked
+        if not _ASYNC_RUN.get():
+            enqueue_error = self._quota_enqueue_error(event)
+            if enqueue_error:
+                return enqueue_error
         if _ASYNC_RUN.get():
             logger.info("[comfy] 后台参数解析开始")
         else:
@@ -2021,13 +2912,11 @@ class NcdComfyPlugin(star.Star):
         ctrl_sync = bool(ctrl_raw) and ctrl_raw not in ("last", "上一张")
         if (
             not _ASYNC_RUN.get()
-            and not message_ref
-            and not ctrl_sync
             and await self._async_ok(event)
         ):
             early = str(prompt or "").strip()
             if not early:
-                return "出图失败：prompt 是空的。写一段英文标签式描述再调。"
+                return "出图失败：prompt 是空的。sdxl 写英文标签，其他模型可写自然语言。"
             want_early = (preset or "").strip().lower()
             if want_early and want_early not in presets.PRESETS:
                 return (
@@ -2037,6 +2926,28 @@ class NcdComfyPlugin(star.Star):
             ref_err = self._reference_ready(reference, event)
             if ref_err:
                 return ref_err
+            # ★ 带消息图/控制图的请求也走异步：入队前先把易失图冻结成稳定副本。
+            #   否则 MOSS/ControlNet 重任务会卡在同步路径，撞 AstrBot 工具 180 秒超时。
+            if message_ref:
+                frozen_ref = await self._freeze_reference(reference, event, "ref")
+                if not frozen_ref:
+                    return (
+                        "出图失败：reference 要的是图，但没找到。\n"
+                        "把图直接发在消息里（或引用一张图）再试；"
+                        "不想用参考图就把 reference 留空。"
+                    )
+                reference = frozen_ref
+            if ctrl_sync:
+                frozen_ctrl = await self._freeze_reference(control, event, "ctrl")
+                if not frozen_ctrl:
+                    return (
+                        "出图失败：control 要的是控制图，但没找到。\n"
+                        "把控制图直接发在消息里/引用一张再试；不用 ControlNet 就留空。"
+                    )
+                control = frozen_ctrl
+            # temp 图可能在异步入队后才被清理；入队前先固定成稳定副本。
+            reference = self._stabilize_reference(reference)
+            control = self._stabilize_reference(control)
             # ★ 画幅提醒必须在这里就拦住。入队后再返回提醒，这一轮模型看不到，
             #   用户只收到半句话、图也永远不出（Kirusama 1152x1536 连卡五次）。
             if size or width or height:
@@ -2100,7 +3011,9 @@ class NcdComfyPlugin(star.Star):
                     "不用重复提交；画好会直接把图发到会话里。"
                 )
             busy_note = await self._busy_note_for_current()
-            self._spawn_image_job(event, job_kwargs)
+            spawn_error = self._spawn_image_job(event, job_kwargs)
+            if spawn_error:
+                return spawn_error
             logger.info(
                 f"[comfy] 云端异步出图已入队 → "
                 f"{str(getattr(event, 'unified_msg_origin', '') or '')}"
@@ -2120,7 +3033,7 @@ class NcdComfyPlugin(star.Star):
 
         text = str(prompt or "").strip()
         if not text:
-            return "出图失败：prompt 是空的。写一段英文标签式描述再调。"
+            return "出图失败：prompt 是空的。sdxl 写英文标签，其他模型可写自然语言。"
 
         want_preset = (preset or "").strip().lower()
         if want_preset and want_preset not in presets.PRESETS:
@@ -2217,6 +3130,9 @@ class NcdComfyPlugin(star.Star):
         except ValueError as exc:
             return f"出图失败：{exc}"
 
+        # 前 3 名：出队快照里的画幅上限（1080）在这里钳；群聊/管理员不受影响。
+        w, h = self._quota_clamp_size(event, w, h)
+
         # 提醒线：单边超过上限的 3/4 就先问一句（旧插件也是这么做的）
         warn = sizing.warn_side(max_side)
         if not force and max(w, h) > warn:
@@ -2226,6 +3142,7 @@ class NcdComfyPlugin(star.Star):
             self._conf_int("comfy_steps", 0) or info["steps"]
         )
         steps_val = max(1, min(150, steps_val))
+        steps_val = self._quota_effective_steps(event, steps_val)
         cfg_val = float(cfg or 0) or float(self._conf_float("comfy_cfg", 0) or info["cfg"])
         cfg_val = max(0.0, min(30.0, cfg_val))
         seed_val = sizing.normalize_seed(seed)
@@ -2338,7 +3255,23 @@ class NcdComfyPlugin(star.Star):
             logger.info("[comfy] 前台加载提示完成，进入出图槽")
 
         client = self._client()
-        async with self._gen_slot(event):
+        if not _ASYNC_RUN.get():
+            reserve_error = self._quota_sync_reserve(event)
+            if reserve_error:
+                return reserve_error
+            sync_wait = self._quota_sync_wait_seconds(event)
+            if sync_wait > 0:
+                logger.info(f"[comfy] 同步出图等间隔 {sync_wait}s")
+                try:
+                    await asyncio.sleep(sync_wait)
+                except asyncio.CancelledError:
+                    self._quota_sync_leave(event)
+                    raise
+        async with self._gen_slot(event, sync_quota=not _ASYNC_RUN.get()):
+            # 拿到渲染锁时再查一次禁生图：排队期间可能刚好触发 70 张。
+            blocked_late = self._quota_block_message(event)
+            if blocked_late:
+                return blocked_late
             started_at = time.time()
             try:
                 if not await asyncio.to_thread(client.healthy_sync):
@@ -2377,7 +3310,14 @@ class NcdComfyPlugin(star.Star):
                     control_preprocess=bool(control_preprocess),
                 )
                 async def _on_sampler() -> None:
-                    mode_label = "图生图" if ref_name else "文生图"
+                    if ctrl_name and ref_name:
+                        mode_label = "图生图（普通降噪 + 姿态控制）"
+                    elif ctrl_name:
+                        mode_label = "图生图（姿态控制）"
+                    elif ref_name:
+                        mode_label = "图生图（普通降噪）"
+                    else:
+                        mode_label = "文生图"
                     await self._notify(event, f"🖌️ 开始采样了…（{mode_label}）")
 
                 self._job = {
@@ -2400,6 +3340,9 @@ class NcdComfyPlugin(star.Star):
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"[comfy] 出图异常: {exc}", exc_info=True)
                 return f"出图失败：{type(exc).__name__}: {exc}"
+            finally:
+                # 成功/失败/超时都算这次任务结束；下一次同用户出队要看间隔。
+                self._quota_record_end(event)
 
         if await self._nsfw_blocked(event, data, image_prompt=text):
             logger.info("[comfy] 群聊图片被判 NSFW，已拒绝发送")
@@ -2423,10 +3366,9 @@ class NcdComfyPlugin(star.Star):
         umo_ev = str(getattr(event, "unified_msg_origin", "") or "")
         ok, wait = self._image_allowed(umo_ev, event)
         if not ok:
-            return (
-                f"这张图先不发了：这个会话 {wait} 秒内刚发过图。"
-                "提醒用户稍等再看，不要连续刷图。"
-            )
+            # 图已经画好了，别再像旧版那样直接丢掉；等够间隔再发。
+            logger.info(f"[comfy] 会话发图间隔未到，等待 {wait}s 后发送（不丢图）")
+            await asyncio.sleep(wait)
         await self._pace_send()
         self._last_image_at[umo_ev] = time.time()
         filename = str(image.get("filename") or "image.png")
@@ -2470,6 +3412,11 @@ class NcdComfyPlugin(star.Star):
             except Exception as exc2:  # noqa: BLE001
                 logger.error(f"[comfy] 发送生成的图失败: {exc2}", exc_info=True)
                 return f"图画好了但发送失败：{type(exc2).__name__}: {exc2}"
+
+        # ★ 图已经发出去了，才计入额度；失败/NSFW/会话间隔丢弃都不算。
+        await self._quota_on_success(
+            event, _QUOTA_JOB_ID.get() or uuid.uuid4().hex
+        )
 
         if _ASYNC_RUN.get():
             await self._append_image_history(umo_ev, path)
@@ -2524,11 +3471,11 @@ class NcdComfyPlugin(star.Star):
                 + "、".join(f"{os.path.basename(l['name'])}:{l['strength']:g}" for l in loras)
             )
         if ref_name:
-            used.append(f"图生图（参考图 denoise {denoise_val:g}）")
+            used.append(f"图生图（普通降噪，denoise {denoise_val:g}）")
         if ctrl_name:
             used.append(
-                f"控制图 {ctrl_type or 'auto'}（strength {ctrl_strength:g}，"
-                f"{ctrl_start:g}~{ctrl_end:g}）"
+                f"姿态控制（ControlNet {ctrl_type or 'auto'}，"
+                f"强度 {ctrl_strength:g}，{ctrl_start:g}~{ctrl_end:g}）"
             )
         queue_note = self._queue_note()
         busy_note = await self._busy_note_for_current()
@@ -2545,6 +3492,61 @@ class NcdComfyPlugin(star.Star):
             data,
         )
 
+    @filter.llm_tool(name="comfy_tag_lookup")
+    async def comfy_tag_lookup(
+        self,
+        event: AstrMessageEvent,
+        query: str,
+        scope: str = "auto",
+        limit: int = 8,
+    ) -> str:
+        """【查角色/标签优先调用】本地提示词库：角色、标签、别名、皮肤/头脸/身体/衣服。
+
+        什么时候用：
+          · 参考图认人后，先用 scope=character 查正式角色 tag（中英文/别名都行）。
+          · 知道角色 tag 后，用 scope=profile 查皮肤/变体、头脸、身体、衣服。
+          · 动作/服装/物件等普通词用 scope=tag；动作/场景/构图范本用 scope=codex 或 comfy_prompt_help。
+        本工具只查词，不出图；查到的 tag 由你拼进 comfy_generate.prompt。
+        不做出图审核过滤；审核在出图链路。
+
+        Args:
+            query(string): 角色名/中文名/英文 tag/动作词，如 初音未来 / hatsune_miku / choker。
+            scope(string): auto（默认，先标签再法典）/ tag / character / profile / codex。
+            limit(number): 每条返回几条，1~12，默认 8。
+        """
+        q = str(query or "").strip()
+        if not q:
+            return json.dumps(
+                {"error": "给个关键词，比如：初音未来 / choker / 女仆"},
+                ensure_ascii=False,
+            )
+        try:
+            n = max(1, min(12, int(limit or 8)))
+            lib = self._promptlib()
+            scope_low = str(scope or "auto").strip().lower()
+            if scope_low in ("profile", "角色详情", "详情"):
+                profile = await asyncio.to_thread(
+                    lib.character_profile, q, limit=n, skin_limit=12
+                )
+                if not profile:
+                    return json.dumps(
+                        {
+                            "error": f"「{q}」不是角色 tag，或标签库里没有。",
+                            "hint": "先用 scope=character 查角色正式 tag，再用 profile 查详情。",
+                        },
+                        ensure_ascii=False,
+                    )
+                return json.dumps(profile, ensure_ascii=False)
+            result = await asyncio.to_thread(
+                lib.query, q, limit=n, codex_limit=min(5, n), scope=scope_low
+            )
+            return json.dumps(result.to_dict(), ensure_ascii=False)
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 标签库查询失败: {exc}", exc_info=True)
+            return json.dumps(
+                {"error": f"{type(exc).__name__}: {exc}"}, ensure_ascii=False
+            )
+
     @filter.llm_tool(name="comfy_prompt_help")
     async def comfy_prompt_help(
         self,
@@ -2553,14 +3555,14 @@ class NcdComfyPlugin(star.Star):
         category: str = "auto",
         limit: int = 5,
     ) -> str:
-        """【写画图 prompt 前优先调用】查本地两套提示词法典（只读）。
+        """【查法典范本】只查动作/场景/构图/风格，不查角色/服装 tag。
 
         两套法典：
-          · sfw  = 常规构图/服装/姿势/光影/画风；
+          · sfw  = 常规构图/场景/姿势/光影/画风；
           · nsfw = 私聊的涩涩姿势/身体/液体/表情。
         私聊默认 category=auto → 两套都查；群聊 auto → 只查 sfw。
-        法典是长篇 tag 语料，返回匹配条目 + 一条可直接用的 suggested_prompt。
-        想写角色/服装/姿势/光影/画风前先查，别凭印象编标签。
+        角色/服装/标签请用 comfy_tag_lookup，不要在本工具里找角色。
+        返回匹配条目 + 一条可直接用的 suggested_prompt；不要把整段法典原文塞进 prompt。
 
         Args:
             query(string): 关键词，多个用空格或逗号分隔（支持中英文）。
@@ -2872,7 +3874,12 @@ class NcdComfyPlugin(star.Star):
 
     @filter.llm_tool(name="comfy_status")
     async def comfy_status(self, event: AstrMessageEvent) -> str:
-        """看 ComfyUI 后端的运行状态（起没起来、端口、显存、队列）。"""
+        """看 ComfyUI 后端的运行状态（起没起来、端口、显存、队列）。
+
+        ★ 用户问「还在画吗 / 排到哪了 / 怎么还没出图 / 任务还在不在」时，
+        必须先调用本工具再回答。不要凭上下文猜队列状态；上一次工具返回的
+        “已交给后台”不代表现在还在跑，出图失败也可能已经结束。
+        """
         gate = self._gate(event, "comfy_status")
         if gate:
             return gate
@@ -3217,33 +4224,53 @@ class NcdComfyPlugin(star.Star):
         path.write_bytes(data)
         return path
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
-    @filter.command("comfyui", alias={"comfy"})
+    @filter.command(
+        "comfyui",
+        alias={"comfy", "／comfyui", "\\comfyui", "＼comfyui"},
+    )
     async def comfyui_cmd(self, event: AstrMessageEvent, args: GreedyStr = ""):
         """开关 ComfyUI 进程：/comfyui off 关闭，/comfyui on 启动，不带参数看状态。"""
         sub = str(args or "").strip().lower()
+        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        is_admin = self._is_admin_event(event)
+        logger.info(
+            f"[comfy] /comfyui 收到 sub={sub!r} sender={sender} "
+            f"admin={is_admin} role={getattr(event, 'role', '')!r}"
+        )
+        if not is_admin:
+            yield event.plain_result("这个指令只有管理员能用。")
+            return
         client = self._client()
         port = self._conf_int("comfy_port", 8199)
 
         if sub in ("off", "stop", "close", "关", "关闭"):
             if not client.running():
-                return (
+                yield event.plain_result(
                     "ComfyUI 没在运行（可能已经关了，或者这个进程不是插件拉起的，"
                     "我不会去动别人的进程）。"
                 )
+                return
             client.stop()
             logger.info("[comfy] 用户执行 /comfyui off，已停止 ComfyUI")
-            return "已关闭 ComfyUI。下次出图或发语音时会自动重新拉起。"
+            yield event.plain_result("已关闭 ComfyUI。下次出图或发语音时会自动重新拉起。")
+            return
 
         if sub in ("on", "start", "开", "启动"):
             try:
                 await client.ensure_server()
             except Exception as exc:  # noqa: BLE001
-                return f"启动 ComfyUI 失败：{type(exc).__name__}: {exc}"
-            return f"ComfyUI 已启动（端口 {port}）。"
+                yield event.plain_result(
+                    f"启动 ComfyUI 失败：{type(exc).__name__}: {exc}"
+                )
+                return
+            yield event.plain_result(f"ComfyUI 已启动（端口 {port}）。")
+            return
 
         if sub not in ("", "status", "状态", "?"):
-            return "用法：/comfyui off 关闭 · /comfyui on 启动 · /comfyui 看状态"
+            yield event.plain_result(
+                "用法：/comfyui off 关闭 · /comfyui on 启动 · /comfyui 看状态"
+            )
+            return
 
         running = client.running()
         try:
@@ -3251,10 +4278,19 @@ class NcdComfyPlugin(star.Star):
         except Exception:  # noqa: BLE001
             healthy = False
         if running:
-            return f"ComfyUI 由插件拉起，运行中（端口 {port}，健康检查{'通过' if healthy else '失败'}）。"
+            yield event.plain_result(
+                f"ComfyUI 由插件拉起，运行中（端口 {port}，"
+                f"健康检查{'通过' if healthy else '失败'}）。"
+            )
+            return
         if healthy:
-            return f"端口 {port} 上有 ComfyUI 在跑，但不是插件拉起的（我不会去关它）。"
-        return f"ComfyUI 未运行（端口 {port}）。出图或发语音时会自动拉起。"
+            yield event.plain_result(
+                f"端口 {port} 上有 ComfyUI 在跑，但不是插件拉起的（我不会去关它）。"
+            )
+            return
+        yield event.plain_result(
+            f"ComfyUI 未运行（端口 {port}）。出图或发语音时会自动拉起。"
+        )
 
     @staticmethod
     def _load_reload_notices() -> dict[str, dict]:
@@ -3331,6 +4367,9 @@ class NcdComfyPlugin(star.Star):
     async def terminate(self) -> None:
         """插件卸载/重载时收掉后台任务和自己拉起的 ComfyUI。"""
         self._closing = True
+        # 重载前把额度状态落盘；没加载过就不写，避免生成空档。
+        if getattr(self, "_quota_engine_obj", None) is not None:
+            self._quota_save()
         # 先快照：cancel 之后队列/current 会被清掉，就统计不到要通知谁了。
         interrupted = self._interrupted_job_counts()
         self._save_reload_notices(interrupted)
@@ -3355,6 +4394,7 @@ class NcdComfyPlugin(star.Star):
         self._bg_tasks.clear()
         self._bg_umo.clear()
         self._img_queues.clear()
+        self._quota_sync_waiting.clear()
         self._img_user_order.clear()
         self._img_current = None
         self._img_worker = None

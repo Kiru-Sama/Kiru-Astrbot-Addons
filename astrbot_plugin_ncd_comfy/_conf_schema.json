@@ -74,8 +74,8 @@
   "comfy_timeout": {
     "type": "int",
     "description": "单次出图超时（秒）",
-    "hint": "从提交到出图的总时长上限。MOSS 50 步 + 首次加载可能 2 分钟，别设太小。",
-    "default": 300
+    "hint": "从提交到出图的总时长上限。MOSS 50 步 + ControlNet + 首次加载可能超过 5 分钟，默认 600；看门狗会再多留 120 秒。",
+    "default": 600
   },
   "comfy_startup_timeout": {
     "type": "int",
@@ -305,10 +305,106 @@
     "hint": "目录里放 sfw.txt / nsfw.txt；首次运行会从旧绘图插件的 kb/docs 自动复制一份。",
     "default": ""
   },
+  "comfy_prompt_lib_dir": {
+    "type": "string",
+    "description": "本地提示词库查询项目目录（留空=自动找工作区）",
+    "hint": "指向含「词库\\idx2.pkl」的那一层；留空时自动找 F:\\Deepseek Harness WorkTable\\本地提示词库\\本地提示词库查询项目。",
+    "default": ""
+  },
   "comfy_codex_max_chars": {
     "type": "int",
     "description": "单次检索最多返回多少字",
     "hint": "默认 1800；调小更省 token，调大能多给几条。",
     "default": 1800
+  },
+  "comfy_quota_global_enabled": {
+    "type": "bool",
+    "description": "启用全局 30 张触发线",
+    "hint": "开（默认）：私聊成功生图超过 30 张后启用前 5 限流、前 3 画幅；关：只保留单用户 50/70。30 是触发线，不是硬上限。",
+    "default": true
+  },
+  "comfy_quota_global_limit": {
+    "type": "int",
+    "description": "全局触发张数",
+    "hint": "默认 30；严格超过才触发（30 不触发，31 触发）。",
+    "default": 30
+  },
+  "comfy_quota_throttle_top": {
+    "type": "int",
+    "description": "限流池人数",
+    "hint": "默认 5；按单日榜取前 N 名，同分在位者优先。",
+    "default": 5
+  },
+  "comfy_quota_canvas_top": {
+    "type": "int",
+    "description": "画幅池人数",
+    "hint": "默认 3；按同一张单日榜取前 N 名。",
+    "default": 3
+  },
+  "comfy_quota_canvas_max_side": {
+    "type": "int",
+    "description": "画幅池最长边上限",
+    "hint": "默认 1080；只作用当前日榜前 3，等比缩到 8 的倍数。",
+    "default": 1080
+  },
+  "comfy_quota_queue_limited": {
+    "type": "int",
+    "description": "限流用户排队上限",
+    "hint": "默认 1；只算排队，不含正在画的那张。",
+    "default": 1
+  },
+  "comfy_quota_queue_normal": {
+    "type": "int",
+    "description": "普通用户排队上限",
+    "hint": "默认 3；只算排队，不含正在画的那张。",
+    "default": 3
+  },
+  "comfy_quota_interval_base": {
+    "type": "int",
+    "description": "限流间隔公式基数（秒）",
+    "hint": "默认 120；第 n 名间隔 = 120 - n*10，n=1..5，即 110/100/90/80/70 秒。",
+    "default": 120
+  },
+  "comfy_quota_interval_step": {
+    "type": "int",
+    "description": "限流间隔每名递减（秒）",
+    "hint": "默认 10。",
+    "default": 10
+  },
+  "comfy_quota_degrade_after": {
+    "type": "int",
+    "description": "单用户降质张数",
+    "hint": "默认 50；严格超过后新任务强制降质步数（50 不降，51 降）。",
+    "default": 50
+  },
+  "comfy_quota_degrade_steps": {
+    "type": "int",
+    "description": "降质后的采样步数",
+    "hint": "默认 20；只作用私聊，群聊/管理员不受影响。",
+    "default": 20
+  },
+  "comfy_quota_ban_after": {
+    "type": "int",
+    "description": "单用户禁生图张数",
+    "hint": "默认 70；严格超过后禁生图（70 不封，71 封）。",
+    "default": 70
+  },
+  "comfy_quota_ban_hours": {
+    "type": "int",
+    "description": "禁生图时长（小时）",
+    "hint": "默认 36；从触发时刻起算，不随 08:00 自动解除。",
+    "default": 36
+  },
+  "comfy_quota_bypass_ids": {
+    "type": "string",
+    "description": "额度白名单 QQ（逗号分隔）",
+    "hint": "默认空；管理员本身已自动绕过。填了也不计入排行榜。",
+    "default": ""
+  },
+  "comfy_quota_window_hour": {
+    "type": "int",
+    "description": "每日统计窗口起点（小时）",
+    "hint": "默认 8，即 08:00–次日 08:00；中国时区固定 +8。",
+    "default": 8
   }
 }
