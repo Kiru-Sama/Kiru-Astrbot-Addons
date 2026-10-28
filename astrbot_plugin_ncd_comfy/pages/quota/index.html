@@ -448,7 +448,9 @@ function renderBoard(data) {
       if (row.canvas_limited) {
         st.appendChild(badge(String(row.canvas_max_side || 1080), "blue"));
       }
-      if (row.degraded) st.appendChild(badge("20 步", "warn"));
+      if (row.degraded) {
+        st.appendChild(badge((row.degrade_steps || 20) + " 步", "warn"));
+      }
       if (!st.childNodes.length) st.appendChild(badge("正常", "ok"));
       tr.appendChild(st);
     } else if (board === "total") {
