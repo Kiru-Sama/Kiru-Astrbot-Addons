@@ -75,9 +75,26 @@
   .notice { background:#fff7e6; border:1px solid #f5d9a8; color:#8a5a00;
     border-radius:10px; padding:9px 12px; font-size:12px; margin-bottom:12px; }
   .notice b { font-weight:700; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .ctrls { display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:8px 12px; }
+  .ctrl { display:flex; flex-direction:column; gap:3px; min-width:0; }
+  .ctrl label { font-size:11px; color:var(--muted); }
+  .ctrl input { width:100%; padding:5px 7px; border:1px solid var(--border);
+    border-radius:7px; font:13px/1.4 "Segoe UI","Microsoft YaHei",sans-serif;
+    color:var(--text); background:#fbfcfe; }
+  .ctrl input[type=checkbox] { width:auto; align-self:flex-start; }
+  .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  .sponsor-row { display:flex; align-items:center; gap:10px; padding:7px 0;
+    border-bottom:1px solid var(--border); }
+  .sponsor-row:last-child { border-bottom:none; }
+  .sponsor-row .who { min-width:150px; }
+  .sponsor-row .sum { flex:1; color:var(--muted); font-size:11px; }
+  .sponsor-row button { padding:3px 9px; font-size:12px; }
   @media (max-width:860px) {
     .cards { grid-template-columns:repeat(2,minmax(0,1fr)); }
     .grid { grid-template-columns:1fr; }
+    .ctrls { grid-template-columns:repeat(2,minmax(0,1fr)); }
   }
 </style>
 </head>
@@ -102,7 +119,7 @@
     <div id="rank"><div class="empty">加载中…</div></div>
   </section>
   <section class="card">
-    <h2>50 / 70 进度</h2>
+    <h2>50 / 70 进度 <span class="sub">按个人阈值</span></h2>
     <div id="watch"><div class="empty">加载中…</div></div>
   </section>
 </div>
@@ -110,6 +127,27 @@
 <section class="card" style="margin-top:12px">
   <h2>禁生图</h2>
   <div id="bans"><div class="empty">加载中…</div></div>
+</section>
+
+<section class="card" style="margin-top:12px" id="controlCard">
+  <h2>数值控制 <span class="sub">保存后立即生效 · 面板与插件配置同一份文件</span></h2>
+  <div class="ctrls" id="globalFields"></div>
+  <div class="actions">
+    <button id="saveConfig" class="primary" type="button">保存全局阈值</button>
+    <button id="resetConfig" type="button">恢复默认数值</button>
+  </div>
+
+  <h2 style="margin-top:18px">赞助者单独额度
+    <span class="sub">仍计入张数/排行，不占普通前 5/前 3</span>
+  </h2>
+  <div class="ctrls" id="sponsorFields"></div>
+  <div class="actions">
+    <button id="saveSponsor" class="primary" type="button">保存赞助者</button>
+    <button id="clearSponsor" type="button">清空表单</button>
+  </div>
+  <div id="sponsorList" style="margin-top:10px">
+    <div class="empty">还没有赞助者。</div>
+  </div>
 </section>
 
 <div class="status" id="status"></div>
@@ -177,6 +215,174 @@ function badge(text, cls) {
   return el("span", "badge" + (cls ? " " + cls : ""), text);
 }
 
+const GLOBAL_FIELDS = [
+  { k: "global_enabled", label: "启用全局 30 触发线", type: "bool" },
+  { k: "global_limit", label: "全局触发张数" },
+  { k: "throttle_top", label: "限流池前 N 名" },
+  { k: "canvas_top", label: "画幅池前 N 名" },
+  { k: "canvas_max_side", label: "画幅最长边" },
+  { k: "queue_limited", label: "限流队列上限" },
+  { k: "queue_normal", label: "普通队列上限" },
+  { k: "interval_base", label: "间隔基数（秒）" },
+  { k: "interval_step", label: "间隔递减（秒）" },
+  { k: "degrade_after", label: "降质张数" },
+  { k: "degrade_steps", label: "降质步数" },
+  { k: "ban_after", label: "禁生图张数" },
+  { k: "ban_hours", label: "禁生图小时" },
+  { k: "window_hour", label: "窗口起点（小时）" },
+  { k: "bypass_ids", label: "完全绕过 QQ（逗号分隔）", type: "text" },
+];
+const SPONSOR_FIELDS = [
+  { k: "user_id", label: "赞助者 QQ", type: "text" },
+  { k: "note", label: "备注/名字", type: "text" },
+  { k: "queue_cap", label: "队列上限", placeholder: "默认 3" },
+  { k: "interval_seconds", label: "间隔（秒）", placeholder: "默认 0" },
+  { k: "canvas_max_side", label: "画幅最长边（0=不限）", placeholder: "默认" },
+  { k: "degrade_after", label: "降质张数", placeholder: "默认 50" },
+  { k: "degrade_steps", label: "降质步数", placeholder: "默认 20" },
+  { k: "ban_after", label: "禁生图张数", placeholder: "默认 70" },
+  { k: "ban_hours", label: "禁生图小时", placeholder: "默认 36" },
+];
+let _fieldsBuilt = false;
+let _configFilled = false;
+
+function makeField(field, box, prefix) {
+  const wrap = el("div", "ctrl");
+  wrap.appendChild(el("label", "", field.label));
+  const input = el("input");
+  input.id = prefix + field.k;
+  input.dataset.k = field.k;
+  if (field.type === "bool") {
+    input.type = "checkbox";
+  } else if (field.type === "text") {
+    input.type = "text";
+  } else {
+    input.type = "number";
+    input.step = "1";
+    input.min = "0";
+    if (field.placeholder) input.placeholder = field.placeholder;
+  }
+  wrap.appendChild(input);
+  box.appendChild(wrap);
+  return input;
+}
+function buildFields() {
+  if (_fieldsBuilt) return;
+  _fieldsBuilt = true;
+  const gf = $("globalFields");
+  const sf = $("sponsorFields");
+  if (gf) GLOBAL_FIELDS.forEach((f) => makeField(f, gf, "gf_"));
+  if (sf) SPONSOR_FIELDS.forEach((f) => makeField(f, sf, "sf_"));
+}
+function fillGlobal(cfg) {
+  GLOBAL_FIELDS.forEach((f) => {
+    const node = $("gf_" + f.k);
+    if (!node) return;
+    const v = cfg ? cfg[f.k] : undefined;
+    if (f.type === "bool") node.checked = !!v;
+    else node.value = v === undefined || v === null ? "" : v;
+  });
+  _configFilled = true;
+}
+function readGlobal() {
+  const out = {};
+  GLOBAL_FIELDS.forEach((f) => {
+    const node = $("gf_" + f.k);
+    if (!node) return;
+    if (f.type === "bool") out[f.k] = !!node.checked;
+    else if (f.type === "text") out[f.k] = node.value.trim();
+    else if (node.value !== "") out[f.k] = Number(node.value);
+  });
+  return out;
+}
+async function saveGlobal(values, doneText) {
+  try {
+    const r = await P.apiPost("/ncd-comfy/quota/config", { values });
+    if (r && r.error) throw new Error(r.error);
+    fillGlobal((r && r.config) || values);
+    setStatus(doneText || "全局阈值已保存", "ok");
+    load();
+  } catch (err) {
+    setStatus("保存失败：" + (err && err.message ? err.message : err), "err");
+  }
+}
+function fillSponsor(ov) {
+  const data = ov || {};
+  SPONSOR_FIELDS.forEach((f) => {
+    const node = $("sf_" + f.k);
+    if (!node) return;
+    const v = data[f.k];
+    node.value = v === undefined || v === null ? "" : v;
+  });
+}
+function readSponsor() {
+  const uid = ($("sf_user_id") || {}).value || "";
+  const overrides = {};
+  const note = (($("sf_note") || {}).value || "").trim();
+  if (note) overrides.note = note;
+  ["queue_cap", "interval_seconds", "canvas_max_side",
+    "degrade_after", "degrade_steps", "ban_after", "ban_hours"].forEach((k) => {
+    const node = $("sf_" + k);
+    if (node && node.value !== "") overrides[k] = Number(node.value);
+  });
+  return { user_id: uid.trim(), overrides };
+}
+function renderSponsors(overrides) {
+  const box = $("sponsorList");
+  if (!box) return;
+  box.replaceChildren();
+  const rows = Object.entries(overrides || {});
+  if (!rows.length) {
+    box.appendChild(el("div", "empty", "还没有赞助者。"));
+    return;
+  }
+  rows.forEach(([uid, ov]) => {
+    const row = el("div", "sponsor-row");
+    const who = el("div", "who");
+    const nm = (ov.name || "").trim();
+    who.appendChild(el("div", "name", nm || uid));
+    who.appendChild(el("div", "uid", uid + (nm ? "" : "")));
+    row.appendChild(who);
+    const cfg = (lastData && lastData.config) || {};
+    const ds = ov.degrade_steps !== undefined
+      ? ov.degrade_steps : (cfg.degrade_steps ?? 20);
+    const bh = ov.ban_hours !== undefined
+      ? ov.ban_hours : (cfg.ban_hours ?? 36);
+    const bits = [];
+    if (ov.queue_cap !== undefined) bits.push("队列 " + ov.queue_cap);
+    if (ov.interval_seconds !== undefined) bits.push("间隔 " + ov.interval_seconds + "s");
+    if (ov.canvas_max_side !== undefined) {
+      bits.push("画幅 " + (Number(ov.canvas_max_side) > 0 ? ov.canvas_max_side : "不限"));
+    }
+    if (ov.degrade_after !== undefined) {
+      bits.push("降质 " + ov.degrade_after + " 张/" + ds + " 步");
+    }
+    if (ov.ban_after !== undefined) {
+      bits.push("禁生 " + ov.ban_after + " 张/" + bh + "h");
+    }
+    row.appendChild(el("div", "sum", bits.join(" · ") || "全部默认，仅不占池"));
+    const edit = el("button", "", "编辑");
+    edit.type = "button";
+    edit.onclick = () => fillSponsor({ ...ov, user_id: uid });
+    row.appendChild(edit);
+    const del = el("button", "", "删除");
+    del.type = "button";
+    del.onclick = async () => {
+      try {
+        const r = await P.apiPost("/ncd-comfy/quota/sponsor",
+          { user_id: uid, action: "remove" });
+        if (r && r.error) throw new Error(r.error);
+        setStatus("已删除赞助者 " + uid, "ok");
+        load();
+      } catch (err) {
+        setStatus("删除失败：" + (err && err.message ? err.message : err), "err");
+      }
+    };
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+}
+
 function renderTabs() {
   const box = $("rank-tabs");
   if (!box) return;
@@ -238,7 +444,10 @@ function renderBoard(data) {
       const st = el("td");
       if (row.banned) st.appendChild(badge("禁生", "bad"));
       if (row.throttled) st.appendChild(badge("限流", "warn"));
-      if (row.canvas_limited) st.appendChild(badge("1080", "blue"));
+      if (row.sponsor) st.appendChild(badge("赞助", "blue"));
+      if (row.canvas_limited) {
+        st.appendChild(badge(String(row.canvas_max_side || 1080), "blue"));
+      }
       if (row.degraded) st.appendChild(badge("20 步", "warn"));
       if (!st.childNodes.length) st.appendChild(badge("正常", "ok"));
       tr.appendChild(st);
@@ -265,6 +474,12 @@ function render(data) {
   const dailyRows = Array.isArray(data.ranking) ? data.ranking : [];
   lastData = data;
   renderTabs();
+  buildFields();
+  const editing = document.activeElement && document.activeElement.closest
+    ? document.activeElement.closest("#controlCard")
+    : null;
+  if (!_configFilled || !editing) fillGlobal(data.config || {});
+  renderSponsors(data.overrides || {});
 
   $("window").textContent = (w.label || "—") +
     (w.remaining ? " · 距重置 " + fmtDur(w.remaining) : "");
@@ -310,16 +525,18 @@ function render(data) {
       const main = el("div", "watch-main");
       const top = el("div", "watch-top");
       const nm = nameOf(row);
+      const da = Number(row.degrade_after) || 50;
+      const ba = Number(row.ban_after) || 70;
       top.appendChild(el("span", "n", nm.name));
       top.appendChild(el("span", "c",
-        (row.count || 0) + "/50 · " + (row.count || 0) + "/70"));
+        (row.count || 0) + "/" + da + " · " + (row.count || 0) + "/" + ba));
       main.appendChild(top);
       const bar = el("div", "mini");
       const fill = el("i");
       fill.style.width = Math.max(0, Math.min(100,
-        (Number(row.count) || 0) / 70 * 100)) + "%";
-      if ((row.count || 0) >= 70) fill.className = "bad";
-      else if ((row.count || 0) >= 50) fill.className = "warn";
+        (Number(row.count) || 0) / ba * 100)) + "%";
+      if ((row.count || 0) >= ba) fill.className = "bad";
+      else if ((row.count || 0) >= da) fill.className = "warn";
       bar.appendChild(fill);
       main.appendChild(bar);
       wrap.appendChild(main);
@@ -367,6 +584,34 @@ async function load() {
 }
 
 $("refresh").addEventListener("click", load);
+$("saveConfig").addEventListener("click", () => {
+  saveGlobal(readGlobal(), "全局阈值已保存");
+});
+$("resetConfig").addEventListener("click", () => {
+  const defs = lastData && lastData.defaults;
+  if (!defs) {
+    setStatus("默认值还没加载，稍后再试", "err");
+    return;
+  }
+  fillGlobal(defs);
+  saveGlobal(defs, "已恢复默认数值");
+});
+$("clearSponsor").addEventListener("click", () => fillSponsor({}));
+$("saveSponsor").addEventListener("click", async () => {
+  const payload = readSponsor();
+  if (!/^\d{5,12}$/.test(payload.user_id)) {
+    setStatus("赞助者 QQ 号格式不对", "err");
+    return;
+  }
+  try {
+    const r = await P.apiPost("/ncd-comfy/quota/sponsor", payload);
+    if (r && r.error) throw new Error(r.error);
+    setStatus("赞助者 " + payload.user_id + " 已保存", "ok");
+    load();
+  } catch (err) {
+    setStatus("保存失败：" + (err && err.message ? err.message : err), "err");
+  }
+});
 load();
 timer = setInterval(load, 5000);
 document.addEventListener("visibilitychange", () => {

@@ -126,6 +126,10 @@ class QuotaState:
     speech_counts: dict[str, int] = field(default_factory=dict)
     speech_totals: dict[str, int] = field(default_factory=dict)
     speech_last: dict[str, float] = field(default_factory=dict)
+    # 赞助者单独额度：QQ -> {queue_cap, interval_seconds, canvas_max_side,
+    # degrade_after, degrade_steps, ban_after, ban_hours, exclude_pool, note}
+    # 不随 08:00 清空；仍计入张数/排行，只是不占普通前 5/前 3。
+    sponsor_overrides: dict[str, dict] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -148,6 +152,11 @@ class QuotaState:
             },
             "speech_last": {
                 str(k): float(v) for k, v in self.speech_last.items()
+            },
+            "sponsor_overrides": {
+                str(k): dict(v)
+                for k, v in self.sponsor_overrides.items()
+                if isinstance(v, dict)
             },
         }
 
@@ -182,6 +191,11 @@ class QuotaState:
             speech_last={
                 str(k): float(v)
                 for k, v in (data.get("speech_last") or {}).items()
+            },
+            sponsor_overrides={
+                str(k): dict(v)
+                for k, v in (data.get("sponsor_overrides") or {}).items()
+                if isinstance(v, dict)
             },
         )
 
@@ -220,6 +234,7 @@ class QuotaSnapshot:
     degraded: bool
     banned: bool
     ban_until: float | None
+    sponsor: bool = False
 
 
 @dataclass(frozen=True)
@@ -246,6 +261,12 @@ class RankEntry:
     ban_until: float | None
     interval_seconds: int
     queue_cap: int | None
+    sponsor: bool = False
+    canvas_max_side: int | None = None
+    degrade_after: int = 50
+    degrade_steps: int = 20
+    ban_after: int = 70
+    ban_hours: int = 36
 
 
 class QuotaEngine:
@@ -306,6 +327,97 @@ class QuotaEngine:
         until = self.state.bans.get(user_id)
         return bool(until and until > now)
 
+    # ---- 赞助者单独额度 ----
+    _OVERRIDE_INT_RANGES = {
+        "queue_cap": (1, 100),
+        "interval_seconds": (0, 3600),
+        "canvas_max_side": (0, 4096),
+        "degrade_after": (1, 100000),
+        "degrade_steps": (1, 150),
+        "ban_after": (1, 100000),
+        "ban_hours": (0, 720),
+    }
+
+    def _ov(self, user_id: str) -> dict:
+        value = self.state.sponsor_overrides.get(str(user_id or ""))
+        return value if isinstance(value, dict) else {}
+
+    def is_sponsor(self, user_id: str) -> bool:
+        return bool(self._ov(user_id))
+
+    def _ov_int(self, user_id: str, key: str, default: int) -> int:
+        raw = self._ov(user_id).get(key)
+        if raw is None or raw == "":
+            return int(default)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return int(default)
+
+    def limits_for(self, user_id: str) -> dict:
+        """该用户实际生效的 50/70 阈值（赞助者取覆盖）。"""
+        return {
+            "degrade_after": self._ov_int(
+                user_id, "degrade_after", int(self.config.degrade_after)
+            ),
+            "degrade_steps": self._ov_int(
+                user_id, "degrade_steps", int(self.config.degrade_steps)
+            ),
+            "ban_after": self._ov_int(
+                user_id, "ban_after", int(self.config.ban_after)
+            ),
+            "ban_hours": self._ov_int(
+                user_id, "ban_hours", int(self.config.ban_hours)
+            ),
+        }
+
+    def set_override(
+        self, user_id: str, values: dict, now: float | None = None
+    ) -> dict:
+        """整表覆盖某个赞助者的额度；空表等同删除。"""
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            raise ValueError("user_id 不能为空")
+        if not isinstance(values, dict):
+            raise ValueError("overrides 必须是对象")
+        clean: dict[str, object] = {}
+        for key, (low, high) in self._OVERRIDE_INT_RANGES.items():
+            raw = values.get(key)
+            if raw is None or raw == "":
+                continue
+            try:
+                num = int(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} 必须是整数") from None
+            clean[key] = max(low, min(high, num))
+        note = str(values.get("note") or "").strip()[:40]
+        if note:
+            clean["note"] = note
+        if not clean:
+            self.remove_override(user_id, now=now)
+            return {}
+        clean["exclude_pool"] = True
+        self.state.sponsor_overrides[user_id] = clean
+        now = self._now(now)
+        self._ensure_window(now)
+        self._maintain_pools(now)
+        return dict(clean)
+
+    def remove_override(self, user_id: str, now: float | None = None) -> bool:
+        user_id = str(user_id or "").strip()
+        existed = self.state.sponsor_overrides.pop(user_id, None) is not None
+        if existed:
+            now = self._now(now)
+            self._ensure_window(now)
+            self._maintain_pools(now)
+        return existed
+
+    def sponsors(self) -> list[dict]:
+        rows = []
+        for user_id, values in sorted(self.state.sponsor_overrides.items()):
+            rows.append({"user_id": user_id, **dict(values)})
+        return rows
+
     def _order(self, previous: list[str], users: set[str]) -> list[str]:
         """按（张数降序，在位者优先，同分更早达到优先，id）排序。
 
@@ -334,7 +446,9 @@ class QuotaEngine:
         eligible = {
             u
             for u, count in self.state.counts.items()
-            if count > 0 and not self._is_banned(u, now)
+            if count > 0
+            and not self._is_banned(u, now)
+            and u not in self.state.sponsor_overrides
         }
         return self._order(previous, eligible)[:size]
 
@@ -389,12 +503,44 @@ class QuotaEngine:
         for user_id, rank in sorted(self._rank_map().items(), key=lambda kv: kv[1]):
             count = int(self.state.counts.get(user_id, 0))
             banned = self._is_banned(user_id, now)
+            sponsor = self.is_sponsor(user_id)
             throttled = bool(
-                active and not banned and user_id in self.state.throttle_pool
+                active
+                and not banned
+                and not sponsor
+                and user_id in self.state.throttle_pool
             )
             canvas = bool(
-                active and not banned and user_id in self.state.canvas_pool
+                active
+                and not banned
+                and not sponsor
+                and user_id in self.state.canvas_pool
             )
+            limits = self.limits_for(user_id)
+            degrade_after = limits["degrade_after"]
+            interval = 0
+            if sponsor:
+                interval = max(
+                    0, self._ov_int(user_id, "interval_seconds", 0)
+                )
+            elif throttled:
+                interval = self._interval_for(user_id)
+            if banned:
+                queue_cap = 0
+            elif sponsor:
+                queue_cap = self._ov_int(
+                    user_id, "queue_cap", int(self.config.queue_normal)
+                )
+            elif throttled:
+                queue_cap = int(self.config.queue_limited)
+            else:
+                queue_cap = int(self.config.queue_normal)
+            canvas_side = None
+            if sponsor:
+                cap = self._ov_int(user_id, "canvas_max_side", 0)
+                canvas_side = cap if cap > 0 else None
+            elif canvas:
+                canvas_side = int(self.config.canvas_max_side)
             rows.append(
                 RankEntry(
                     user_id=user_id,
@@ -404,21 +550,17 @@ class QuotaEngine:
                     last_success=self.state.last_success.get(user_id),
                     throttled=throttled,
                     canvas_limited=canvas,
-                    degraded=count > int(self.config.degrade_after),
+                    degraded=count > degrade_after,
                     banned=banned,
                     ban_until=(self.state.bans.get(user_id) if banned else None),
-                    interval_seconds=(
-                        self._interval_for(user_id) if throttled else 0
-                    ),
-                    queue_cap=(
-                        0
-                        if banned
-                        else (
-                            int(self.config.queue_limited)
-                            if throttled
-                            else int(self.config.queue_normal)
-                        )
-                    ),
+                    interval_seconds=interval,
+                    queue_cap=queue_cap,
+                    sponsor=sponsor,
+                    canvas_max_side=canvas_side,
+                    degrade_after=limits["degrade_after"],
+                    degrade_steps=limits["degrade_steps"],
+                    ban_after=limits["ban_after"],
+                    ban_hours=limits["ban_hours"],
                 )
             )
         return rows
@@ -530,6 +672,11 @@ class QuotaEngine:
             "ranking": daily,
             "rankings": rankings,
             "bans": bans,
+            "overrides": {
+                str(k): dict(v)
+                for k, v in self.state.sponsor_overrides.items()
+                if isinstance(v, dict)
+            },
             "totals": {
                 "users": len(self.state.total_counts),
                 "images": sum(int(v) for v in self.state.total_counts.values()),
@@ -577,6 +724,15 @@ class QuotaEngine:
         bypass = bool(admin or user_id in self.config.bypass_ids)
         daily = int(self.state.counts.get(user_id, 0))
         total = int(self.state.total_counts.get(user_id, 0))
+        degrade_after = self._ov_int(
+            user_id, "degrade_after", int(self.config.degrade_after)
+        )
+        ban_after = self._ov_int(
+            user_id, "ban_after", int(self.config.ban_after)
+        )
+        ban_hours = self._ov_int(
+            user_id, "ban_hours", int(self.config.ban_hours)
+        )
 
         if bypass or not private:
             return RecordResult(
@@ -599,7 +755,7 @@ class QuotaEngine:
                 reminder_due=False,
                 ban_triggered=False,
                 ban_until=self.state.bans.get(user_id),
-                degraded=daily > int(self.config.degrade_after),
+                degraded=daily > degrade_after,
             )
 
         daily += 1
@@ -610,15 +766,15 @@ class QuotaEngine:
         self._remember_job(job_id)
         self._maintain_pools(now)
 
-        degraded = daily > int(self.config.degrade_after)
+        degraded = daily > degrade_after
         reminder_due = bool(degraded and user_id not in self.state.reminded)
         if reminder_due:
             self.state.reminded.add(user_id)
 
         ban_until = self.state.bans.get(user_id)
         ban_triggered = False
-        if daily > int(self.config.ban_after) and not (ban_until and ban_until > now):
-            ban_until = now + max(0, int(self.config.ban_hours)) * 3600
+        if daily > ban_after and not (ban_until and ban_until > now):
+            ban_until = now + max(0, ban_hours) * 3600
             self.state.bans[user_id] = ban_until
             ban_triggered = True
             # 被禁生图的人不再占限流/画幅名额。
@@ -714,6 +870,7 @@ class QuotaEngine:
         self._ensure_window(now)
         user_id = str(user_id)
         bypass = bool(admin or user_id in self.config.bypass_ids)
+        sponsor = bool(not bypass and self.is_sponsor(user_id))
 
         daily = int(self.state.counts.get(user_id, 0))
         total = int(self.state.total_counts.get(user_id, 0))
@@ -732,6 +889,7 @@ class QuotaEngine:
         throttled = bool(
             private
             and not bypass
+            and not sponsor
             and not banned
             and triggered
             and user_id in self.state.throttle_pool
@@ -739,12 +897,17 @@ class QuotaEngine:
         canvas = bool(
             private
             and not bypass
+            and not sponsor
             and not banned
             and triggered
             and user_id in self.state.canvas_pool
         )
 
-        interval = self._interval_for(user_id) if throttled else 0
+        interval = 0
+        if sponsor:
+            interval = max(0, self._ov_int(user_id, "interval_seconds", 0))
+        elif throttled:
+            interval = self._interval_for(user_id)
 
         spacing = 0
         if interval:
@@ -756,10 +919,25 @@ class QuotaEngine:
             queue_cap = None
         elif banned:
             queue_cap = 0
+        elif sponsor:
+            queue_cap = self._ov_int(
+                user_id, "queue_cap", int(self.config.queue_normal)
+            )
         elif throttled:
             queue_cap = int(self.config.queue_limited)
         else:
             queue_cap = int(self.config.queue_normal)
+
+        if sponsor:
+            cap = self._ov_int(user_id, "canvas_max_side", 0)
+            canvas_side = cap if cap > 0 else None
+        elif canvas:
+            canvas_side = int(self.config.canvas_max_side)
+        else:
+            canvas_side = None
+        degrade_after = self._ov_int(
+            user_id, "degrade_after", int(self.config.degrade_after)
+        )
 
         return QuotaSnapshot(
             user_id=user_id,
@@ -776,16 +954,13 @@ class QuotaEngine:
             interval_seconds=interval,
             spacing_remaining=spacing,
             queue_cap=queue_cap,
-            canvas_max_side=(
-                int(self.config.canvas_max_side) if canvas else None
-            ),
+            canvas_max_side=canvas_side,
             degraded=bool(
-                private
-                and not bypass
-                and daily > int(self.config.degrade_after)
+                private and not bypass and daily > degrade_after
             ),
             banned=banned,
             ban_until=(ban_until if banned else None),
+            sponsor=sponsor,
         )
 
     def check_enqueue(

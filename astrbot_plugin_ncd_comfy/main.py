@@ -39,6 +39,7 @@ import astrbot.api.message_components as Comp
 from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
+from astrbot.api.web import request
 from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
 from astrbot.core.platform.message_session import MessageSession
 from astrbot.core.platform.message_type import MessageType
@@ -88,6 +89,46 @@ QUOTA_STATE = (
 )
 # P2/P3 已接：队列上限、间隔、画幅、降质、禁生图。
 QUOTA_ENFORCE = True
+# 额度面板保存全局阈值时写这里；AstrBot 配置页读的是同一份文件。
+COMFY_CONFIG = (
+    Path(PLUGIN_DIR).parents[2]
+    / "data"
+    / "config"
+    / "astrbot_plugin_ncd_comfy_config.json"
+)
+# 面板短字段 -> (配置键, 类型)；顺序就是面板展示顺序。
+QUOTA_CONFIG_SPEC: dict[str, tuple[str, str]] = {
+    "global_enabled": ("comfy_quota_global_enabled", "bool"),
+    "global_limit": ("comfy_quota_global_limit", "int"),
+    "throttle_top": ("comfy_quota_throttle_top", "int"),
+    "canvas_top": ("comfy_quota_canvas_top", "int"),
+    "canvas_max_side": ("comfy_quota_canvas_max_side", "int"),
+    "queue_limited": ("comfy_quota_queue_limited", "int"),
+    "queue_normal": ("comfy_quota_queue_normal", "int"),
+    "interval_base": ("comfy_quota_interval_base", "int"),
+    "interval_step": ("comfy_quota_interval_step", "int"),
+    "degrade_after": ("comfy_quota_degrade_after", "int"),
+    "degrade_steps": ("comfy_quota_degrade_steps", "int"),
+    "ban_after": ("comfy_quota_ban_after", "int"),
+    "ban_hours": ("comfy_quota_ban_hours", "int"),
+    "window_hour": ("comfy_quota_window_hour", "int"),
+    "bypass_ids": ("comfy_quota_bypass_ids", "str"),
+}
+QUOTA_CONFIG_BOUNDS = {
+    "global_limit": (1, 100000),
+    "throttle_top": (1, 50),
+    "canvas_top": (1, 50),
+    "canvas_max_side": (64, 4096),
+    "queue_limited": (1, 100),
+    "queue_normal": (1, 100),
+    "interval_base": (0, 3600),
+    "interval_step": (0, 600),
+    "degrade_after": (1, 100000),
+    "degrade_steps": (1, 150),
+    "ban_after": (1, 100000),
+    "ban_hours": (0, 720),
+    "window_hour": (0, 23),
+}
 
 # 出错时给模型的保底建议：别让它继续瞎试
 RECOMMENDED_HINT = (
@@ -294,6 +335,93 @@ class NcdComfyPlugin(star.Star):
                 "comfy_quota_counted_jobs_limit", 2000
             ),
         )
+
+    def _quota_config_values(self) -> dict:
+        cfg = self._quota_config()
+        values = {}
+        for short, (_, kind) in QUOTA_CONFIG_SPEC.items():
+            value = getattr(cfg, short)
+            if short == "bypass_ids":
+                values[short] = ", ".join(value)
+            elif kind == "bool":
+                values[short] = bool(value)
+            else:
+                values[short] = int(value)
+        return values
+
+    def _quota_config_defaults(self) -> dict:
+        cfg = quota.QuotaConfig()
+        values = {}
+        for short, (_, kind) in QUOTA_CONFIG_SPEC.items():
+            value = getattr(cfg, short)
+            if short == "bypass_ids":
+                values[short] = ", ".join(value)
+            elif kind == "bool":
+                values[short] = bool(value)
+            else:
+                values[short] = int(value)
+        return values
+
+    def _write_comfy_config(self, data: dict) -> None:
+        """原子写插件配置文件；保留文件里其他非额度字段。"""
+        current: dict = {}
+        try:
+            if COMFY_CONFIG.is_file():
+                current = json.loads(
+                    COMFY_CONFIG.read_text(encoding="utf-8-sig")
+                )
+                if not isinstance(current, dict):
+                    current = {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 读配置文件失败，按当前内存合并: {exc}")
+        current.update(data)
+        COMFY_CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        tmp = COMFY_CONFIG.with_name(COMFY_CONFIG.name + ".tmp")
+        try:
+            tmp.write_text(
+                json.dumps(current, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, COMFY_CONFIG)
+        except Exception:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    def _quota_config_update(self, values: dict) -> dict:
+        if not isinstance(values, dict):
+            raise ValueError("config 必须是对象")
+        candidate = dict(self._conf)
+        for short, (key, kind) in QUOTA_CONFIG_SPEC.items():
+            if short not in values:
+                continue
+            raw = values.get(short)
+            if kind == "bool":
+                if isinstance(raw, str):
+                    candidate[key] = raw.strip().lower() in (
+                        "1", "true", "yes", "on", "是",
+                    )
+                else:
+                    candidate[key] = bool(raw)
+            elif kind == "str":
+                ids = re.findall(r"\d{5,12}", str(raw or ""))
+                candidate[key] = ", ".join(dict.fromkeys(ids))
+            else:
+                try:
+                    num = int(raw)
+                except (TypeError, ValueError):
+                    raise ValueError(f"{short} 必须是整数") from None
+                low, high = QUOTA_CONFIG_BOUNDS[short]
+                candidate[key] = max(low, min(high, num))
+        self._write_comfy_config(candidate)
+        self._conf = candidate
+        eng = getattr(self, "_quota_engine_obj", None)
+        if eng is not None:
+            eng.config = self._quota_config()
+        logger.info("[comfy] 额度全局阈值已从面板更新")
+        return self._quota_config_values()
 
     def _quota_engine(self) -> quota.QuotaEngine:
         """懒加载；配置每次重新读，改开关不用重载插件。"""
@@ -687,6 +815,18 @@ class NcdComfyPlugin(star.Star):
                 ["GET"],
                 "绘图额度面板",
             )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/quota/config",
+                self.api_quota_config,
+                ["POST"],
+                "保存绘图额度全局阈值",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/quota/sponsor",
+                self.api_quota_sponsor,
+                ["POST"],
+                "设置赞助者单独额度",
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 注册额度面板 API 失败: {exc}")
 
@@ -723,6 +863,8 @@ class NcdComfyPlugin(star.Star):
         try:
             data = self._quota_engine().dashboard()
             data["enforce"] = QUOTA_ENFORCE
+            data["config"] = self._quota_config_values()
+            data["defaults"] = self._quota_config_defaults()
             names = await self._quota_name_map()
             for row in data.get("ranking") or []:
                 row["name"] = names.get(str(row.get("user_id") or ""), "")
@@ -733,10 +875,51 @@ class NcdComfyPlugin(star.Star):
                     )
             for ban in data.get("bans") or []:
                 ban["name"] = names.get(str(ban.get("user_id") or ""), "")
+            for user_id, ov in (data.get("overrides") or {}).items():
+                if isinstance(ov, dict):
+                    ov["name"] = names.get(str(user_id), "")
             return data
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[comfy] 额度面板取数失败: {exc}", exc_info=True)
             return {"error": f"{type(exc).__name__}: {exc}"}
+
+    async def api_quota_config(self):
+        try:
+            body = await request.json({}) or {}
+            values = body.get("values") if isinstance(body, dict) else {}
+            if not isinstance(values, dict):
+                values = {}
+            return {"ok": True, "config": self._quota_config_update(values)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 保存额度阈值失败: {exc}")
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    async def api_quota_sponsor(self):
+        try:
+            body = await request.json({}) or {}
+            user_id = str(body.get("user_id") or "").strip()
+            if not re.fullmatch(r"\d{5,12}", user_id):
+                return {"ok": False, "error": "QQ 号格式不对"}
+            eng = self._quota_engine()
+            action = str(body.get("action") or "set").lower()
+            if action in ("remove", "delete", "del"):
+                eng.remove_override(user_id)
+            else:
+                overrides = body.get("overrides") or {}
+                if not isinstance(overrides, dict):
+                    return {"ok": False, "error": "overrides 必须是对象"}
+                eng.set_override(user_id, overrides)
+            self._quota_save()
+            return {
+                "ok": True,
+                "overrides": {
+                    str(k): dict(v)
+                    for k, v in eng.state.sponsor_overrides.items()
+                },
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 保存赞助者额度失败: {exc}")
+            return {"ok": False, "error": str(exc)}
 
     @filter.command("排名", alias={"我的排名", "绘图排名"})
     async def quota_rank_cmd(self, event: AstrMessageEvent):
@@ -775,6 +958,8 @@ class NcdComfyPlugin(star.Star):
             lines.append(
                 f"总榜：第 {total_rank} 名" if total_rank else "总榜：未上榜"
             )
+            if snap.sponsor:
+                lines.append("身份：赞助者（单独额度，不占普通前 5/前 3）")
             if snap.banned:
                 lines.append("限流：—（禁生图中）")
             elif snap.throttled:
@@ -784,18 +969,22 @@ class NcdComfyPlugin(star.Star):
                 )
             else:
                 lines.append(f"限流：否（队列 {snap.queue_cap}）")
-            if snap.canvas_max_side:
-                lines.append(f"画幅上限：{snap.canvas_max_side}（前 3）")
+            if snap.sponsor and snap.canvas_max_side is None:
+                lines.append("画幅上限：不限（赞助者）")
+            elif snap.canvas_max_side:
+                tail = "赞助者" if snap.sponsor else "前 3"
+                lines.append(f"画幅上限：{snap.canvas_max_side}（{tail}）")
             else:
                 lines.append(
                     f"画幅上限：{self._conf_int('comfy_max_side', 1920)}（默认）"
                 )
+            limits = eng.limits_for(sender)
             if snap.degraded:
-                lines.append(f"降质：是（{eng.config.degrade_steps} 步）")
+                lines.append(f"降质：是（{limits['degrade_steps']} 步）")
             else:
                 lines.append(
-                    f"降质：否（满 {eng.config.degrade_after} 张后 "
-                    f"{eng.config.degrade_steps} 步）"
+                    f"降质：否（满 {limits['degrade_after']} 张后 "
+                    f"{limits['degrade_steps']} 步）"
                 )
             if snap.banned and snap.ban_until:
                 left = max(0.0, snap.ban_until - time.time())
@@ -811,8 +1000,8 @@ class NcdComfyPlugin(star.Star):
                     + quota.format_duration(snap.spacing_remaining)
                 )
             lines.append(
-                f"50 张：{snap.daily_count}/{eng.config.degrade_after}｜"
-                f"70 张：{snap.daily_count}/{eng.config.ban_after}"
+                f"50 张：{snap.daily_count}/{limits['degrade_after']}｜"
+                f"70 张：{snap.daily_count}/{limits['ban_after']}"
             )
             speech_daily, speech_total, speech_rank = eng.speech_stats(sender)
             speech_part = f"第 {speech_rank} 名" if speech_rank else "未上榜"
@@ -842,6 +1031,52 @@ class NcdComfyPlugin(star.Star):
             lines.append(
                 "执行：统计阶段（队列/画幅未拦截；降质/禁生图已拦截）"
             )
+        yield event.plain_result("\n".join(lines))
+
+    @filter.command("全部排行", alias={"全部排名", "四榜"})
+    async def quota_all_rank_cmd(self, event: AstrMessageEvent):
+        """管理员查看四榜前 10：生图/发言 · 日榜/总榜。"""
+        if not self._is_admin_event(event):
+            yield event.plain_result("这个指令只有管理员能用。")
+            return
+        try:
+            eng = self._quota_engine()
+            names = await self._quota_name_map()
+            boards = [
+                ("生图日榜", eng.ranking(), "张"),
+                ("生图总榜", eng.ranking_total(), "张"),
+                ("发言日榜", eng.speech_ranking("daily"), "条"),
+                ("发言总榜", eng.speech_ranking("total"), "条"),
+            ]
+        except Exception as exc:  # noqa: BLE001
+            yield event.plain_result(f"查询失败：{type(exc).__name__}: {exc}")
+            return
+
+        def field(row: Any, key: str) -> Any:
+            return row.get(key) if isinstance(row, dict) else getattr(row, key, None)
+
+        def who(row: Any) -> str:
+            uid = str(field(row, "user_id") or "")
+            name = str(names.get(uid) or "").strip()
+            if name and uid:
+                return f"{name}（{uid}）"
+            return name or uid or "未知"
+
+        limit = 10
+        lines = [f"📊 全部排行（{eng.current_window_label()}）"]
+        for title, rows, unit in boards:
+            rows = list(rows or [])
+            lines.append("")
+            lines.append(f"{title}（{len(rows)} 人，前 {min(limit, len(rows))}）")
+            if not rows:
+                lines.append("  暂无数据")
+                continue
+            for row in rows[:limit]:
+                rank = field(row, "rank")
+                count = field(row, "count")
+                lines.append(f"  #{rank} {who(row)} · {count} {unit}")
+            if len(rows) > limit:
+                lines.append(f"  …另有 {len(rows) - limit} 人")
         yield event.plain_result("\n".join(lines))
 
     # ------------------------------------------------------------------
@@ -2166,7 +2401,12 @@ class NcdComfyPlugin(star.Star):
 
     @staticmethod
     def _image_caption(
-        used_model: str, loras: list[dict], elapsed: float, width: int, height: int
+        used_model: str,
+        loras: list[dict],
+        elapsed: float,
+        width: int,
+        height: int,
+        steps: int = 0,
     ) -> str:
         """自动发图时附在图片后面的参数卡片。"""
         model_name = os.path.basename(str(used_model or "")) or "未知"
@@ -2182,6 +2422,7 @@ class NcdComfyPlugin(star.Star):
             f"模型：{model_name}\n"
             f"LoRA：{lora_text}\n"
             f"尺寸：{int(width)}×{int(height)}\n"
+            f"步数：{int(steps)} 步\n"
             f"生成耗时：{max(0.0, float(elapsed or 0)):.1f}s（含权重加载）"
         )
 
@@ -3502,7 +3743,9 @@ class NcdComfyPlugin(star.Star):
                 "seconds": round(elapsed, 1),
             },
         )
-        caption = self._image_caption(used_model, loras, elapsed, w, h)
+        caption = self._image_caption(
+            used_model, loras, elapsed, w, h, steps_val
+        )
         try:
             await self.context.send_message(
                 event.unified_msg_origin,

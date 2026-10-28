@@ -5474,3 +5474,152 @@ class Main(star.Star):
             )
             return json_response({"error": "not found", "k": key}, status_code=404)
         return json_response({"k": key, "data": data})
+
+    # =================================================================
+    #  聊天命令：设备状态（所有人）
+    # =================================================================
+    @filter.command("设备状态", alias={"设备运行状态"})
+    async def device_status_cmd(self, event: AstrMessageEvent):
+        """展示 CPU/内存/GPU/显存 + ComfyUI 在线状态、模型、队列与进度。"""
+        self._ensure_sampler()
+        sample = self.sys_samples[-1] if getattr(self, "sys_samples", None) else None
+        info: dict[str, Any] = {}
+        if not sample:
+            # 采样器刚启动或 psutil 不可用时，退回一次性读取；nvidia-smi 有 6s 超时，放线程里。
+            try:
+                info = await asyncio.to_thread(self._system_info)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[ncd-monitor] 设备状态读取失败: {exc}")
+                info = {}
+
+        if sample:
+            cpu = sample.get("cpu")
+            mem_pct = sample.get("mem")
+            mem_used = sample.get("mem_used_gb")
+            mem_total = sample.get("mem_total_gb")
+            gpu_name = sample.get("gpu_name")
+            gpu_util = sample.get("gpu")
+            vram = sample.get("vram")
+            vram_used = sample.get("vram_used")
+            vram_total = sample.get("vram_total")
+            gpu_temp = sample.get("gpu_temp")
+            gpu_power = sample.get("gpu_power")
+        else:
+            cpu_info = info.get("cpu") or {}
+            mem = info.get("memory") or {}
+            cpu = cpu_info.get("percent")
+            mem_pct = mem.get("percent")
+            mem_used = mem.get("used_gb")
+            mem_total = mem.get("total_gb")
+            gpus = info.get("gpus") or []
+            g = gpus[0] if gpus else {}
+            gpu_name = g.get("name")
+            gpu_util = g.get("util")
+            vram_used = g.get("mem_used")
+            vram_total = g.get("mem_total")
+            vram = (
+                round(float(vram_used) / float(vram_total) * 100, 1)
+                if vram_used is not None and vram_total
+                else None
+            )
+            gpu_temp = g.get("temp")
+            gpu_power = g.get("power")
+
+        def num(value: Any, digits: int = 1) -> str:
+            try:
+                return f"{float(value):.{digits}f}"
+            except (TypeError, ValueError):
+                return "—"
+
+        lines = ["🖥 设备状态"]
+        lines.append(
+            f"CPU：{num(cpu) if cpu is not None else '—'}%"
+        )
+        if mem_used is not None and mem_total is not None:
+            lines.append(
+                f"内存：{num(mem_used)} / {num(mem_total)} GB"
+                + (f"（{num(mem_pct)}%）" if mem_pct is not None else "")
+            )
+        else:
+            lines.append("内存：—")
+        if gpu_name:
+            gpu_bits = [str(gpu_name), f"{num(gpu_util, 0)}%"]
+            if gpu_temp is not None:
+                gpu_bits.append(f"{num(gpu_temp, 0)}°C")
+            if gpu_power not in (None, "", "[N/A]"):
+                gpu_bits.append(f"{gpu_power}W")
+            lines.append("GPU：" + " · ".join(gpu_bits))
+            if vram_used is not None and vram_total:
+                lines.append(
+                    f"显存：{num(float(vram_used) / 1024, 1)} / "
+                    f"{num(float(vram_total) / 1024, 1)} GB"
+                    + (f"（{num(vram)}%）" if vram is not None else "")
+                )
+        else:
+            lines.append("GPU：未检测到")
+
+        state = self._comfy_state() or {}
+        status = state.get("status") or {}
+        progress = state.get("progress") or {}
+        port = int(status.get("port") or 8199)
+
+        def probe_comfy() -> bool:
+            try:
+                with urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/system_stats", timeout=1.2
+                ) as resp:
+                    return 200 <= int(getattr(resp, "status", 200)) < 300
+            except Exception:  # noqa: BLE001
+                return False
+
+        online = await asyncio.to_thread(probe_comfy)
+        if online:
+            lines.append(f"ComfyUI：在线（127.0.0.1:{port}）")
+        elif status:
+            lines.append(f"ComfyUI：离线（{port} 无响应，状态文件可能已过期）")
+        else:
+            lines.append(f"ComfyUI：离线（{port} 无状态）")
+
+        running = bool(status.get("running"))
+        preset = str(status.get("preset") or "").strip()
+        model = os.path.basename(str(status.get("model") or ""))
+        if running:
+            bits = [preset or "未知工作流"]
+            if model:
+                bits.append(model)
+            lines.append("生成：运行中 · " + " · ".join(bits))
+        else:
+            lines.append("生成：空闲")
+
+        q_run = int(status.get("queue_running") or 0)
+        q_wait = int(status.get("queue_pending") or 0)
+        lines.append(f"队列：运行 {q_run} · 等待 {q_wait}")
+        q_entries = state.get("queue_entries") or []
+        if q_entries:
+            names = [
+                str(x.get("name") or x.get("label") or "?")[:18]
+                for x in q_entries[:3]
+                if isinstance(x, dict)
+            ]
+            if names:
+                lines.append("当前队列：" + " / ".join(names))
+
+        label = str(progress.get("label") or progress.get("phase") or "").strip()
+        step = progress.get("step")
+        total = progress.get("total_steps")
+        if label or step is not None:
+            bit = label or "生成中"
+            if step is not None and total:
+                bit += f" · {step}/{total} 步"
+            lines.append(f"进度：{bit}")
+
+        age = time.time() - float(state.get("ts") or 0)
+        if state.get("ts") and age > 15:
+            lines.append(f"状态更新：{int(age)} 秒前")
+
+        uptime = max(0, int(time.time() - self.started_at))
+        lines.append(
+            "监控运行：" + (f"{uptime // 3600} 小时 " if uptime >= 3600 else "")
+            + f"{(uptime % 3600) // 60} 分"
+        )
+        yield event.plain_result("\n".join(lines))

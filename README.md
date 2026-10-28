@@ -3,6 +3,18 @@
 给 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 写的插件与补丁合集。都是先给自己用、再把私人配置剥干净后放上来的：
 **能不碰上游源码就不碰**，必须动的地方单独记成补丁；每个结论都尽量附可复现的证据（日志、测试用例）。
 
+## 安装（简单）
+
+这不是 AstrBot 本体的魔改版，不需要替换 AstrBot 源码：
+
+1. 把需要的插件目录复制到 `AstrBot/data/plugins/`（解压后应直接看到
+   `astrbot_plugin_ncd_xxx/main.py`，不要多套一层文件夹）。
+2. 重启 AstrBot，或到 WebUI → 插件页重载。
+3. 在插件页确认版本、按需填写配置。
+
+`astrbot_plugin_ncd_patch` 是**可选**的源码补丁管理器；不装也能用基础功能。
+配置在 `data/config/`，运行数据在 `data/plugin_data/`，升级插件时不要覆盖它们。
+
 ## 里面有什么
 
 | 目录 | 插件 | 一句话 |
@@ -25,6 +37,7 @@
 - 按会话类型分流人格：`persona_private` / `persona_public`
 - 搜索/抓取统计卡片（数据由工具箱落盘）
 - 新增卡片：本地生成（ComfyUI 节点进度 / 缩略图 / 队列位次）、工具调用、思考内容、事件流、审核明细
+- `/设备状态`（所有人）：CPU / 内存 / GPU / 显存 / 温度 / 功耗 + ComfyUI 在线、模型、队列、进度
 - 与本地模型互斥：只有本地模型才等 ComfyUI；云端 API 自动跳过
 
 ## 链路工具箱（toolbox）
@@ -50,6 +63,7 @@
 - 工具：`comfy_tools` / `comfy_generate` / `comfy_models` / `comfy_status` / `comfy_say` / `comfy_output` / `comfy_gallery`
 - `comfy_prompt_help`：按关键词检索本地提示词法典（sfw/nsfw/all），写 prompt 前查 tag
 - 命令：`/comfyui off|on|status`（只关自己拉起的进程）
+- 绘图额度：`/排名` 看自己的额度/名次；`/全部排行`（仅管理员）看四榜前 10；额度面板可直接调阈值、给赞助者单独额度
 
 ## 链路扩展（extra）
 

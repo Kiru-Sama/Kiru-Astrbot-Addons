@@ -16,6 +16,10 @@
     root.dataset.theme = resolved;
     root.dataset.density = a.density || "cozy";
     root.dataset.accent = a.accent || "blue";
+    var style = a.style || "classic";
+    if (style === "flat") style = "classic";
+    root.dataset.style = style;
+    root.dataset.tone = a.tone || "bright";
     root.style.colorScheme = resolved;
   } catch (e) { /* 隐私模式/禁用存储时退回默认 */ }
 })();
@@ -1073,6 +1077,311 @@
     .ui-cards { grid-template-columns: 1fr; }
   }
 
+  /* ============================================================
+     新拟物皮肤：参考「同色底 + 双向柔阴影 + 大圆角」
+     只覆盖视觉层，不改动布局/图表/数据逻辑。
+     ============================================================ */
+  :root {
+    --bg: #f7f9fc;
+    --bg-2: #f1f5fa;
+    --card: #f7f9fc;
+    --card-2: #eef3f9;
+    --border: rgba(148, 163, 184, .26);
+    --text: #334155;
+    --muted: #66758a;
+    --track: #e3eaf3;
+    --accent: #5b7cfa;
+    --accent-2: #4157c9;
+    --shadow-light: #ffffff;
+    --shadow-dark: #d7e0ea;
+    --neu-raised: 8px 8px 18px var(--shadow-dark), -8px -8px 18px var(--shadow-light);
+    --neu-raised-sm: 5px 5px 10px var(--shadow-dark), -5px -5px 10px var(--shadow-light);
+    --neu-inset: inset 5px 5px 10px var(--shadow-dark), inset -5px -5px 10px var(--shadow-light);
+    --neu-inset-sm: inset 3px 3px 6px var(--shadow-dark), inset -3px -3px 6px var(--shadow-light);
+    --radius: 22px;
+    --radius-sm: 12px;
+    --shadow: var(--neu-raised);
+  }
+  html[data-tone="soft"] {
+    --bg: #e0e5ec;
+    --bg-2: #e6ebf2;
+    --card: #e0e5ec;
+    --card-2: #e8edf4;
+    --border: rgba(163, 177, 198, .32);
+    --text: #445066;
+    --muted: #7b8799;
+    --track: #d7dee9;
+    --shadow-dark: #bec6d4;
+  }
+  html[data-theme="dark"] {
+    --bg: #191c23;
+    --bg-2: #1f232c;
+    --card: #191c23;
+    --card-2: #20242d;
+    --border: rgba(148, 163, 184, .18);
+    --text: #e6e8ec;
+    --muted: #98a2b3;
+    --track: #12151b;
+    --accent: #6b8cff;
+    --accent-2: #4f6ee0;
+    --shadow-light: #242a35;
+    --shadow-dark: #0b0d12;
+    --shadow: var(--neu-raised);
+  }
+  body {
+    background: var(--bg);
+    background-image: none;
+  }
+  header {
+    padding: 10px 14px;
+    border-radius: 999px;
+    background: var(--card);
+    box-shadow: var(--neu-raised-sm);
+  }
+  .refresh {
+    border: 0;
+    box-shadow: var(--neu-inset-sm);
+    background: var(--card);
+  }
+  .ui-icon,
+  .ui-btn {
+    border: 0;
+    box-shadow: var(--neu-raised-sm);
+  }
+  .ui-btn {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: var(--neu-raised-sm), inset 0 1px 0 rgba(255, 255, 255, .3);
+  }
+  .card {
+    border: 0;
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow: var(--neu-raised);
+  }
+  .scroll,
+  .summary,
+  .stat,
+  .live-body,
+  .ctxwrap {
+    border: 0;
+    background: var(--card-2);
+    box-shadow: var(--neu-inset-sm);
+  }
+  .summary { border-radius: var(--radius-sm); }
+  button,
+  .sbtn,
+  .lbtn,
+  .mbtn {
+    border: 0;
+    background: var(--card);
+    box-shadow: var(--neu-raised-sm);
+  }
+  .sbtn.on,
+  .mbtn.on {
+    background: var(--accent);
+    color: #fff;
+    box-shadow: var(--neu-inset-sm);
+  }
+  .ui-close,
+  .ui-check,
+  .ui-reset {
+    border: 0;
+    background: var(--card);
+    box-shadow: var(--neu-inset-sm);
+  }
+  .ui-seg {
+    border: 0;
+    box-shadow: var(--neu-inset-sm);
+    background: var(--card);
+  }
+  .ui-seg button.on {
+    color: var(--accent);
+    background: var(--card);
+    box-shadow: var(--neu-inset-sm);
+  }
+  input:not([type="checkbox"]):not([type="radio"]),
+  select,
+  textarea {
+    border: 0;
+    background: var(--card);
+    box-shadow: var(--neu-inset-sm);
+  }
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted) 30%, transparent);
+    border: 2px solid var(--card);
+    background-clip: padding-box;
+  }
+  table, .scroll { border-radius: var(--radius-sm); }
+  th { background: var(--card-2); }
+  th, td { border-bottom-color: color-mix(in srgb, var(--border) 85%, transparent); }
+
+  /* 自绘勾选框：不用系统蓝色方框 */
+  .ui-check {
+    border-radius: 12px;
+    padding: 8px 9px;
+    gap: 9px;
+    background: var(--card);
+    box-shadow: var(--neu-inset-sm);
+  }
+  .ui-check input[type="checkbox"] {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 20px;
+    height: 20px;
+    margin: 0;
+    flex: none;
+    border-radius: 7px;
+    background: var(--card);
+    box-shadow: var(--neu-inset-sm);
+    position: relative;
+    cursor: pointer;
+  }
+  .ui-check input[type="checkbox"]:checked {
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    box-shadow: var(--neu-inset-sm);
+  }
+  .ui-check input[type="checkbox"]:checked::after {
+    content: "";
+    position: absolute;
+    left: 7px;
+    top: 3px;
+    width: 5px;
+    height: 9px;
+    border: solid #fff;
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+  }
+  #uiStyle, #uiTone { grid-template-columns: repeat(2, 1fr); }
+  .ui-save-note {
+    margin: -8px 0 16px;
+    color: var(--muted);
+    font-size: 11.5px;
+  }
+
+  /* 经典模式：原版白卡片/浅蓝灰底；默认，避免新拟物在旧浏览器上不稳 */
+  html[data-style="classic"][data-theme="light"] {
+    --bg: #f4f7fb;
+    --bg-2: #edf3fa;
+    --card: #ffffff;
+    --card-2: #f8fafc;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --muted: #64748b;
+    --track: #edf2f7;
+    --accent: #0ea5e9;
+    --accent-2: #0284c7;
+    --shadow: 0 1px 2px rgba(15, 23, 42, .04),
+              0 12px 32px -22px rgba(15, 23, 42, .28);
+    --radius: 16px;
+    --radius-sm: 10px;
+  }
+  html[data-style="classic"][data-theme="dark"] {
+    --bg: #0b1120;
+    --bg-2: #0f172a;
+    --card: #111827;
+    --card-2: #0f172a;
+    --border: #1f2937;
+    --text: #e5e7eb;
+    --muted: #94a3b8;
+    --track: #172033;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .28),
+              0 18px 40px -24px rgba(0, 0, 0, .65);
+    --radius: 16px;
+    --radius-sm: 10px;
+  }
+  html[data-style="classic"] body {
+    background:
+      radial-gradient(900px 420px at 8% -8%, var(--accent-soft), transparent 62%),
+      radial-gradient(760px 360px at 100% 0%,
+        color-mix(in srgb, var(--accent) 7%, transparent), transparent 58%),
+      var(--bg);
+    background-attachment: fixed;
+  }
+  html[data-style="classic"] header {
+    padding: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  html[data-style="classic"] .card {
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--card);
+    box-shadow: var(--shadow);
+  }
+  html[data-style="classic"] .refresh {
+    padding: 6px 11px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--card);
+    box-shadow: 0 1px 2px rgba(15, 23, 42, .03);
+  }
+  html[data-style="classic"] .ui-icon,
+  html[data-style="classic"] .ui-btn {
+    border: 1px solid var(--border);
+    background: var(--card);
+    box-shadow: none;
+  }
+  html[data-style="classic"] .ui-btn {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  html[data-style="classic"] .scroll,
+  html[data-style="classic"] .summary,
+  html[data-style="classic"] .stat,
+  html[data-style="classic"] .live-body,
+  html[data-style="classic"] .ctxwrap {
+    border: 1px solid var(--border);
+    box-shadow: none;
+  }
+  html[data-style="classic"] .scroll { background: transparent; }
+  html[data-style="classic"] button,
+  html[data-style="classic"] .sbtn,
+  html[data-style="classic"] .lbtn,
+  html[data-style="classic"] .mbtn {
+    border: 1px solid var(--border);
+    background: var(--card);
+    box-shadow: none;
+  }
+  html[data-style="classic"] .sbtn.on,
+  html[data-style="classic"] .mbtn.on {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  html[data-style="classic"] .ui-close,
+  html[data-style="classic"] .ui-check,
+  html[data-style="classic"] .ui-reset,
+  html[data-style="classic"] .ui-seg {
+    border: 1px solid var(--border);
+    background: var(--card);
+    box-shadow: none;
+  }
+  html[data-style="classic"] .ui-seg { background: var(--track); }
+  html[data-style="classic"] .ui-seg button.on {
+    color: var(--accent);
+    background: var(--card);
+    box-shadow: 0 1px 4px rgba(15, 23, 42, .12);
+  }
+  html[data-style="classic"] input:not([type="checkbox"]):not([type="radio"]),
+  html[data-style="classic"] select,
+  html[data-style="classic"] textarea {
+    border: 1px solid var(--border);
+    background: var(--card);
+    box-shadow: none;
+  }
+  html[data-style="classic"] .ui-check input[type="checkbox"] {
+    border: 1px solid var(--border);
+    background: var(--card);
+    box-shadow: none;
+  }
+  html[data-style="classic"] .ui-check input[type="checkbox"]:checked {
+    border-color: var(--accent);
+    background: var(--accent);
+  }
+  html[data-style="classic"] th { background: var(--card); }
+  .card[hidden] { display: none !important; }
 </style>
 </head>
 <body>
@@ -1167,18 +1476,22 @@
     <div id="diagBox"><div class="empty">还没有诊断数据 —— 聊两句就会出现。</div></div>
   </div>
 
-  <!-- 压缩摘要 -->
-  <div class="card" style="margin-bottom:14px" data-card="summary" data-title="压缩摘要">
-    <h2>上下文压缩摘要（压缩后的实际文字）</h2>
-    <div class="summary empty" id="summaries">还没有触发过上下文压缩。</div>
+  <!-- 模型 + 资源（上移：总览优先） -->
+  <div class="grid g2" style="margin-bottom:14px">
+    <div class="card" data-card="model" data-title="模型 / AstrBot">
+      <h2>模型 / AstrBot</h2>
+      <div id="modelBox"></div>
+    </div>
+    <div class="card" data-card="resources" data-title="宿主机资源">
+      <h2>宿主机资源 <span class="h2sub">每秒刷新 · 3 分钟趋势</span></h2>
+      <div id="resBox"></div>
+    </div>
   </div>
 
-  <!-- 发给模型的完整上下文（已移到右侧栏）-->
-
-  <!-- 事件流：对话 / 工具 -->
-  <div class="card" style="margin-bottom:14px" data-card="timeline" data-title="事件流">
-    <h2>事件流 <span class="h2sub">请求 · 回复 · 工具</span></h2>
-    <div id="timelineBox"><div class="empty">加载中…</div></div>
+  <!-- 各会话上下文占用：同一个模型上限，各会话自己的历史长度独立（上移） -->
+  <div class="card" style="margin-bottom:14px" data-card="sessions" data-title="各会话上下文占用">
+    <h2>各会话上下文占用 <span class="h2sub" id="sesSub"></span></h2>
+    <div id="sesBox"></div>
   </div>
 
   <!-- 本地生成（ComfyUI 进度，来自 ncd_bus） -->
@@ -1219,22 +1532,16 @@
     <div id="searchBox" class="empty">还没有搜索记录。</div>
   </div>
 
-  <!-- 模型 + 资源 -->
-  <div class="grid g2" style="margin-bottom:14px">
-    <div class="card" data-card="model" data-title="模型 / AstrBot">
-      <h2>模型 / AstrBot</h2>
-      <div id="modelBox"></div>
-    </div>
-    <div class="card" data-card="resources" data-title="宿主机资源">
-      <h2>宿主机资源 <span class="h2sub">每秒刷新 · 3 分钟趋势</span></h2>
-      <div id="resBox"></div>
-    </div>
+  <!-- 压缩摘要（下移：诊断/事件放在工具与搜索之后） -->
+  <div class="card" style="margin-bottom:14px" data-card="summary" data-title="压缩摘要">
+    <h2>上下文压缩摘要（压缩后的实际文字）</h2>
+    <div class="summary empty" id="summaries">还没有触发过上下文压缩。</div>
   </div>
 
-  <!-- 各会话上下文占用：同一个模型上限，各会话自己的历史长度独立 -->
-  <div class="card" style="margin-bottom:14px" data-card="sessions" data-title="各会话上下文占用">
-    <h2>各会话上下文占用 <span class="h2sub" id="sesSub"></span></h2>
-    <div id="sesBox"></div>
+  <!-- 事件流：对话 / 工具（下移） -->
+  <div class="card" style="margin-bottom:14px" data-card="timeline" data-title="事件流">
+    <h2>事件流 <span class="h2sub">请求 · 回复 · 工具</span></h2>
+    <div id="timelineBox"><div class="empty">加载中…</div></div>
   </div>
 
   <!-- 其他：低频/次要信息，默认折叠，别占地方 -->
@@ -3612,6 +3919,7 @@ if (window.AstrBotPluginPage) {
       <strong>外观与布局</strong>
       <button class="ui-close" id="uiClose" type="button" aria-label="关闭">×</button>
     </div>
+    <div class="ui-save-note">设置自动保存在本机浏览器，刷新/重开都会保留</div>
 
     <div class="ui-section">
       <div class="ui-label">主题</div>
@@ -3619,6 +3927,22 @@ if (window.AstrBotPluginPage) {
         <button type="button" data-mode="light">浅色</button>
         <button type="button" data-mode="dark">深色</button>
         <button type="button" data-mode="system">跟随系统</button>
+      </div>
+    </div>
+
+    <div class="ui-section">
+      <div class="ui-label">风格</div>
+      <div class="ui-seg" id="uiStyle">
+        <button type="button" data-style="classic">经典</button>
+        <button type="button" data-style="neumorph">新拟物</button>
+      </div>
+    </div>
+
+    <div class="ui-section" id="uiToneSection">
+      <div class="ui-label">新拟物底色</div>
+      <div class="ui-seg" id="uiTone">
+        <button type="button" data-tone="bright">亮白</button>
+        <button type="button" data-tone="soft">柔白</button>
       </div>
     </div>
 
@@ -3654,7 +3978,14 @@ if (window.AstrBotPluginPage) {
 (function () {
   const KEY = "ncd-monitor-appearance";
   const root = document.documentElement;
-  const defaults = { mode: "system", density: "cozy", accent: "blue", hidden: [] };
+  const defaults = {
+    mode: "system",
+    density: "cozy",
+    accent: "blue",
+    style: "classic",
+    tone: "bright",
+    hidden: [],
+  };
   let state = { ...defaults };
   try {
     const saved = JSON.parse(localStorage.getItem(KEY) || "{}");
@@ -3663,6 +3994,8 @@ if (window.AstrBotPluginPage) {
   if (!["system", "light", "dark"].includes(state.mode)) state.mode = "system";
   if (!["cozy", "compact"].includes(state.density)) state.density = "cozy";
   if (!["blue", "teal", "violet", "rose", "amber"].includes(state.accent)) state.accent = "blue";
+  if (!["neumorph", "classic"].includes(state.style)) state.style = "classic";
+  if (!["bright", "soft"].includes(state.tone)) state.tone = "bright";
   if (!Array.isArray(state.hidden)) state.hidden = [];
 
   const cardEls = Array.from(document.querySelectorAll("[data-card]"));
@@ -3686,6 +4019,8 @@ if (window.AstrBotPluginPage) {
     root.dataset.theme = resolved;
     root.dataset.density = state.density;
     root.dataset.accent = state.accent;
+    root.dataset.style = state.style;
+    root.dataset.tone = state.tone;
     root.style.colorScheme = resolved;
     if (themeQuick) {
       themeQuick.textContent = resolved === "dark" ? "☀" : "☾";
@@ -3694,6 +4029,14 @@ if (window.AstrBotPluginPage) {
     document.querySelectorAll("#uiMode [data-mode]").forEach((b) => {
       b.classList.toggle("on", b.dataset.mode === state.mode);
     });
+    document.querySelectorAll("#uiStyle [data-style]").forEach((b) => {
+      b.classList.toggle("on", b.dataset.style === state.style);
+    });
+    document.querySelectorAll("#uiTone [data-tone]").forEach((b) => {
+      b.classList.toggle("on", b.dataset.tone === state.tone);
+    });
+    const toneSection = document.getElementById("uiToneSection");
+    if (toneSection) toneSection.hidden = state.style !== "neumorph";
     document.querySelectorAll("#uiDensity [data-density]").forEach((b) => {
       b.classList.toggle("on", b.dataset.density === state.density);
     });
@@ -3746,6 +4089,12 @@ if (window.AstrBotPluginPage) {
 
   document.querySelectorAll("#uiMode [data-mode]").forEach((b) => {
     b.addEventListener("click", () => { state.mode = b.dataset.mode; save(); apply(); });
+  });
+  document.querySelectorAll("#uiStyle [data-style]").forEach((b) => {
+    b.addEventListener("click", () => { state.style = b.dataset.style; save(); apply(); });
+  });
+  document.querySelectorAll("#uiTone [data-tone]").forEach((b) => {
+    b.addEventListener("click", () => { state.tone = b.dataset.tone; save(); apply(); });
   });
   document.querySelectorAll("#uiDensity [data-density]").forEach((b) => {
     b.addEventListener("click", () => { state.density = b.dataset.density; save(); apply(); });
