@@ -2922,6 +2922,53 @@ class NcdComfyPlugin(star.Star):
         logger.info(f"[comfy] {tool} 被直接调用（未先调 comfy_tools），已返回指正")
         return GATE_ERROR.format(tool=tool)
 
+    def _control_type_error(
+        self, preset_name: str, control_type: str
+    ) -> str | None:
+        """校验 ControlNet 类型；空/非法时给可执行的准确错误。"""
+        ctrl = str(control_type or "").strip().lower()
+        if preset_name not in presets.CONTROL_PRESETS:
+            return (
+                f"出图失败：{presets.PRESETS[preset_name]['label']} 暂未接 "
+                "ControlNet，当前支持："
+                + "、".join(presets.CONTROL_PRESETS)
+            )
+        if preset_name == "anima" and ctrl not in presets.ANIMA_LLLITE_TYPES:
+            if not ctrl:
+                return (
+                    "出图失败：Anima 需要 control_type。可用："
+                    + "、".join(sorted(presets.ANIMA_LLLITE_TYPES))
+                )
+            return (
+                f"出图失败：Anima 不支持 control_type「{control_type}」。可用："
+                + "、".join(sorted(presets.ANIMA_LLLITE_TYPES))
+            )
+        if (
+            preset_name == "sdxl"
+            and ctrl
+            and ctrl not in presets.SDXL_UNION_TYPES
+        ):
+            return (
+                "出图失败：SDXL 不支持控制类型 "
+                f"「{control_type}」。可用："
+                + "、".join(sorted(presets.SDXL_UNION_TYPES))
+            )
+        if preset_name == "moss" and ctrl not in presets.MOSS_CONTROL_TYPES:
+            allowed = "、".join(sorted(presets.MOSS_CONTROL_TYPES))
+            note = "请改对参数后重试；不要回复“在画了”。"
+            if not ctrl:
+                return (
+                    f"出图失败：MOSS 需要 control_type（depth / color）。"
+                    f"可用：{allowed}。{note}"
+                )
+            return (
+                f"出图失败：MOSS 不支持 control_type「{control_type}」，"
+                f"只能用 depth / color。可用：{allowed}。{note}"
+            )
+        if preset_name == "krea2" and ctrl not in ("", "depth", "pose", "openpose"):
+            return "出图失败：Krea2 支持 depth / pose（control_type=depth 或 pose）。"
+        return None
+
     def _mark_lookup(self, event: AstrMessageEvent) -> None:
         """本会话查过角色/标签或法典范本，软门禁放行。"""
         if not hasattr(self, "_lookup_seen"):
@@ -3276,6 +3323,17 @@ class NcdComfyPlugin(star.Star):
                     f"出图失败：没有工作流「{preset}」。可选："
                     + "、".join(presets.PRESETS)
                 )
+            preset_early, _ = self._auto_preset_for_model(
+                model, self._preset(want_early)
+            )
+            # ★ 控制类型必须在这里就校验：入队后再报错，模型已经对用户说了
+            #   “在画了”，用户会先看到失败再看到一句假装在画的话。
+            if ctrl_raw:
+                ctrl_err = self._control_type_error(preset_early, control_type)
+                if ctrl_err:
+                    return ctrl_err
+            elif str(control_type or "").strip():
+                return "出图失败：给了 control_type 但没给 control 图。"
             ref_err = self._reference_ready(reference, event)
             if ref_err:
                 return ref_err
@@ -3441,34 +3499,9 @@ class NcdComfyPlugin(star.Star):
         elif ctrl_type:
             return "出图失败：给了 control_type 但没给 control 图。"
         if ctrl_bytes:
-            if preset_name not in presets.CONTROL_PRESETS:
-                return (
-                    f"出图失败：{presets.PRESETS[preset_name]['label']} 暂未接 "
-                    "ControlNet，当前支持："
-                    + "、".join(presets.CONTROL_PRESETS)
-                )
-            if preset_name == "anima" and ctrl_type not in presets.ANIMA_LLLITE_TYPES:
-                return (
-                    "出图失败：Anima 需要 control_type。可用："
-                    + "、".join(sorted(presets.ANIMA_LLLITE_TYPES))
-                )
-            if (
-                preset_name == "sdxl"
-                and ctrl_type
-                and ctrl_type not in presets.SDXL_UNION_TYPES
-            ):
-                return (
-                    "出图失败：SDXL 不支持控制类型 "
-                    f"「{control_type}」。可用："
-                    + "、".join(sorted(presets.SDXL_UNION_TYPES))
-                )
-            if preset_name == "moss" and ctrl_type not in presets.MOSS_CONTROL_TYPES:
-                return (
-                    "出图失败：MOSS 需要 control_type（depth / color）。可用："
-                    + "、".join(sorted(presets.MOSS_CONTROL_TYPES))
-                )
-            if preset_name == "krea2" and ctrl_type not in ("", "depth", "pose", "openpose"):
-                return "出图失败：Krea2 支持 depth / pose（control_type=depth 或 pose）。"
+            ctrl_err = self._control_type_error(preset_name, ctrl_type)
+            if ctrl_err:
+                return ctrl_err
 
         try:
             if ref_bytes and not (size or width or height):
