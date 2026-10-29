@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -5475,6 +5476,21 @@ class Main(star.Star):
             return json_response({"error": "not found", "k": key}, status_code=404)
         return json_response({"k": key, "data": data})
 
+    @staticmethod
+    def _is_mobile() -> bool:
+        """判断是不是跑在 proot/Android 容器里（手机）。
+
+        ★ 手机上 nvidia-smi / GPU / ComfyUI 都不存在，电池和温度也读不到
+          （proot 的 fake root 进不去 /sys/class/power_supply），
+          所以设备状态要换一套说法，别给用户看「未检测到」「离线」。
+        """
+        try:
+            with open("/proc/version", "r", encoding="utf-8", errors="ignore") as fh:
+                text = fh.read().lower()
+        except OSError:
+            return False
+        return "proot" in text or "android" in text
+
     # =================================================================
     #  聊天命令：设备状态（所有人）
     # =================================================================
@@ -5530,6 +5546,58 @@ class Main(star.Star):
                 return f"{float(value):.{digits}f}"
             except (TypeError, ValueError):
                 return "—"
+
+        if self._is_mobile():
+            # 手机版：只报拿得到的，不拿 GPU / 显存 / ComfyUI 队列这些空指标。
+            lines = ["📱 设备状态（手机）"]
+            cores = os.cpu_count() or 0
+            lines.append(
+                f"CPU：{num(cpu) if cpu is not None else '—'}%"
+                + (f"（{cores} 核）" if cores else "")
+            )
+            if mem_used is not None and mem_total is not None:
+                lines.append(
+                    f"内存：{num(mem_used)} / {num(mem_total)} GB"
+                    + (f"（{num(mem_pct)}%）" if mem_pct is not None else "")
+                )
+            else:
+                lines.append("内存：—")
+            try:
+                du = shutil.disk_usage("/")
+                total_gb = du.total / (1024 ** 3)
+                used_gb = du.used / (1024 ** 3)
+                pct = (used_gb / total_gb * 100) if total_gb else 0
+                lines.append(
+                    f"存储：{num(used_gb)} / {num(total_gb)} GB（{num(pct)}%）"
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+            state = self._comfy_state() or {}
+            status = state.get("status") or {}
+            if status:
+                port = int(status.get("port") or 8199)
+
+                def _probe() -> bool:
+                    try:
+                        with urllib.request.urlopen(
+                            f"http://127.0.0.1:{port}/system_stats", timeout=1.2
+                        ) as resp:
+                            return 200 <= int(getattr(resp, "status", 200)) < 300
+                    except Exception:  # noqa: BLE001
+                        return False
+
+                online = await asyncio.to_thread(_probe)
+                lines.append(f"ComfyUI：{'在线' if online else '未连接'}（{port}）")
+
+            uptime = max(0, int(time.time() - self.started_at))
+            lines.append(
+                "监控运行："
+                + (f"{uptime // 3600} 小时 " if uptime >= 3600 else "")
+                + f"{(uptime % 3600) // 60} 分"
+            )
+            yield event.plain_result("\n".join(lines))
+            return
 
         lines = ["🖥 设备状态"]
         lines.append(
