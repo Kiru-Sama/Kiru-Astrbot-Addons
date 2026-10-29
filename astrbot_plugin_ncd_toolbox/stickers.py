@@ -1,12 +1,15 @@
 """QQ 收藏表情（收藏的表情包）的读取、缩略图与发送。
 
-数据来自 SnowLuma 的 OneBot 扩展 API，已实测可经 AstrBot 的 OneBot 连接调用：
-  · fetch_custom_face_detail(count) -> [{emoji_id, resId, url, md5, desc}]
+数据来自 OneBot 的扩展 API，经 AstrBot 的 OneBot 连接调用：
+  · fetch_custom_face_detail(count)
+      不同协议端返回的字段名不一样，这里统一归一化：
+        SnowLuma -> {emoji_id, resId, url, md5, desc}
+        NapCat   -> QQ 原始对象（驼峰：emojiId / resId / url / md5 / desc）
+      归一化后统一成 {emoji_id, res_id, url, md5, desc}。
       desc 就是用户在 QQ 里给收藏表情写的备注，未设置时为空串。
-  · send_custom_face(emoji_id, group_id|user_id)
+  · send_custom_face(emoji_id, group_id|user_id)   ← 仅 SnowLuma 有
       发出去的是「动画表情」本身，不是一张普通图片。
-
-注意：这些 action 是 SnowLuma（NapCat 系）的扩展，换别的 OneBot 实现不一定有。
+      NapCat 没有这个 action，此时自动退回「按图片 URL 发送」。
 """
 
 from __future__ import annotations
@@ -50,12 +53,48 @@ async def fetch_all(event, count: int = MAX_FETCH) -> list[dict]:
     if not isinstance(data, list):
         raise StickerError(f"收藏表情接口返回了意外结构：{type(data).__name__}")
 
-    items = [item for item in data if isinstance(item, dict) and item.get("emoji_id")]
+    items = [_normalize(item) for item in data if isinstance(item, dict)]
+    items = [item for item in items if item]
     if len(items) != len(data):
+        sample = ""
+        for raw in data:
+            if isinstance(raw, dict):
+                sample = str(sorted(raw.keys()))[:400]
+                break
         logger.warning(
-            f"[toolbox] 收藏表情里有 {len(data) - len(items)} 条缺 emoji_id，已跳过"
+            f"[toolbox] 收藏表情里有 {len(data) - len(items)} 条没有可用 ID，已跳过。"
+            f"原始字段示例：{sample}"
         )
+    if items:
+        logger.info(f"[toolbox] 收藏表情归一化完成：{len(items)} 张可用")
     return items
+
+
+_ID_KEYS = ("emoji_id", "emojiId", "res_id", "resId", "id", "md5")
+
+
+def _normalize(item: dict) -> dict | None:
+    """把各协议端的收藏表情条目归一化成同一套字段。
+
+    SnowLuma 直接给 snake_case 的 emoji_id；NapCat 原样返回 QQ 的驼峰对象
+    （emojiId / resId），早期版本这里只认 emoji_id，导致 100 多张全被丢掉。
+    """
+    emoji_id = ""
+    for key in _ID_KEYS:
+        value = item.get(key)
+        if value not in (None, ""):
+            emoji_id = str(value)
+            break
+    if not emoji_id:
+        return None
+
+    return {
+        "emoji_id": emoji_id,
+        "res_id": str(item.get("res_id") or item.get("resId") or ""),
+        "url": item.get("url") or item.get("urlPath") or "",
+        "md5": str(item.get("md5") or ""),
+        "desc": str(item.get("desc") or item.get("description") or ""),
+    }
 
 
 def collection_key(items: list[dict]) -> str:
@@ -238,10 +277,31 @@ async def send_sticker(event, item: dict) -> str:
     try:
         result = await event.bot.call_action("send_custom_face", **params)
     except Exception as exc:  # noqa: BLE001
-        raise StickerError(
-            f"发送收藏表情失败（{type(exc).__name__}: {exc}）。"
-            "目标可能是 SnowLuma 不支持的协议端，或该 emoji_id 已失效。"
-        ) from exc
+        # NapCat 系协议端没有 send_custom_face，退回「把这张表情当图片发」。
+        # 视觉上等价，只是对方客户端看到的是图片而不是「动画表情」元素。
+        url = item.get("url") or ""
+        if not url:
+            raise StickerError(
+                f"发送收藏表情失败（{type(exc).__name__}: {exc}），"
+                "且这张表情没有图片地址可以退回发送。"
+            ) from exc
+        logger.info(
+            f"[toolbox] send_custom_face 不可用，改按图片发送 emoji_id={emoji_id}"
+        )
+        from astrbot.core.message.components import Image as ImageComponent
+        from astrbot.core.message.message_event_result import MessageChain
+
+        await event.send(MessageChain(chain=[ImageComponent.fromURL(url)]))
+        logger.info(f"[toolbox] 已按图片发送收藏表情 emoji_id={emoji_id} → {target}")
+        return json.dumps(
+            {
+                "sent": True,
+                "to": target,
+                "mode": "image_fallback",
+                "note": "表情已发出（该协议端不支持表情元素，按图片发出），不要重复发送同一张。",
+            },
+            ensure_ascii=False,
+        )
 
     message_id = ""
     if isinstance(result, dict):

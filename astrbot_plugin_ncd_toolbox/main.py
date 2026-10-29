@@ -2424,7 +2424,17 @@ def _session_header_text(event: AstrMessageEvent) -> str:
     else:
         where = "【私聊中】"
 
-    return f"<system_reminder>当前对话场景：{where}{who}</system_reminder>"
+    # ★ 2026-10-30：会话时间戳的时区坑，必须明说给模型。
+    #   AstrBot 4.29 的 TimestampMixin 用 datetime.now(timezone.utc) 写 updated_at，
+    #   而 4.28 时代遗留的数据是本地时间（CST）。两者混在同一列里，
+    #   直接看会出现「明明刚聊过，时间却是 8 小时前」的错觉。
+    #   不写清楚的话，模型会把 UTC 当本地时间去算「多久以前」，结论全错。
+    tz_note = (
+        "<system_reminder>时间戳说明：数据库里的会话时间按 UTC 存储，"
+        "比本地时间（CST, UTC+8）早 8 小时；需要「现在几点」时请以注入的 "
+        "Current datetime 为准，不要拿时间戳当本地时间推算。</system_reminder>"
+    )
+    return f"<system_reminder>当前对话场景：{where}{who}</system_reminder>{tz_note}"
 
 
 def _text_result(text: str) -> mcp.types.CallToolResult:

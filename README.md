@@ -3,6 +3,20 @@
 给 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 写的插件与补丁合集。都是先给自己用、再把私人配置剥干净后放上来的：
 **能不碰上游源码就不碰**，必须动的地方单独记成补丁；每个结论都尽量附可复现的证据（日志、测试用例）。
 
+## 更新记录
+
+**2026-10-30（第二版：monitor 1.7.25 / toolbox 2.17.8）**
+
+- **收藏表情在 NapCat 上修好了**（此前"一张都没有"）。根因是 NapCat 的
+  `fetch_custom_face_detail` 原样返回 QQ 原始对象（驼峰 `emojiId`），而插件只认
+  `emoji_id`，于是把整份收藏判成空。现在两种命名都接受；另外 NapCat **没有**
+  `send_custom_face`，发送时自动退回「按图片 URL 发出」。
+- **监控面板在手机竖屏上不再被切掉右侧**。根因是 `.col-side` 的 `min-width:380px`
+  在 1080 断点只改了 `width/max-width`、没重置 `min-width`，在 360 宽的屏上把整页顶宽。
+- **时间戳加了两处显式说明**（面板顶部徽标 + 注入给模型的一行）：AstrBot 4.29 用
+  `now(timezone.utc)` 写 `updated_at`，与 4.28 遗留在同一列的本地时间差 8 小时，
+  表现是「刚聊过的会话显示成 8 小时前」。只是显示差异，排序不受影响。
+
 ## 安装（简单）
 
 这不是 AstrBot 本体的魔改版，不需要替换 AstrBot 源码：
