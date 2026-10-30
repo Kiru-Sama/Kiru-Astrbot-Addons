@@ -41,7 +41,7 @@ PRESETS: dict[str, dict] = {
         "eta": 30,
         "model_kind": "unet",
         "model_dir": "Krea2",
-        "lora_dirs": ("Krea2-风格", "Krea2-功能"),
+        "lora_dirs": ("Krea2",),
         "desc": "KREA2（UNET + qwen3vl 文本编码器）",
     },
     "anima": {
@@ -50,7 +50,7 @@ PRESETS: dict[str, dict] = {
         "eta": 40,
         "model_kind": "unet",
         "model_dir": "anima",
-        "lora_dirs": ("anima", "anima-bsk"),
+        "lora_dirs": ("anima",),
         "desc": "Anima（UNET + Qwen3-0.6B 文本编码器）",
     },
     "moss": {
