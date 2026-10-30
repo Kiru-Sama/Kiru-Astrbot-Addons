@@ -3464,6 +3464,8 @@ class NcdComfyPlugin(star.Star):
             seed(int): 随机种子；-1 = 每次随机。
             model(string): 换底模（写文件名或其中一段）；留空 = 工作流里那个。
             lora(string): 加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号分隔。
+                ★ 只能填**当前预设这一族**的名字（moss 用 Moss\…，anima 用 anima\…）。
+                  填了别族的同名文件会自动换成本族那个，但最好一开始就用对。
                 ★ 留空也会自动叠 8 步加速 LoRA（强度 1.0，步数 4~14 时必须带）；
                   这里填的是**叠加**，加速 LoRA 仍会在最前面，不会被替换。
             reference(string): **普通降噪图生图**（不锁结构）：留空 = 文生图；
@@ -3821,6 +3823,7 @@ class NcdComfyPlugin(star.Star):
 
         # LoRA（提交前动态插节点）
         loras: list[dict] = []
+        lora_auto: list[str] = []   # 跨族自动纠正记录（函数级，空 lora 也要有）
         if (lora or "").strip():
             default_strength = self._conf_float("comfy_lora_strength", 1.0)
             pool = self._scan_loras(preset_name)
@@ -3835,20 +3838,38 @@ class NcdComfyPlugin(star.Star):
                     try:
                         resolved = self._resolve_name(name_part, pool, "LoRA")
                     except ComfyError:
-                        # 在别的族里能找着 → 明确告诉模型「这是跨族」
+                        # 在别的族里能找着 → 先看本族有没有**同名**文件，有就自动换
                         other = ""
                         try:
                             other = self._resolve_name(name_part, self._scan_loras(), "LoRA")
                         except ComfyError:
                             pass
-                        if other:
+                        if not other:
+                            raise
+                        base = os.path.basename(str(other).replace("/", "\\"))
+                        same = next(
+                            (
+                                m["name"]
+                                for m in pool
+                                if os.path.basename(m["name"]).lower() == base.lower()
+                            ),
+                            None,
+                        )
+                        if same:
+                            # ★ 模型/用户填了别族的路径，但本族有同名文件 —— 直接用本族那个。
+                            #   不这么做的话整张图会失败，模型还会嘴硬说「加上了」。
+                            resolved = same
+                            lora_auto.append(f"{base} → 本族同名（{preset_name}）")
+                            logger.info(
+                                f"[comfy] LoRA 跨族自动纠正: {other} -> {same}"
+                            )
+                        else:
                             raise ComfyError(
                                 f"LoRA「{os.path.basename(other)}」属于别的模型家族，"
                                 f"不能和 {presets.PRESETS[preset_name]['label']} 一起用。"
                                 f"这一族可用：{self._lora_names(pool)}"
                                 + RECOMMENDED_HINT
                             ) from None
-                        raise
                     strength = (
                         float(strength_part) if strength_part.strip() else default_strength
                     )
@@ -4183,6 +4204,8 @@ class NcdComfyPlugin(star.Star):
             f"CFG {cfg_val:g}",
             f"seed {seed_val}",
         ]
+        if lora_auto:
+            used.append("LoRA 自动纠正：" + "、".join(lora_auto))
         if up_scale_text:
             used.append(f"放大 {up_scale_text}")
         if loras:
