@@ -3895,6 +3895,8 @@ class NcdComfyPlugin(star.Star):
                 except asyncio.CancelledError:
                     self._quota_sync_leave(event)
                     raise
+        # 放大信息：先在函数级占位，真正的尺寸在 apply_params 之后填
+        up_scale_text = ""
         async with self._gen_slot(event, sync_quota=not _ASYNC_RUN.get()):
             # 拿到渲染锁时再查一次禁生图：排队期间可能刚好触发 70 张。
             blocked_late = self._quota_block_message(event)
@@ -3944,6 +3946,11 @@ class NcdComfyPlugin(star.Star):
                     upscale_method=self._conf_str("comfy_upscale_method") or "lanczos",
                     upscale_max_side=up_max_side,
                 )
+                # 放大信息：读图里真实的目标尺寸（可能被 max_side 削过），别只报倍率
+                _us = (final.get("upscale_resize") or {}).get("inputs") or {}
+                if _us:
+                    _tag = up_model or "lanczos"
+                    up_scale_text = f"{_us.get('width')}×{_us.get('height')}（{_tag}）"
                 async def _on_sampler() -> None:
                     if ctrl_name and ref_name:
                         mode_label = "图生图（普通降噪 + 姿态控制）"
@@ -4025,9 +4032,16 @@ class NcdComfyPlugin(star.Star):
                 "seconds": round(elapsed, 1),
             },
         )
-        caption = self._image_caption(
-            used_model, loras, elapsed, w, h, steps_val
-        )
+        # ★ 图注只是「参数卡片」这种附加信息，绝不能因为它出错就把整张图判失败
+        #   （2026-10-30 两次事故：NameError 直接让用户看到「图画失败了」，图其实已经发出）
+        try:
+            caption = self._image_caption(
+                used_model, loras, elapsed, w, h, steps_val,
+                upscale_text=up_scale_text,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 生成图注失败（只丢文案，不影响出图）: {exc}")
+            caption = ""
         try:
             await self.context.send_message(
                 event.unified_msg_origin,
