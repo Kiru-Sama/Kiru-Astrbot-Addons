@@ -136,7 +136,7 @@ QUOTA_CONFIG_BOUNDS = {
 #   现在不写具体名字，一律以 comfy_tools 现报的配置为准。
 RECOMMENDED_HINT = (
     "\n★ 非用户特别要求，直接用默认预设（底模/步数/CFG 都已配好），不要手动换底模；"
-    "8 步档必须带 8 步加速 LoRA（插件自动加），想加风格用 lora 参数叠加即可。"
+    "少步数（4~14 步）会自动叠加速 LoRA；想加风格用 lora 参数叠加即可。"
 )
 
 LORA_NOISE = ("年轻", "年幼", "幼", "成年", "年上", "大", "小", "v1", "v2", "v3",
@@ -2541,7 +2541,7 @@ class NcdComfyPlugin(star.Star):
             if lora:
                 strength = self._conf_float("comfy_default_lora_strength", 1.0)
                 bits.append(
-                    f"★ 必带加速 LoRA {os.path.basename(lora)}（强度 {strength:g}）"
+                    f"★ 加速 LoRA {os.path.basename(lora)}（强度 {strength:g}）"
                     " —— 步数 4~14 时插件会自动插到最前面，"
                     "你再用 lora 参数指定风格 LoRA 会串在它后面（叠加，不是替换）"
                 )
@@ -2693,7 +2693,7 @@ class NcdComfyPlugin(star.Star):
         """自动发图时附在图片后面的参数卡片。
 
         ★ 2026-10-30：加速 LoRA 会标出来（“（加速）”），这样用户一眼能确认
-          「8 步档强制叠的加速 LoRA 到底有没有真的进图」，不用去翻日志。
+          「自动叠的加速 LoRA 到底有没有真的进图」，不用去翻日志。
         """
         model_name = os.path.basename(str(used_model or "")) or "未知"
         accel = os.path.basename(str(self._conf_str("comfy_default_lora") or ""))
@@ -3511,9 +3511,9 @@ class NcdComfyPlugin(star.Star):
             f"{self._history_days()} 天 / {self._history_limit()} 张，不会串到别的会话。",
             "超时兜底：comfy_output() 可以把已经画好的图直接发出来，不用重画。",
             self._default_style_line(),
-            "★ 步数 4~14 时**必须**带 8 步加速 LoRA（默认已配好，插件自动插最前面，强度 1.0）；"
+            "★ 加速 LoRA 的作用是「少步数更快收敛」：步数 4~14 时插件自动插到最前面（强度 1.0），"
             "要风格就再用 lora 参数叠一个，会串在加速 LoRA 后面，**不会替换它**。",
-            "非用户特别要求，别手动指定 model；8 步档也别把加速 LoRA 换掉。",
+            "非用户特别要求，别手动指定 model；4~14 步时也别把加速 LoRA 换掉。",
             "",
             "绘图 SOP（按这个顺序判断，不要直接套模板）：",
             "1. 参考图先认人：先问清图上是谁/要画谁，不猜角色。",
@@ -3530,12 +3530,12 @@ class NcdComfyPlugin(star.Star):
             "· size        画幅，如 720x960，或 竖/横/方",
             "· width/height 像素直接给（8 的倍数，覆盖 size）",
             "· steps       1~150；cfg 0~30；seed 整数（-1 = 随机）",
-            "　★ 8 步只属于 moss（蒸馏+加速LoRA）；sdxl/anima/krea2 用默认 28 步、CFG 6，"
-            "　  别把 8 步/CFG1 套过去，会出灰白糊图。",
+            "　★ moss 用 8 步 + 加速 LoRA 最省时间；sdxl/anima/krea2 默认 28 步、CFG 6。"
+            "　  别把 8 步/CFG1 套到 sdxl 上，会出灰白糊图。",
             "· model       换底模（写文件名或其中一段，大小写不敏感）",
             '· lora        加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号隔开。'
             "  找不到名字时用 comfy_models(kind=\"lora\", preset=\"anima\") 或 comfy_models(kind=\"lora\", q=\"deepseek\") 精确查，别猜路径。",
-            "留空也会自动叠 8 步加速 LoRA；这里给的是叠加，不会替换加速 LoRA。",
+            "留空也会自动叠加速 LoRA（仅 4~14 步）；这里给的是叠加，不会替换它。",
             "· upscale     可选**放大/超分**：留空=不放大；\"2x\"/\"1.5x\" 通用缩放；"
             "\"model\" 用配置的放大模型；\"model:4x-UltraSharp.pth\" 指定模型。"
             "放大模型是 4x 时想要 2x 会自动缩到目标尺寸，单边超上限会自动降倍率。",
@@ -3638,7 +3638,7 @@ class NcdComfyPlugin(star.Star):
             lora(string): 加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号分隔。
                 ★ 只能填**当前预设这一族**的名字（moss 用 Moss\…，anima 用 anima\…）。
                   填了别族的同名文件会自动换成本族那个，但最好一开始就用对。
-                ★ 留空也会自动叠 8 步加速 LoRA（强度 1.0，步数 4~14 时必须带）；
+                ★ 留空也会自动叠加速 LoRA（强度 1.0，仅步数 4~14 时叠，>14 步不叠）；
                   这里填的是**叠加**，加速 LoRA 仍会在最前面，不会被替换。
             reference(string): **普通降噪图生图**（不锁结构）：留空 = 文生图；
                 "auto" = 插件自动找（当前/引用消息 → 最近用户图 → 最近生成图）；
@@ -3923,7 +3923,7 @@ class NcdComfyPlugin(star.Star):
             return _canvas_reminder(w, h, warn)
 
         # ★ 2026-10-30：步数与 CFG 不能全局一刀切。
-        #   comfy_steps=8 / comfy_cfg=1 是给 moss（蒸馏模型 + 8步加速 LoRA）用的；
+        #   comfy_steps=8 / comfy_cfg=1 是给 moss（配 8步加速 LoRA，少步数快速收敛）用的；
         #   套到 SDXL 上就是灰白糊（实测 960x720 8步 CFG1 出图一片雾）。
         #   所以：显式传参优先；没传时按预设取不同默认值。
         explicit_steps = int(steps or 0)
@@ -4079,8 +4079,8 @@ class NcdComfyPlugin(star.Star):
         # ★ 2026-10-30：原来有两个坑——
         #   ① 写死 `preset_name == "sdxl"`，默认预设改 moss 后再也没加载过；
         #   ② 用 `if not loras` 判断，模型一指定风格 LoRA，8 步 LoRA 就被挤掉了，
-        #      8 步蒸馏模型没有加速 LoRA 会明显发糊（图注也会显示成只有风格 LoRA）。
-        #   现在：只要步数在 4~14（蒸馏 LoRA 的有效区间），就把加速 LoRA 插到最前面，
+        #      少步数不叠加速 LoRA 会明显发糊（图注也会显示成只有风格 LoRA）。
+        #   现在：只要步数在 4~14（加速 LoRA 生效区间），就把加速 LoRA 插到最前面，
         #   风格 LoRA 串在它后面（presets._insert_loras 是链式的 LoraLoader）。
         auto_lora = self._conf_str("comfy_default_lora")
         if auto_lora:
@@ -4413,7 +4413,7 @@ class NcdComfyPlugin(star.Star):
                 parts.append(f"{base}:{l['strength']:g}{tag}")
             used.append("LoRA " + "、".join(parts))
             if accel_base and 4 <= int(steps_val) <= 14:
-                used.append(f"4~14 步档已强制叠加加速 LoRA（强度 {self._conf_float('comfy_default_lora_strength', 1.0):g}）")
+                used.append(f"4~14 步：已叠加加速 LoRA（强度 {self._conf_float('comfy_default_lora_strength', 1.0):g}）")
         if ref_name:
             used.append(f"图生图（普通降噪，denoise {denoise_val:g}）")
         if ctrl_name:
