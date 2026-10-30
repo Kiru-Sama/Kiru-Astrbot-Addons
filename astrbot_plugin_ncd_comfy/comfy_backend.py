@@ -207,11 +207,14 @@ class ComfyClient:
         return names
 
     def list_models_sync(self, kind: str) -> list[str]:
-        """按类别取模型名：checkpoints / loras / diffusion_models。"""
+        """按类别取模型名：checkpoints / loras / diffusion_models / upscale_models。"""
         node_field = {
             "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
             "diffusion_models": ("UNETLoader", "unet_name"),
             "loras": ("LoraLoader", "lora_name"),
+            # ★ 2026-10-30：放大模型（超分）。UpscaleModelLoader 的可选值就是
+            #   models/upscale_models 里的文件名。
+            "upscale_models": ("UpscaleModelLoader", "model_name"),
         }.get(kind)
         if not node_field:
             return []

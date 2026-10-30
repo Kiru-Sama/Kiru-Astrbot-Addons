@@ -173,6 +173,36 @@
     "hint": "0~2，默认 0.8。",
     "default": 0.8
   },
+  "comfy_upscale_default": {
+    "type": "bool",
+    "description": "默认就放大",
+    "hint": "开：不写 upscale 参数也按下面的默认倍率放大（多花时间）。\n关（默认）：只有用户/模型明确说要放大才放大。",
+    "default": false
+  },
+  "comfy_upscale_model": {
+    "type": "string",
+    "description": "默认放大模型",
+    "hint": "models/upscale_models 里的文件名，例如 4x-UltraSharp.pth。\n留空 = 只用通用缩放（lanczos），不加载放大模型。\n放大模型是 4x，想要 2x 时会自动再缩到目标尺寸。",
+    "default": ""
+  },
+  "comfy_upscale_factor": {
+    "type": "float",
+    "description": "默认放大倍率",
+    "hint": "1.5 = 1.5 倍边长（面积约 2.25 倍）。1.0 等于不放大。",
+    "default": 2.0
+  },
+  "comfy_upscale_max_side": {
+    "type": "int",
+    "description": "放大后单边上限（像素）",
+    "hint": "超过就按比例降倍率，防止 4x 直接把 1216 变 4864 爆显存。0 = 不限。",
+    "default": 2560
+  },
+  "comfy_upscale_method": {
+    "type": "string",
+    "description": "通用缩放算法",
+    "hint": "nearest-exact / bilinear / area / bicubic / lanczos。默认 lanczos（锐利，适合缩放）。",
+    "default": "lanczos"
+  },
   "comfy_voice_pause": {
     "type": "float",
     "description": "省略号换成多长的停顿（秒）",

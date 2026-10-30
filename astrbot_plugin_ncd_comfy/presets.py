@@ -313,6 +313,10 @@ def apply_params(
     control_start: float = 0.0,
     control_end: float = 1.0,
     control_preprocess: bool = True,
+    upscale_model: str | None = None,
+    upscale_factor: float = 0.0,
+    upscale_method: str = "lanczos",
+    upscale_max_side: int = 0,
 ) -> dict:
     """按参数改一份新图（不动传入的 dict）。
 
@@ -378,7 +382,106 @@ def apply_params(
             preprocess=bool(control_preprocess),
         )
 
+    # ★ 2026-10-30：可选放大（超分）。四个工作流本身是精简版、没有超分节点，
+    #   这里在 VAEDecode 之后、输出之前动态接：
+    #     [放大模型 UpscaleModelLoader+ImageUpscaleWithModel] → ImageScale(精确目标尺寸)
+    #   upscale_factor <= 1 表示不放大，一个节点都不加。
+    if upscale_factor and float(upscale_factor) > 1.0:
+        g = _insert_upscale(
+            g,
+            roles,
+            width=int(width or 0),
+            height=int(height or 0),
+            factor=float(upscale_factor),
+            model_name=str(upscale_model or ""),
+            method=str(upscale_method or "lanczos"),
+            max_side=int(upscale_max_side or 0),
+        )
+
     return g
+
+
+def _insert_upscale(
+    graph: dict,
+    roles: dict,
+    *,
+    width: int,
+    height: int,
+    factor: float,
+    model_name: str = "",
+    method: str = "lanczos",
+    max_side: int = 0,
+) -> dict:
+    """在 VAEDecode 之后接一段放大。
+
+    两种用法：
+      · 只有 factor（比如 2.0）→ 直接 ImageScale 用 lanczos 放大到目标尺寸
+      · 给了 model_name（如 4x-UltraSharp.pth）→ 先模型放大，再用 ImageScale
+        精确缩到目标尺寸（4x 模型想要 2x 就靠这一步降下来）
+
+    目标尺寸按 base × factor 算，单边不超过 max_side（<=0 表示不限），
+    并对齐到 8 的倍数（ComfyUI 的常规要求）。
+    """
+    if width <= 0 or height <= 0:
+        return graph
+
+    decode_id = next(
+        (nid for nid, n in graph.items() if isinstance(n, dict)
+         and n.get("class_type") == "VAEDecode"),
+        None,
+    )
+    if not decode_id:
+        return graph
+
+    outs = [
+        nid for nid, n in graph.items()
+        if isinstance(n, dict)
+        and n.get("class_type") in ("SaveImage", "PreviewImage")
+        and any(
+            isinstance(v, list) and v and v[0] == decode_id
+            for v in (n.get("inputs") or {}).values()
+        )
+    ]
+    if not outs:
+        return graph
+
+    prev = [decode_id, 0]
+    if model_name:
+        graph["upscale_model"] = {
+            "class_type": "UpscaleModelLoader",
+            "inputs": {"model_name": model_name},
+        }
+        graph["upscale_by_model"] = {
+            "class_type": "ImageUpscaleWithModel",
+            "inputs": {"upscale_model": ["upscale_model", 0], "image": prev},
+        }
+        prev = ["upscale_by_model", 0]
+
+    tw = int(round(width * factor))
+    th = int(round(height * factor))
+    if max_side and max(int(tw), int(th)) > int(max_side):
+        k = float(max_side) / max(tw, th)
+        tw, th = int(round(tw * k)), int(round(th * k))
+    tw = max(64, (tw // 8) * 8)
+    th = max(64, (th // 8) * 8)
+
+    graph["upscale_resize"] = {
+        "class_type": "ImageScale",
+        "inputs": {
+            "image": prev,
+            "upscale_method": method,
+            "width": tw,
+            "height": th,
+            "crop": "disabled",
+        },
+    }
+    prev = ["upscale_resize", 0]
+
+    for oid in outs:
+        for k, v in (graph[oid].get("inputs") or {}).items():
+            if isinstance(v, list) and v and v[0] == decode_id:
+                graph[oid]["inputs"][k] = prev
+    return graph
 
 
 def _insert_img2img(

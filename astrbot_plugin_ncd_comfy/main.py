@@ -2486,6 +2486,51 @@ class NcdComfyPlugin(star.Star):
         except Exception:  # noqa: BLE001
             return "默认风格：按当前插件配置（用 comfy_tools 可看现值）。"
 
+    def _parse_upscale(self, raw: str) -> tuple[str, float]:
+        """解析 upscale 参数 → (放大模型名, 倍率)；倍率 <=1 表示不放大。
+
+        支持的写法（大小写不敏感）：
+            留空          跟随配置 comfy_upscale_default（默认关）
+            off / 关 / 不放大 / 0     不放大
+            2x / 1.5 / x2 / 2        通用放大（lanczos，不用模型）
+            model / 超分              用配置里的放大模型 + 配置倍率
+            model:4x-UltraSharp.pth  指定放大模型
+            4x-AnimeSharp            直接写模型名（模糊匹配）
+        """
+        cfg_model = self._conf_str("comfy_upscale_model")
+        cfg_factor = self._conf_float("comfy_upscale_factor", 2.0)
+        if cfg_factor <= 1.0:
+            cfg_factor = 2.0
+        text = str(raw or "").strip()
+        low = text.lower()
+        if not text:
+            return (cfg_model, cfg_factor) if self._conf_bool("comfy_upscale_default", False) else ("", 0.0)
+        if low in ("off", "none", "no", "0", "关", "不放大", "原图", "disable"):
+            return "", 0.0
+        if low.startswith(("model:", "model：", "m:", "超分:", "超分：")):
+            body = re.split(r"[:：]", text, maxsplit=1)
+            name = body[1].strip() if len(body) > 1 else ""
+            return (name or cfg_model), cfg_factor
+        if low.endswith((".pth", ".safetensors", ".pt")):
+            return text, cfg_factor
+        m = re.match(r"^[x×]?\s*([0-9]+(?:\.[0-9]+)?)\s*[x×]?$", low)
+        if m:
+            try:
+                factor = float(m.group(1))
+            except ValueError:
+                factor = cfg_factor
+            return ("", factor) if factor > 1.0 else ("", 0.0)
+        # 其它文字当作放大模型名的一段（模糊匹配）
+        try:
+            names = self._client().list_models_sync("upscale_models")
+        except Exception:  # noqa: BLE001
+            names = []
+        hit = next((n for n in names if low in n.lower()), "")
+        if hit:
+            return hit, cfg_factor
+        logger.info(f"[comfy] upscale 参数没认出来，按不放大处理: {raw!r}")
+        return "", 0.0
+
     async def _notify(self, event: AstrMessageEvent, text: str) -> None:
         """往会话发一条纯文本提示（失败/超时不影响出图）。
 
@@ -2516,6 +2561,7 @@ class NcdComfyPlugin(star.Star):
         width: int,
         height: int,
         steps: int = 0,
+        upscale_text: str = "",
     ) -> str:
         """自动发图时附在图片后面的参数卡片。
 
@@ -2541,7 +2587,8 @@ class NcdComfyPlugin(star.Star):
             f"LoRA：{lora_text}\n"
             f"尺寸：{int(width)}×{int(height)}\n"
             f"步数：{int(steps)} 步\n"
-            f"生成耗时：{max(0.0, float(elapsed or 0)):.1f}s（含权重加载）"
+            + (f"放大：{upscale_text}\n" if upscale_text else "")
+            + f"生成耗时：{max(0.0, float(elapsed or 0)):.1f}s（含权重加载）"
         )
 
     async def _notify_loading(
@@ -3307,6 +3354,9 @@ class NcdComfyPlugin(star.Star):
             "· model       换底模（写文件名或其中一段，大小写不敏感）",
             '· lora        加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号隔开。'
             "留空也会自动叠 8 步加速 LoRA；这里给的是叠加，不会替换加速 LoRA。",
+            "· upscale     可选**放大/超分**：留空=不放大；\"2x\"/\"1.5x\" 通用缩放；"
+            "\"model\" 用配置的放大模型；\"model:4x-UltraSharp.pth\" 指定模型。"
+            "放大模型是 4x 时想要 2x 会自动缩到目标尺寸，单边超上限会自动降倍率。",
             "· reference   普通降噪图生图（不锁结构）：auto/message/last；留空=文生图。"
             "用户要“改图/重绘/换风格/换服装”才用；只是风格参考时留空按文生图写 tags。",
             '· denoise     普通图生图重绘强度 0.05~1（越大越像重画）；0 = 用配置默认',
@@ -3375,6 +3425,7 @@ class NcdComfyPlugin(star.Star):
         control_start: float = 0.0,
         control_end: float = 1.0,
         control_preprocess: bool = True,
+        upscale: str = "",
         force: bool = False,
     ) -> str:
         """按预设工作流画一张图并发到当前会话。★ 必须先调用 comfy_tools。
@@ -3423,7 +3474,12 @@ class NcdComfyPlugin(star.Star):
             control_end(float): 到百分之几结束，0~1，默认 1。
             control_preprocess(bool): true = 自动把照片处理成深度/线稿/骨架等；
                 false = 你给的已经是处理好的控制图。
-            force(bool): 画幅超过提醒线、且用户已同意时才填 True。
+            upscale(string): 可选放大（超分）。留空 = 不放大（除非配置默认开）；
+            "2x" / "1.5x" = 通用缩放（lanczos）；"model" = 用配置里的放大模型；
+            "model:4x-UltraSharp.pth" = 指定放大模型；"off" = 明确不放大。
+            4x 模型想要 2x 会自动再缩到目标尺寸，单边超过上限自动降倍率。
+            ★ 放大很吃显存和时间，用户没要求就别开。
+        force(bool): 画幅超过提醒线、且用户已同意时才填 True。
         """
         gate = self._gate(event, "comfy_generate")
         if gate:
@@ -3854,6 +3910,9 @@ class NcdComfyPlugin(star.Star):
                     ctrl_name = await client.upload_image(
                         ctrl_bytes, f"ctrl_{uuid.uuid4().hex[:8]}.png"
                     )
+                # ▲ 可选放大（超分）：四个精简工作流本身没有超分节点，动态接在 VAEDecode 之后
+                up_model, up_factor = self._parse_upscale(upscale)
+                up_max_side = self._conf_int("comfy_upscale_max_side", 2560)
                 final = presets.apply_params(
                     graph,
                     prompt=text,
@@ -3875,6 +3934,10 @@ class NcdComfyPlugin(star.Star):
                     control_start=ctrl_start,
                     control_end=ctrl_end,
                     control_preprocess=bool(control_preprocess),
+                    upscale_model=up_model or None,
+                    upscale_factor=up_factor,
+                    upscale_method=self._conf_str("comfy_upscale_method") or "lanczos",
+                    upscale_max_side=up_max_side,
                 )
                 async def _on_sampler() -> None:
                     if ctrl_name and ref_name:
@@ -4043,6 +4106,8 @@ class NcdComfyPlugin(star.Star):
             f"CFG {cfg_val:g}",
             f"seed {seed_val}",
         ]
+        if up_scale_text:
+            used.append(f"放大 {up_scale_text}")
         if loras:
             accel_base = os.path.basename(str(self._conf_str("comfy_default_lora") or ""))
             parts = []
@@ -4264,6 +4329,27 @@ class NcdComfyPlugin(star.Star):
         if gate:
             return gate
         want = (kind or "model").strip().lower()
+        if want in ("upscale", "upscaler", "放大", "超分"):
+            try:
+                names = self._client().list_models_sync("upscale_models")
+            except Exception as exc:  # noqa: BLE001
+                return f"取放大模型清单失败：{type(exc).__name__}: {exc}"
+            if not names:
+                return (
+                    "没有放大模型（models/upscale_models 为空）。\n"
+                    '不填模型也能放大：upscale="2x" 用 lanczos 通用缩放。'
+                )
+            lines = [f"可用放大模型（{len(names)} 个，upscale 参数填 \"model:名字\"）："]
+            for n in names[:40]:
+                lines.append(f"· {n}")
+            if len(names) > 40:
+                lines.append(f"……还有 {len(names) - 40} 个")
+            lines.append("")
+            lines.append(
+                "★ 常用：4x-UltraSharp.pth（通用锐利）、4x-AnimeSharp.pth（动漫）、"
+                "4x_foolhardy_Remacri.pth（细节保留）"
+            )
+            return "\n".join(lines)
         if want in ("lora", "loras", "lo"):
             items = self._scan_loras()
             if not items:
