@@ -1,0 +1,26 @@
+{
+  "feedback_max_items": {
+    "type": "int",
+    "description": "最多保留多少条反馈",
+    "hint": "超过就按时间清掉最老的（已处理的先删）。默认 500。",
+    "default": 500
+  },
+  "feedback_notify_admin": {
+    "type": "bool",
+    "description": "新反馈写一条 WARNING 日志",
+    "hint": "开：每来一条反馈就打一条 WARNING 日志，方便在日志里瞄一眼。\n★ 真正的「私聊推给管理员」还没做（需要管理员会话的 umo），别指望它推送。",
+    "default": false
+  },
+  "feedback_allow_group": {
+    "type": "bool",
+    "description": "允许在群里用 /反馈",
+    "hint": "关掉就只能私聊提交，适合群里太吵的情况。默认开。",
+    "default": true
+  },
+  "feedback_categories": {
+    "type": "string",
+    "description": "分类（逗号分隔）",
+    "hint": "/反馈 画风 想要像素风…… 第一段要是这些词之一，否则归到「其他」。",
+    "default": "画风,底模,功能,bug,其他"
+  }
+}

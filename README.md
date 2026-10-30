@@ -42,6 +42,24 @@
   `now(timezone.utc)` 写 `updated_at`，与 4.28 遗留在同一列的本地时间差 8 小时，
   表现是「刚聊过的会话显示成 8 小时前」。只是显示差异，排序不受影响。
 
+### astrbot_plugin_ncd_feedback — 反馈通道
+
+群友想要某种画风但没对应 LoRA、缺底模、或者有奇怪的小要求，都往这里丢：
+
+`	ext
+/反馈 画风 想要像素风的 LoRA        ← 普通群友
+/反馈 想要 4 倍放大默认开           ← 分类可省略，归「其他」
+/反馈列表 / /反馈处理 <编号>        ← 管理员（仅 ADMIN 权限）
+`
+
+bot 也会在合适时机自己调 eedback_submit 工具替你记一条。
+所有反馈落在 data/plugin_data/ncd_feedback/items.jsonl，面板里可以筛选、
+标记已处理/忽略、删除 —— 面板路径：插件页 eedback，聚合面板里的「反馈」标签。
+
+配置项：eedback_max_items（保留条数）、eedback_allow_group（群里能不能用）、
+eedback_categories（分类词表）、eedback_notify_admin（新反馈写 WARNING 日志；
+★ 真正的私聊推送还没做）。
+
 ## 安装（简单）
 
 这不是 AstrBot 本体的魔改版，不需要替换 AstrBot 源码：

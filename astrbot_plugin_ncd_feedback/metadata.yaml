@@ -1,0 +1,6 @@
+name: astrbot_plugin_ncd_feedback
+display_name: 反馈通道
+desc: 收集「想画的风格没 LoRA / 缺底模 / 奇怪的小要求」，落盘并显示在反馈面板
+version: 1.0.0
+author: 本地自用
+repo: ""
