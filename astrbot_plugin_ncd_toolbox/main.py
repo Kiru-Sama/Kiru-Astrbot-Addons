@@ -338,7 +338,8 @@ FOREIGN_KEEP = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status",
                 "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help",
                 "comfy_tag_lookup",
                 "memory_write", "memory_search", "memory_forget",
-                "extend_turns", "read_attachment")
+                "extend_turns", "read_attachment",
+                  "feedback_submit")
 
 TOOL_NAMES = (
     MENU_TOOL,
