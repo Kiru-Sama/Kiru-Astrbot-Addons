@@ -53,6 +53,18 @@
     "hint": "四个工作流各自调好了步数（30 / 10 / 22 / 50），一般不用动。",
     "default": 0
   },
+  "comfy_steps_other": {
+    "type": "int",
+    "description": "非蒸馏预设的步数（sdxl/anima/krea2）",
+    "hint": "moss 用上面的 comfy_steps（8 步 + 8步加速 LoRA）。\nSDXL 这类普通模型需要 25~30 步，8 步会糊成灰雾。\n0 = 用工作流自带步数。",
+    "default": 28
+  },
+  "comfy_cfg_other": {
+    "type": "float",
+    "description": "非蒸馏预设的 CFG",
+    "hint": "moss 用 1.0 是配合蒸馏 LoRA；SDXL 常用 5~7，CFG 1 会非常灰。\n0 = 用工作流自带 CFG。",
+    "default": 6.0
+  },
   "comfy_cfg": {
     "type": "float",
     "description": "默认 CFG（0 = 用工作流里的）",

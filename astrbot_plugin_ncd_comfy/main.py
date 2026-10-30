@@ -3354,6 +3354,8 @@ class NcdComfyPlugin(star.Star):
             "· size        画幅，如 720x960，或 竖/横/方",
             "· width/height 像素直接给（8 的倍数，覆盖 size）",
             "· steps       1~150；cfg 0~30；seed 整数（-1 = 随机）",
+            "　★ 8 步只属于 moss（蒸馏+加速LoRA）；sdxl/anima/krea2 用默认 28 步、CFG 6，"
+            "　  别把 8 步/CFG1 套过去，会出灰白糊图。",
             "· model       换底模（写文件名或其中一段，大小写不敏感）",
             '· lora        加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号隔开。'
             "留空也会自动叠 8 步加速 LoRA；这里给的是叠加，不会替换加速 LoRA。",
@@ -3728,12 +3730,30 @@ class NcdComfyPlugin(star.Star):
         if not force and max(w, h) > warn:
             return _canvas_reminder(w, h, warn)
 
-        steps_val = int(steps or 0) or int(
-            self._conf_int("comfy_steps", 0) or info["steps"]
-        )
+        # ★ 2026-10-30：步数与 CFG 不能全局一刀切。
+        #   comfy_steps=8 / comfy_cfg=1 是给 moss（蒸馏模型 + 8步加速 LoRA）用的；
+        #   套到 SDXL 上就是灰白糊（实测 960x720 8步 CFG1 出图一片雾）。
+        #   所以：显式传参优先；没传时按预设取不同默认值。
+        explicit_steps = int(steps or 0)
+        conf_steps = int(self._conf_int("comfy_steps", 0) or 0)
+        other_steps = int(self._conf_int("comfy_steps_other", 0) or 0)
+        if explicit_steps:
+            steps_val = explicit_steps
+        elif preset_name == "moss":
+            steps_val = conf_steps or int(info["steps"])
+        else:
+            steps_val = other_steps or int(info["steps"]) or conf_steps
         steps_val = max(1, min(150, steps_val))
         steps_val = self._quota_effective_steps(event, steps_val)
-        cfg_val = float(cfg or 0) or float(self._conf_float("comfy_cfg", 0) or info["cfg"])
+        explicit_cfg = float(cfg or 0)
+        conf_cfg = float(self._conf_float("comfy_cfg", 0) or 0)
+        other_cfg = float(self._conf_float("comfy_cfg_other", 0) or 0)
+        if explicit_cfg:
+            cfg_val = explicit_cfg
+        elif preset_name == "moss":
+            cfg_val = conf_cfg or float(info["cfg"])
+        else:
+            cfg_val = other_cfg or float(info["cfg"]) or conf_cfg
         cfg_val = max(0.0, min(30.0, cfg_val))
         seed_val = sizing.normalize_seed(seed)
         denoise_val = float(denoise or 0) or self._conf_float("comfy_img2img_strength", 0.6)
