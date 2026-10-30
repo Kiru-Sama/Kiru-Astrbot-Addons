@@ -139,6 +139,62 @@ RECOMMENDED_HINT = (
     "8 步档必须带 8 步加速 LoRA（插件自动加），想加风格用 lora 参数叠加即可。"
 )
 
+LORA_NOISE = ("年轻", "年幼", "幼", "成年", "年上", "大", "小", "v1", "v2", "v3",
+              "beta", "alpha", "final", "lora", "comfy", "safetensors")
+
+
+def lora_norm(name: str) -> str:
+    """把 LoRA 文件名归一化，方便做「近似」比较。"""
+    base = os.path.basename(str(name or "").replace("/", "\\")).lower()
+    for ext in (".safetensors", ".pt", ".ckpt"):
+        if base.endswith(ext):
+            base = base[: -len(ext)]
+    for token in LORA_NOISE:
+        base = base.replace(token, "")
+    for ch in (" ", "-", "_", "（", "）", "(", ")", "·", "."):
+        base = base.replace(ch, "")
+    return base
+
+
+def pick_family_lora(want: str, pool: list[dict]) -> tuple[str, str]:
+    """在 pool（某个预设族）里找 want 的等价物。
+
+    返回 (实际路径, 说明)；找不到返回 ("", "")。说明会写进图注，让纠正可见。
+    """
+    want_base = os.path.basename(str(want or "").replace("/", "\\")).lower()
+    want_norm = lora_norm(want)
+    if not want_base:
+        return "", ""
+    # 1) basename 完全相同
+    for m in pool:
+        if os.path.basename(m["name"]).lower() == want_base:
+            return m["name"], "同名"
+    # 2) 归一化后相同
+    if want_norm:
+        for m in pool:
+            if lora_norm(m["name"]) == want_norm:
+                return m["name"], "归一化同名"
+        # 3) 互相包含（短的一方至少 2 个字符，避免 "a" 这种误命中）
+        best = ""
+        for m in pool:
+            nm = lora_norm(m["name"])
+            if len(nm) < 2 or len(want_norm) < 2:
+                continue
+            if nm in want_norm or want_norm in nm:
+                if not best or len(nm) > len(lora_norm(best)):
+                    best = m["name"]
+        if best:
+            return best, "关键词相近"
+    return "", ""
+
+#: 可修正失败的统一后缀：明确告诉模型「别转述，先重试」。
+#: 2026-10-30 实测：跨族 LoRA 报错被模型原样发给用户，用户看到一长串技术细节。
+TOOL_RETRY_HINT = (
+    "\n\n★ 这是**工具报错**，不是给用户的答复："
+    "请按上面的建议修正参数后**重试一次**（最多重试 2 次）；"
+    "只有重试仍然失败，才用一句话向用户说明原因，不要把这段报错原文发出去。"
+)
+
 TOOL_NAMES = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help", "comfy_tag_lookup")
 
 TOOL_SUMMARY = {
@@ -3855,11 +3911,15 @@ class NcdComfyPlugin(star.Star):
                             ),
                             None,
                         )
+                        if not same:
+                            # ★ 同名没有就退一步找「近似」：实际踩过 anima 只有
+                            #   DeepSeek娘化-年轻鲸，而模型传的是 …-鲸鱼，basename 不同。
+                            same, why = pick_family_lora(base, pool)
+                            if same:
+                                base = f"{base}（{why}）"
                         if same:
-                            # ★ 模型/用户填了别族的路径，但本族有同名文件 —— 直接用本族那个。
-                            #   不这么做的话整张图会失败，模型还会嘴硬说「加上了」。
                             resolved = same
-                            lora_auto.append(f"{base} → 本族同名（{preset_name}）")
+                            lora_auto.append(f"{os.path.basename(other)} → {same}")
                             logger.info(
                                 f"[comfy] LoRA 跨族自动纠正: {other} -> {same}"
                             )
@@ -3868,7 +3928,10 @@ class NcdComfyPlugin(star.Star):
                                 f"LoRA「{os.path.basename(other)}」属于别的模型家族，"
                                 f"不能和 {presets.PRESETS[preset_name]['label']} 一起用。"
                                 f"这一族可用：{self._lora_names(pool)}"
+                                f"\n★ 不要再用这个路径；要么换成上面清单里的名字，"
+                                f"要么把 lora 参数留空。"
                                 + RECOMMENDED_HINT
+                                + TOOL_RETRY_HINT
                             ) from None
                     strength = (
                         float(strength_part) if strength_part.strip() else default_strength
@@ -3877,7 +3940,7 @@ class NcdComfyPlugin(star.Star):
                         {"name": resolved, "strength": max(0.0, min(2.0, strength))}
                     )
             except (ComfyError, ValueError) as exc:
-                return f"出图失败：{exc}"
+                return f"出图失败：{exc}" + TOOL_RETRY_HINT
 
         # 默认 LoRA（8 步加速）：**必须**叠，不是「没指定才叠」。
         # ★ 2026-10-30：原来有两个坑——
@@ -4057,10 +4120,10 @@ class NcdComfyPlugin(star.Star):
                 data = await client.fetch_image(image)
             except ComfyError as exc:
                 logger.warning(f"[comfy] 出图失败: {exc}")
-                return f"出图失败：{exc}"
+                return f"出图失败：{exc}" + TOOL_RETRY_HINT
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"[comfy] 出图异常: {exc}", exc_info=True)
-                return f"出图失败：{type(exc).__name__}: {exc}"
+                return f"出图失败：{type(exc).__name__}: {exc}" + TOOL_RETRY_HINT
             finally:
                 # 成功/失败/超时都算这次任务结束；下一次同用户出队要看间隔。
                 self._quota_record_end(event)
