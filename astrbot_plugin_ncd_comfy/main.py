@@ -1141,6 +1141,7 @@ class NcdComfyPlugin(star.Star):
             self._conf_str("comfy_python"),
             self._conf_int("comfy_port", 8199),
             self._conf_str("comfy_host") or "127.0.0.1",
+            self._conf_str("comfy_launcher"),
         )
         if self._client_obj is not None and self._client_key != key:
             self._client_obj.stop()
@@ -1151,6 +1152,7 @@ class NcdComfyPlugin(star.Star):
                 python=self._conf_str("comfy_python"),
                 port=self._conf_int("comfy_port", 8199),
                 host=self._conf_str("comfy_host") or "127.0.0.1",
+                launcher=self._conf_str("comfy_launcher"),
                 # ★ 两档回收：先卸模型（5 分钟），再关进程（30 分钟）
                 unload_timeout=float(self._conf_int("comfy_unload_timeout", 300)),
                 idle_timeout=float(self._conf_int("comfy_idle_timeout", 1800)),

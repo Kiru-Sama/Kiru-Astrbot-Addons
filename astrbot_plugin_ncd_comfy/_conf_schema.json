@@ -23,6 +23,12 @@
     "hint": "★ 手机端接电脑出图时填对方 IP，例如 192.168.137.1（Windows 移动热点的网关地址）。\n留空或 127.0.0.1 = 只连本机，插件会自己拉起 ComfyUI。\n\n★ 填了非本机地址后，插件不会再尝试本地拉起 —— 探活失败会直接报「远程 ComfyUI 不可达」，不会去检查 comfy_dir。\n★ 远程模式下 ComfyUI 必须监听 0.0.0.0（例如 python main.py --port 8199 --listen 0.0.0.0），且对方防火墙要放行该端口。",
     "default": "127.0.0.1"
   },
+  "comfy_launcher": {
+    "type": "string",
+    "description": "远程拉起器地址（留空 = 不自动拉起）",
+    "hint": "★ 配合 comfy_host 使用：电脑上跑 comfy_launcher.py，这里填它的地址，\n例如 http://192.168.137.1:8200。\n\n填了之后，插件发现远程 ComfyUI 没在跑时，会先请电脑把它拉起来再出图——\n你就不用先开 ComfyUI 了，只要电脑开着。\n\n电脑端启动：python comfy_launcher.py --port 8200（建议开机自启）",
+    "default": ""
+  },
   "comfy_extra_paths": {
     "type": "string",
     "description": "extra_model_paths.yaml 路径（留空 = <comfy_dir>\\ComfyUI\\extra_model_paths.yaml）",

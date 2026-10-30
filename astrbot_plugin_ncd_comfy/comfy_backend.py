@@ -69,6 +69,7 @@ class ComfyClient:
         python: str = "",
         port: int = 8199,
         host: str = "127.0.0.1",
+        launcher: str = "",
         idle_timeout: float = 300.0,
         unload_timeout: float = 300.0,
         startup_timeout: float = 240.0,
@@ -87,6 +88,7 @@ class ComfyClient:
         #   手机端跑 AstrBot、电脑端跑 ComfyUI 时，这里填电脑的局域网 IP
         #   （电脑热点是 192.168.137.1），否则插件永远只会连手机自己的 127.0.0.1。
         self.host = str(host or "").strip().strip('"') or "127.0.0.1"
+        self.launcher = str(launcher or "").strip().strip('"')
         self.idle_timeout = float(idle_timeout or 300.0)
         # ★ 两档回收：先卸模型（还显存、进程留着），再关进程（连内存也还）
         self.unload_timeout = float(unload_timeout or 300.0)
@@ -201,6 +203,38 @@ class ComfyClient:
             return []
         return self.list_object_names(node_field[0], node_field[1])
 
+    def _launcher_start(self) -> bool:
+        """请远程的「拉起器」把 ComfyUI 启动起来，成功返回 True。
+
+        ★ 2026-10-30：手机上的 bot 没法在电脑上开进程，所以电脑侧要跑
+          comfy_launcher.py（监听 8200）。这里 POST /start，它会在本机拉起
+          ComfyUI 并等到就绪（最长几分钟），所以我们这边的 timeout 要放宽。
+        """
+        if not self.launcher:
+            return False
+        url = self.launcher.rstrip("/") + "/start"
+        timeout = max(60.0, self.startup_timeout + 60.0)
+        try:
+            logger.info(f"[comfy] 远程 ComfyUI 没在跑，请求拉起器: {url}")
+            req = urllib.request.Request(
+                url,
+                data=b"{}",
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 拉起器调用失败: {type(exc).__name__}: {exc}")
+            return False
+        if isinstance(data, dict) and data.get("ready"):
+            logger.info(
+                f"[comfy] 拉起器已启动 ComfyUI（started={data.get('started')} pid={data.get('pid')}）"
+            )
+            return True
+        logger.warning(f"[comfy] 拉起器未能启动 ComfyUI: {data}")
+        return False
+
     def _drop_stale_proc(self) -> None:
         """丢掉已经退出的旧进程句柄，改为接管端口上的 ComfyUI。
 
@@ -222,10 +256,21 @@ class ComfyClient:
                 self._last_used = time.time()
                 return stats
             if self.is_remote:
-                # ★ 远程模式：连不上就直说。绝不往下走 check_paths() ——
+                # ★ 远程模式：先看有没有配拉起器。有就请电脑把 ComfyUI 启动起来，
+                #   起来后再探一次活；仍然不行才报错。绝不往下走 check_paths() ——
                 #   手机上没有 ComfyUI，报「comfy_dir 不存在」只会让人更糊涂。
+                if self.launcher and await asyncio.to_thread(self._launcher_start):
+                    stats = await asyncio.to_thread(self._health_sync, 3.0)
+                    if stats is not None:
+                        self._last_used = time.time()
+                        return stats
+                hint = (
+                    "（已配置拉起器但没拉起来，检查电脑上 comfy_launcher.py 是否在跑）"
+                    if self.launcher
+                    else "（可配 comfy_launcher 让电脑自动启动 ComfyUI）"
+                )
                 raise ComfyError(
-                    f"远程 ComfyUI 不可达：{self.host}:{self.port}。"
+                    f"远程 ComfyUI 不可达：{self.host}:{self.port}。{hint}"
                     "请确认：① 电脑已启动 ComfyUI 且用 --listen 0.0.0.0；"
                     "② 手机连的是电脑热点（本机 IP 应形如 192.168.137.x）；"
                     "③ 电脑防火墙已放行该端口。"
