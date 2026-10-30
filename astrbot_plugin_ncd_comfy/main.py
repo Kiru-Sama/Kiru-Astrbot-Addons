@@ -3521,6 +3521,7 @@ class NcdComfyPlugin(star.Star):
             "　  别把 8 步/CFG1 套过去，会出灰白糊图。",
             "· model       换底模（写文件名或其中一段，大小写不敏感）",
             '· lora        加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号隔开。'
+            "  找不到名字时用 comfy_models(kind=\"lora\", preset=\"anima\") 或 comfy_models(kind=\"lora\", q=\"deepseek\") 精确查，别猜路径。",
             "留空也会自动叠 8 步加速 LoRA；这里给的是叠加，不会替换加速 LoRA。",
             "· upscale     可选**放大/超分**：留空=不放大；\"2x\"/\"1.5x\" 通用缩放；"
             "\"model\" 用配置的放大模型；\"model:4x-UltraSharp.pth\" 指定模型。"
@@ -4599,13 +4600,18 @@ class NcdComfyPlugin(star.Star):
 
     @filter.llm_tool(name="comfy_models")
     async def comfy_models(
-        self, event: AstrMessageEvent, kind: str = "model", preset: str = ""
+        self,
+        event: AstrMessageEvent,
+        kind: str = "model",
+        preset: str = "",
+        q: str = "",
     ) -> str:
-        """列出可用的底模或 LoRA。
+        """列出可用的底模 / LoRA / 放大模型。
 
         Args:
-            kind(string): "model" = 底模（默认）；"lora" = LoRA 清单。
-            preset(string): 查哪个工作流的底模（sdxl/krea2/anima/moss）；留空=默认。
+            kind(string): "model" = 底模（默认）；"lora" = LoRA 清单；"upscale" = 放大模型。
+            preset(string): 查哪个工作流的底模或 LoRA（sdxl/krea2/anima/moss）；留空=全部。
+            q(string): 关键词（只对 lora 生效），按名字片段过滤，比如 "deepseek"、"鲸"、"cunny"。
         """
         gate = self._gate(event, "comfy_models")
         if gate:
@@ -4633,16 +4639,38 @@ class NcdComfyPlugin(star.Star):
             )
             return "\n".join(lines)
         if want in ("lora", "loras", "lo"):
-            items = self._scan_loras()
+            # ★ 支持按预设过滤 + 关键词搜索：库里 79 个，固定截断会让模型找不到目标
+            #   （实际踩过：bot 说「anima 的清单里没有 DeepSeek」，其实是被切掉了）
+            scoped = self._scan_loras(self._preset(preset) if preset else None)
+            items = scoped
+            kw = str(q or "").strip().lower()
+            if kw:
+                items = [m for m in scoped if kw in m["name"].lower()]
             if not items:
-                return "LoRA 目录里没有文件。检查 comfy_extra_paths 指向的 loras 目录。"
+                hint = f"关键词「{q}」" if kw else "该范围"
+                return (
+                    f"{hint}下没有 LoRA。可去掉 q 或换 preset 再查；"
+                    f"当前范围共 {len(scoped)} 个。"
+                )
             lines = [
-                f"可用 LoRA（{len(items)} 个，comfy_generate 的 lora 参数填文件名即可）："
+                f"可用 LoRA（{len(items)} 个；"
+                f"{'预设 ' + self._preset(preset) + ' · ' if preset else '全部 · '}"
+                f"{'关键词 ' + q + ' · ' if kw else ''}"
+                "comfy_generate 的 lora 参数填**本族**文件名即可）："
             ]
-            for m in items[:60]:
-                lines.append(f"· {m['name']}{self._size_text(m)}")
-            if len(items) > 60:
-                lines.append(f"……还有 {len(items) - 60} 个")
+            # 按「底模/功能」分组，组内按名字排序，避免一长串看不出结构
+            groups: dict[str, list[dict]] = {}
+            for m in items:
+                parts = str(m["name"]).split("\\")
+                key = "/".join(parts[:2]) if len(parts) >= 3 else (parts[0] if parts else "?")
+                groups.setdefault(key, []).append(m)
+            for key in sorted(groups):
+                group = sorted(groups[key], key=lambda x: str(x["name"]).lower())
+                lines.append(f"\n[{key}] {len(group)} 个")
+                for m in group:
+                    lines.append(f"  · {m['name']}{self._size_text(m)}")
+            if len(lines) > 120:
+                lines = lines[:120] + ["……列表过长，已截断；用 q=关键词 缩小范围"]
             return "\n".join(lines)
 
         preset_name = self._preset(preset)
