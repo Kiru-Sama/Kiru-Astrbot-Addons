@@ -33,6 +33,15 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# ★ 2026-10-30：pythonw.exe 下 sys.stdout / sys.stderr 是 None，
+#   任何 print() 都会抛 AttributeError —— 进程绑好端口后立刻死，
+#   外部表现为「8200 能连上，但 HTTP 请求被直接掐断」。
+#   这里兜住，保证没有控制台也能正常跑。
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = sys.stdout
+
 # ── 默认配置（按你的实际路径改，或用命令行参数覆盖）──────────────────
 DEFAULT_COMFY_DIR = r"F:\ComfyUI_min"
 DEFAULT_COMFY_PORT = 8199
@@ -254,6 +263,30 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write(f"[launcher] {self.address_string()} {fmt % args}\n")
 
 
+def _log_path() -> Path:
+    return Path(__file__).resolve().parent / "comfy_launcher.log"
+
+
+def log(msg: str) -> None:
+    """同时写控制台和日志文件。
+
+    ★ 2026-10-30：自启用 pythonw 启动，没有控制台，异常会静默消失，
+      只剩「端口能连但不回话」这种怪现象。落一份日志，出问题能查。
+    """
+    line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}"
+    try:
+        print(line, flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        # 用 GBK 写：Windows 的记事本 / type / PowerShell 默认按本地代码页读，
+        # 写 UTF-8 无 BOM 会显示成乱码。中文内容 GBK 都装得下。
+        with open(_log_path(), "a", encoding="gbk", errors="replace") as f:
+            f.write(line + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="ComfyUI 远程拉起器")
     ap.add_argument("--comfy-dir", default=DEFAULT_COMFY_DIR)
@@ -271,20 +304,36 @@ def main() -> None:
         "token": args.token,
         "idle_timeout": args.idle_timeout,
     }
-    srv = ThreadingHTTPServer((args.listen, args.port), Handler)
-    print(f"[launcher] 监听 {args.listen}:{args.port}", flush=True)
-    print(f"[launcher] ComfyUI 目录 {args.comfy_dir}  端口 {args.comfy_port}", flush=True)
-    print(f"[launcher] token {'已启用' if args.token else '未启用（仅限可信局域网）'}", flush=True)
+
+    # ★ 绑定重试：开机自启时可能和上一次退出的 socket 撞车（TIME_WAIT / 端口没放干净），
+    #   一次失败就静默退出会让人以为服务在跑。重试 6 次，每次退避 2 秒。
+    srv = None
+    last_err: Exception | None = None
+    for i in range(6):
+        try:
+            srv = ThreadingHTTPServer((args.listen, args.port), Handler)
+            break
+        except OSError as exc:
+            last_err = exc
+            log(f"[launcher] 绑定 {args.listen}:{args.port} 失败（第 {i + 1} 次）: {exc}")
+            time.sleep(2)
+    if srv is None:
+        log(f"[launcher] 放弃：端口 {args.port} 一直被占用 / 不可用（{last_err}）")
+        return
+
+    log(f"[launcher] 监听 {args.listen}:{args.port}")
+    log(f"[launcher] ComfyUI 目录 {args.comfy_dir}  端口 {args.comfy_port}")
+    log(f"[launcher] token {'已启用' if args.token else '未启用（仅限可信局域网）'}")
     if args.idle_timeout > 0:
-        print(f"[launcher] 空闲 {args.idle_timeout // 60} 分钟后自动关掉 ComfyUI（队列有任务时不关）", flush=True)
+        log(f"[launcher] 空闲 {args.idle_timeout // 60} 分钟后自动关掉 ComfyUI（队列有任务时不关）")
     else:
-        print("[launcher] 空闲自动关闭：已禁用", flush=True)
+        log("[launcher] 空闲自动关闭：已禁用")
     threading.Thread(target=idle_watchdog, args=(Handler.cfg,), daemon=True).start()
-    print(f"[launcher] 探活: GET http://<本机IP>:{args.port}/status", flush=True)
+    log(f"[launcher] 探活: GET http://<本机IP>:{args.port}/status")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
-        print("\n[launcher] 退出", flush=True)
+        log("[launcher] 退出")
 
 
 if __name__ == "__main__":

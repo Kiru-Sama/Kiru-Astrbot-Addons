@@ -1971,6 +1971,15 @@ function renderUsageDaily(d) {
   const rows = (recent.length ? recent : (has ? [t] : [])).slice(0, 7);
   if (!rows.length) return;
   const max = Math.max(1, ...rows.map((r) => Number(r.total) || 0));
+  // 2026-10-30：这里原本直接调 el()，但本函数作用域里从没定义过 el，
+  // 一进这个分支就 ReferenceError（控制台刷屏 "usageDaily ... el is not defined"），
+  // 把「每日用量」整块渲染打断。补一个局部构造器。
+  const el = (tag, cls, txt) => {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (txt !== undefined && txt !== null) node.textContent = txt;
+    return node;
+  };
   rows.forEach((r) => {
     const wrap = el("div", "usage-day");
     wrap.appendChild(el("span", "d", String(r.date || "").slice(5)));

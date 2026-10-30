@@ -999,9 +999,30 @@ class NcdComfyPlugin(star.Star):
                     "距下次可出图："
                     + quota.format_duration(snap.spacing_remaining)
                 )
+            # ★ 2026-10-30：原来这行写死「50 张 / 70 张」，分母却跟着配置走（现在是 6 / 18），
+            #   两边对不上，用户看不懂。改成按真实语义命名：
+            #   · 普通额度 = 画质正常那一段（degrade_after 之前）
+            #   · 快速额度 = 降质后那段（步数变少 → 出图更快），上限 ban_after
+            #   · 距离禁画还有多少张
+            _degrade_after = int(limits.get("degrade_after") or 0)
+            _ban_after = int(limits.get("ban_after") or 0)
+            _degrade_steps = int(limits.get("degrade_steps") or 0)
+            _ban_hours = int(limits.get("ban_hours") or 0)
+            _daily = int(snap.daily_count or 0)
+            _normal_left = max(0, _degrade_after - _daily)
+            _fast_cap = max(0, _ban_after - _degrade_after)
+            _fast_used = max(0, _daily - _degrade_after)
             lines.append(
-                f"50 张：{snap.daily_count}/{limits['degrade_after']}｜"
-                f"70 张：{snap.daily_count}/{limits['ban_after']}"
+                f"普通额度：{min(_daily, _degrade_after)}/{_degrade_after} 张"
+                f"（还剩 {_normal_left} 张正常画质）"
+            )
+            lines.append(
+                f"快速额度：{_fast_used}/{_fast_cap} 张"
+                + (f"（{_degrade_steps} 步，出图更快）" if _fast_cap else "")
+            )
+            lines.append(
+                f"距离禁画还有：{max(0, _ban_after - _daily)} 张"
+                f"（满 {_ban_after} 张禁画 {_ban_hours} 小时）"
             )
             speech_daily, speech_total, speech_rank = eng.speech_stats(sender)
             speech_part = f"第 {speech_rank} 名" if speech_rank else "未上榜"
@@ -3588,6 +3609,18 @@ class NcdComfyPlugin(star.Star):
         denoise_val = float(denoise or 0) or self._conf_float("comfy_img2img_strength", 0.6)
         denoise_val = max(0.05, min(1.0, denoise_val))
 
+        # ★ 2026-10-30：先把 ComfyUI 叫起来再校验底模。
+        #   底模清单是问 ComfyUI 的 /object_info 要的；它没启动时清单为空，
+        #   原来的顺序（先校验、后 ensure_server）会把「ComfyUI 没启动」
+        #   误报成「这个模型不属于 MOSS 族」——2026-10-30 16:02 实际踩过。
+        _pre = self._client()
+        if getattr(_pre, "is_remote", False):
+            try:
+                if not await asyncio.to_thread(_pre.healthy_sync):
+                    await _pre.ensure_server()
+            except ComfyError as exc:
+                return f"出图失败：{exc}"
+
         # 底模（只在当前预设的家族目录里找；跨族直接拒绝并给推荐）
         model_name = ""
         if (model or "").strip():
@@ -3595,6 +3628,15 @@ class NcdComfyPlugin(star.Star):
                 model_name = self._resolve_name(model, self._scan(preset_name), "底模")
             except ComfyError:
                 meta = presets.PRESETS[preset_name]
+                # 清单整个是空的时候，别硬说「模型不属于这族」——多半是清单没拉到
+                if not self._scan(preset_name) and getattr(self._client(), "is_remote", False):
+                    _c = self._client()
+                    return (
+                        f"出图失败：拿不到 ComfyUI 的底模清单（{_c.host}:{_c.port}）。\n"
+                        "多半是远程 ComfyUI 没启动或刚在重启；"
+                        "配了 comfy_launcher 的话再发一次会自动把它拉起来。"
+                        + RECOMMENDED_HINT
+                    )
                 hits = self._presets_with_model(model)
                 if len(hits) == 1:
                     tip = (
