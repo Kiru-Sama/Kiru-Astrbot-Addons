@@ -16,6 +16,10 @@
   `_has_send_oper` 保持 False，消息最终落到 LLM——表现为 `/reset` 之类命令
   毫无反应、只回一句聊天。现在改成 **事件内标记（`set_extra`）+ 只剥
   `is_model_result()`**，命令/系统结果永远不会被碰，也不再误伤后续消息。
+- **8 步加速 LoRA 现在是强制的**（comfy 2.18.4）：步数 ≤12 时无条件插在 loras[0]、
+  强度 1.0，风格 LoRA 串在它后面（叠加不替换），重复的会自动去重；
+  步数 >12 则不加（高步数会被蒸馏 LoRA 带偏）。留 comfy_default_lora 为空可整体关掉。
+  工具文案（comfy_tools / lora 参数 / docstring / 报错兜底）都写明了这条规则。
 - **默认 LoRA 对所有预设生效**：原来写死 `preset_name == "sdxl"`，
   默认预设换成 moss 后，8 步加速 LoRA 再也没被加载过（图注显示「LoRA: 无」是对的）。
 - **`comfy_tools` 不再一口气列出底模清单**（最多 20 条带大小），只报数量并提示
