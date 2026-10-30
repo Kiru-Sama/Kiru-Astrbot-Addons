@@ -2507,6 +2507,9 @@ class NcdComfyPlugin(star.Star):
             return (cfg_model, cfg_factor) if self._conf_bool("comfy_upscale_default", False) else ("", 0.0)
         if low in ("off", "none", "no", "0", "关", "不放大", "原图", "disable"):
             return "", 0.0
+        if low in ("model", "upscale", "超分", "放大"):
+            # 只说“用超分” → 走配置里的默认放大模型；没配就退回通用缩放
+            return (cfg_model, cfg_factor) if cfg_model else ("", cfg_factor)
         if low.startswith(("model:", "model：", "m:", "超分:", "超分：")):
             body = re.split(r"[:：]", text, maxsplit=1)
             name = body[1].strip() if len(body) > 1 else ""
@@ -2553,8 +2556,8 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 发提示失败（忽略）: {exc}")
 
-    @staticmethod
     def _image_caption(
+        self,
         used_model: str,
         loras: list[dict],
         elapsed: float,
