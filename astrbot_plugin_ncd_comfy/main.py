@@ -3978,7 +3978,14 @@ class NcdComfyPlugin(star.Star):
                 _us = (final.get("upscale_resize") or {}).get("inputs") or {}
                 if _us:
                     _tag = up_model or "lanczos"
-                    up_scale_text = f"{_us.get('width')}×{_us.get('height')}（{_tag}）"
+                    _uw = _us.get("width")
+                    _uh = _us.get("height")
+                    try:
+                        _ratio = float(_uw or 0) / float(w) if w else 0.0
+                    except (TypeError, ValueError, ZeroDivisionError):
+                        _ratio = 0.0
+                    _ratio_text = f"，{_ratio:g} 倍" if _ratio else ""
+                    up_scale_text = f"{_uw}×{_uh}（{_tag}{_ratio_text}）"
                 async def _on_sampler() -> None:
                     if ctrl_name and ref_name:
                         mode_label = "图生图（普通降噪 + 姿态控制）"
