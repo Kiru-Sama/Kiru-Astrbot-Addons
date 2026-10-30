@@ -2542,19 +2542,21 @@ class NcdComfyPlugin(star.Star):
         except Exception:  # noqa: BLE001
             return "默认风格：按当前插件配置（用 comfy_tools 可看现值）。"
 
-    def _fix_lora_specs(self, preset_name: str, lora: str) -> tuple[str, list[str]]:
+    def _fix_lora_specs(
+        self, preset_name: str, lora: str
+    ) -> tuple[str, list[str], str]:
         """入队前把「别族的 LoRA」换成本族等价物，返回 (新 lora 串, 说明列表)。
 
         只做替换，不抛异常：真找不到就原样返回，交给后台的严格校验去报错。
         """
         if not (lora or "").strip():
-            return lora, []
+            return lora, [], ""
         try:
             pool = self._scan_loras(preset_name)
         except Exception:  # noqa: BLE001
-            return lora, []
+            return lora, [], ""
         if not pool:
-            return lora, []
+            return lora, [], ""
         out_specs: list[str] = []
         notes: list[str] = []
         for spec in re.split(r"[,，]", lora):
@@ -2584,8 +2586,14 @@ class NcdComfyPlugin(star.Star):
                     f"[comfy] 入队前修正 LoRA: {name_part} -> {same}（{why}）"
                 )
             else:
-                out_specs.append(spec)  # 原样保留，交给后台报错
-        return ",".join(out_specs), notes
+                return lora, notes, (
+                    f"LoRA「{os.path.basename(name_part)}」不在 "
+                    f"{presets.PRESETS[preset_name]['label']} 这一族，"
+                    f"这一族可用：{self._lora_names(pool)}"
+                    + RECOMMENDED_HINT
+                    + TOOL_RETRY_HINT
+                )
+        return ",".join(out_specs), notes, ""
 
     def _parse_upscale(self, raw: str) -> tuple[str, float]:
         """解析 upscale 参数 → (放大模型名, 倍率)；倍率 <=1 表示不放大。
@@ -3020,6 +3028,42 @@ class NcdComfyPlugin(star.Star):
             logger.warning(f"[comfy] 审核失败拉起回复失败，退回文字提示: {exc}")
             return False
 
+    def _queue_nudge(self, event: AstrMessageEvent, umo: str, text: str) -> bool:
+        """合成一条系统消息，走完整 pipeline 拉起 bot 回复（失败/审核共用）。"""
+        now = time.time()
+        if now - self._audit_nudge_at.get(umo, 0) < 20:
+            return False
+        try:
+            session = MessageSession.from_str(umo)
+            platform = self.context.get_platform_inst(session.platform_name)
+            if platform is None:
+                return False
+            msg = AstrBotMessage()
+            msg.type = session.message_type
+            msg.self_id = str(getattr(event, "get_self_id", lambda: "")() or "")
+            msg.session_id = session.session_id
+            msg.message_id = uuid.uuid4().hex
+            msg.sender = MessageMember(user_id="0", nickname="系统")
+            msg.message = [Comp.Plain(text)]
+            msg.message_str = text
+            msg.raw_message = None
+            msg.timestamp = int(now)
+            if session.message_type == MessageType.GROUP_MESSAGE:
+                group = Group(session.session_id)
+                original = getattr(getattr(event, "message_obj", None), "group", None)
+                group.group_name = getattr(original, "group_name", None)
+                msg.group = group
+            new_event = platform.create_event(msg)
+            new_event.is_wake = True
+            new_event.is_at_or_wake_command = True
+            platform.commit_event(new_event)
+            self._audit_nudge_at[umo] = now
+            logger.info(f"[comfy] 已合成系统消息拉起 bot 回复 → {umo}")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 合成系统消息失败，退回文字提示: {exc}")
+            return False
+
     async def _handle_async_result(
         self, event: AstrMessageEvent, umo: str, result: str
     ) -> None:
@@ -3051,14 +3095,27 @@ class NcdComfyPlugin(star.Star):
             )
             return
         if result.startswith("出图失败"):
-            await self._send_chat(umo, first)
-            # ★ 关键：失败必须进模型下一轮的上下文。否则模型只记得
-            #   “已经交给后台画了”，会一直编“还在排队/还在画”。
-            self._pending_notes[umo] = (
-                time.time(),
-                f"后台出图失败：{first[:200]}。任务已经结束，"
-                "不要再声称它还在排队/在画；让用户改参数重发或取消。",
+            # ★ 关键：失败必须「回到模型」，让它自己组织一句人话并决定要不要重试。
+            #   以前是直接把技术报错发给用户，模型全程不知情（用户看到一长串 400）。
+            note = (
+                f"后台出图失败：{first[:200]}。任务已经结束，不要再声称它还在排队/在画。"
+                "请用一句话向用户说明原因并问是否重试；如果是参数问题，"
+                "可以自行修正后重试一次（最多 2 次）；不要把技术报错原文发给用户。"
             )
+            nudge = (
+                "[系统通知] 刚才那张图没画成。失败原因："
+                + first[:300]
+                + "\n请用一句话告诉用户没画成、原因是什么、要不要重试；"
+                "如果原因是参数可以改的（比如 LoRA 不属于这个模型家族），"
+                "你可以直接改参数再调一次 comfy_generate。"
+            )
+            if self._conf_bool("comfy_failure_nudge", True) and self._queue_nudge(
+                event, umo, nudge
+            ):
+                self._pending_notes[umo] = (time.time(), note)
+                return
+            await self._send_chat(umo, first)
+            self._pending_notes[umo] = (time.time(), note)
             return
         # 画幅提醒、参数校验之类的文字结果：也得让人看见，不能静默；
         # 同时留一条 note，避免模型下一轮仍以为任务在跑。
@@ -3697,9 +3754,17 @@ class NcdComfyPlugin(star.Star):
                     return _canvas_reminder(w_early, h_early, warn_early)
             # ★ 入队前先修正 LoRA：别让后台任务拿到跨族的参数
             # 扫描/请求 Model 清单是阻塞调用，丢线程池，别卡事件循环
-            lora, _lora_notes = await asyncio.to_thread(self._fix_lora_specs, preset_early, lora)
+            (
+                lora,
+                _lora_notes,
+                _lora_err,
+            ) = await asyncio.to_thread(self._fix_lora_specs, preset_early, lora)
             if _lora_notes:
                 logger.info(f"[comfy] 入队前 LoRA 修正: {'; '.join(_lora_notes)}")
+            if _lora_err:
+                # ★ 入队前就拦下：作为工具结果返回，模型当轮就能改
+                logger.info(f"[comfy] 入队前 LoRA 校验失败: {_lora_err[:120]}")
+                return f"出图失败：{_lora_err}"
             job_kwargs = {
                 "prompt": prompt,
                 "negative": negative,
