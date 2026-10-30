@@ -3605,6 +3605,7 @@ class NcdComfyPlugin(star.Star):
                 "control_start": control_start,
                 "control_end": control_end,
                 "control_preprocess": control_preprocess,
+                "upscale": upscale,
                 "force": force,
             }
             dup = self._duplicate_image_job(
