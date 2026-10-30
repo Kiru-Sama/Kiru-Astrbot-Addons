@@ -2542,6 +2542,51 @@ class NcdComfyPlugin(star.Star):
         except Exception:  # noqa: BLE001
             return "默认风格：按当前插件配置（用 comfy_tools 可看现值）。"
 
+    def _fix_lora_specs(self, preset_name: str, lora: str) -> tuple[str, list[str]]:
+        """入队前把「别族的 LoRA」换成本族等价物，返回 (新 lora 串, 说明列表)。
+
+        只做替换，不抛异常：真找不到就原样返回，交给后台的严格校验去报错。
+        """
+        if not (lora or "").strip():
+            return lora, []
+        try:
+            pool = self._scan_loras(preset_name)
+        except Exception:  # noqa: BLE001
+            return lora, []
+        if not pool:
+            return lora, []
+        out_specs: list[str] = []
+        notes: list[str] = []
+        for spec in re.split(r"[,，]", lora):
+            spec = spec.strip()
+            if not spec:
+                continue
+            name_part, _, strength = spec.partition(":")
+            try:
+                self._resolve_name(name_part, pool, "LoRA")
+                out_specs.append(spec)
+                continue
+            except ComfyError:
+                pass
+            # 本族找不到 → 看等价物
+            other = ""
+            try:
+                other = self._resolve_name(name_part, self._scan_loras(), "LoRA")
+            except ComfyError:
+                pass
+            same, why = pick_family_lora(
+                os.path.basename(str(other or name_part).replace("/", "\\")), pool
+            )
+            if same:
+                out_specs.append(f"{same}:{strength}" if strength else same)
+                notes.append(f"{os.path.basename(str(other or name_part))} → {same}（{why}）")
+                logger.info(
+                    f"[comfy] 入队前修正 LoRA: {name_part} -> {same}（{why}）"
+                )
+            else:
+                out_specs.append(spec)  # 原样保留，交给后台报错
+        return ",".join(out_specs), notes
+
     def _parse_upscale(self, raw: str) -> tuple[str, float]:
         """解析 upscale 参数 → (放大模型名, 倍率)；倍率 <=1 表示不放大。
 
@@ -3650,6 +3695,11 @@ class NcdComfyPlugin(star.Star):
                 warn_early = sizing.warn_side(max_side)
                 if not force and max(w_early, h_early) > warn_early:
                     return _canvas_reminder(w_early, h_early, warn_early)
+            # ★ 入队前先修正 LoRA：别让后台任务拿到跨族的参数
+            # 扫描/请求 Model 清单是阻塞调用，丢线程池，别卡事件循环
+            lora, _lora_notes = await asyncio.to_thread(self._fix_lora_specs, preset_early, lora)
+            if _lora_notes:
+                logger.info(f"[comfy] 入队前 LoRA 修正: {'; '.join(_lora_notes)}")
             job_kwargs = {
                 "prompt": prompt,
                 "negative": negative,
@@ -3915,6 +3965,10 @@ class NcdComfyPlugin(star.Star):
                             # ★ 同名没有就退一步找「近似」：实际踩过 anima 只有
                             #   DeepSeek娘化-年轻鲸，而模型传的是 …-鲸鱼，basename 不同。
                             same, why = pick_family_lora(base, pool)
+                            logger.warning(
+                                "[comfy] LoRA 跨族诊断: want=%r pool=%d 命中=%r(%s) 归一=%r"
+                                % (base, len(pool), same, why, lora_norm(base))
+                            )
                             if same:
                                 base = f"{base}（{why}）"
                         if same:
