@@ -1,0 +1,290 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>链路记忆</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root {
+    --bg:#f6f7f9; --card:#fff; --border:#e5e8ee; --text:#1f2329;
+    --muted:#8a919b; --accent:#3b82f6; --ok:#16a34a; --bad:#dc2626;
+    --warn:#d97706; --track:#f1f3f6;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif; padding:16px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:12px; }
+  h1 { font-size:17px; margin:0; }
+  h2 { font-size:12px; color:var(--muted); margin:0 0 8px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.04em; }
+  .sub { color:var(--muted); font-size:12px; }
+  .spacer { flex:1; }
+  button { font:inherit; border:1px solid var(--border); border-radius:8px;
+    padding:7px 12px; background:var(--card); color:var(--text); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.danger { color:var(--bad); border-color:#f0c4c4; background:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .layout { display:grid; grid-template-columns:240px minmax(0,1fr); gap:12px;
+    align-items:start; }
+  .card { background:var(--card); border:1px solid var(--border);
+    border-radius:12px; padding:12px; }
+  .sessions { position:sticky; top:16px; }
+  .sess { width:100%; text-align:left; border:none; border-radius:8px;
+    padding:8px 9px; background:transparent; margin-bottom:2px;
+    display:flex; align-items:center; gap:9px; }
+  .sess:hover { background:var(--track); }
+  .sess.on { background:#eaf2ff; color:#1d4ed8; }
+  .sess .body { min-width:0; flex:1; }
+  .sess .n { font-weight:600; font-size:13px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .sess .m { color:var(--muted); font-size:11px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  .ava { position:relative; width:34px; height:34px; flex:none; border-radius:50%;
+    background:#e8eef7; color:#4a6b9a; display:flex; align-items:center;
+    justify-content:center; overflow:hidden; font-size:14px; font-weight:700; }
+  .ava img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+  .entry { border:1px solid var(--border); border-radius:10px;
+    padding:10px; margin-bottom:10px; background:var(--card); }
+  .entry .top { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+  .badge { font-size:11px; padding:1px 7px; border-radius:999px;
+    background:var(--track); color:var(--muted); }
+  .badge.summary { background:#fff7e6; color:var(--warn); }
+  .id { font-weight:700; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .src { color:var(--muted); font-size:11px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+  textarea { width:100%; min-height:74px; resize:vertical; border:1px solid var(--border);
+    border-radius:8px; padding:8px; font:13px/1.55 "Consolas","Microsoft YaHei",monospace;
+    color:var(--text); background:#fbfcfe; }
+  .actions { display:flex; gap:8px; justify-content:flex-end; margin-top:8px; }
+  .empty { color:var(--muted); text-align:center; padding:28px 10px; }
+  .status { margin-top:10px; font-size:12px; color:var(--muted); min-height:18px; }
+  .status.err { color:var(--bad); }
+  .status.ok { color:var(--ok); }
+  @media (max-width:720px) {
+    .layout { grid-template-columns:1fr; }
+    .sessions { position:static; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>链路记忆</h1>
+    <div class="sub">按会话隔离 · 纯文本 · 可改可删</div>
+  </div>
+  <div class="spacer"></div>
+  <button id="refreshBtn">刷新</button>
+</header>
+
+<div class="layout">
+  <aside class="card sessions">
+    <h2>会话</h2>
+    <div id="sessions"><div class="empty">加载中…</div></div>
+  </aside>
+  <main class="card">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <h2 style="margin:0">记忆条目</h2>
+      <div class="sub" id="currentLabel">选一个会话</div>
+    </div>
+    <div id="entries"><div class="empty">从左边选一个会话。</div></div>
+  </main>
+</div>
+<div class="status" id="status"></div>
+
+<script>
+const P = window.AstrBotPluginPage;
+let currentUmo = "";
+
+function $(id) { return document.getElementById(id); }
+function setStatus(text, cls) {
+  const el = $("status");
+  el.textContent = text || "";
+  el.className = "status" + (cls ? " " + cls : "");
+}
+function fmtTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n < 1024) return n + " B";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / 1024 / 1024).toFixed(2) + " MB";
+}
+async function apiGet(path) {
+  const r = await P.apiGet(path);
+  if (r && r.error) throw new Error(r.error);
+  return r;
+}
+async function apiPost(path, body) {
+  const r = await P.apiPost(path, body);
+  if (r && r.error) throw new Error(r.error);
+  return r;
+}
+
+function bindAvatars(root) {
+  root.querySelectorAll(".ava img[data-av]").forEach((img) => {
+    img.onerror = () => { img.style.display = "none"; };
+    const src = img.getAttribute("data-av");
+    if (src) img.src = src;
+  });
+}
+
+function sessionButton(item) {
+  const btn = document.createElement("button");
+  btn.className = "sess" + (item.umo === currentUmo ? " on" : "");
+  btn.type = "button";
+  const ava = document.createElement("span");
+  ava.className = "ava";
+  const initial = (item.peer_name || item.label || "?").trim().slice(0, 1).toUpperCase();
+  const letter = document.createElement("span");
+  letter.className = "ava-letter";
+  letter.textContent = initial || "?";
+  ava.appendChild(letter);
+  if (item.avatar) {
+    const img = document.createElement("img");
+    img.alt = "";
+    img.setAttribute("data-av", item.avatar);
+    ava.appendChild(img);
+  }
+  const body = document.createElement("span");
+  body.className = "body";
+  const n = document.createElement("div");
+  n.className = "n";
+  n.textContent = item.label || item.umo || "未知会话";
+  const m = document.createElement("div");
+  m.className = "m";
+  const kind = item.peer_kind === "group" ? "群聊" : "私聊";
+  m.textContent = `${kind} · ${item.count || 0} 条 · ${fmtBytes(item.bytes)}`;
+  body.appendChild(n);
+  body.appendChild(m);
+  btn.appendChild(ava);
+  btn.appendChild(body);
+  btn.addEventListener("click", () => loadEntries(item.umo, item.label || ""));
+  return btn;
+}
+
+async function loadSessions() {
+  const box = $("sessions");
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const data = await apiGet("/ncd-memory/sessions");
+    const items = data.items || [];
+    box.innerHTML = "";
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">还没有记忆。<br>让 bot 记一条试试。</div>';
+      return;
+    }
+    items.forEach((item) => box.appendChild(sessionButton(item)));
+    bindAvatars(box);
+    if (!currentUmo) {
+      const first = items[0];
+      await loadEntries(first.umo, first.label || "");
+    }
+  } catch (e) {
+    box.innerHTML = '<div class="empty">拉取失败</div>';
+    setStatus("会话列表失败：" + (e.message || e), "err");
+  }
+}
+
+function entryCard(item) {
+  const card = document.createElement("div");
+  card.className = "entry";
+  const top = document.createElement("div");
+  top.className = "top";
+  const id = document.createElement("span");
+  id.className = "id";
+  id.textContent = "#" + item.id;
+  const badge = document.createElement("span");
+  badge.className = "badge" + (item.kind === "summary" ? " summary" : "");
+  badge.textContent = item.kind || "note";
+  const src = document.createElement("span");
+  src.className = "src";
+  src.textContent = (item.source || "?") + " · " + fmtTime(item.ts);
+  top.appendChild(id);
+  top.appendChild(badge);
+  top.appendChild(src);
+
+  const ta = document.createElement("textarea");
+  ta.value = item.content || "";
+  ta.placeholder = "记忆内容";
+
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const del = document.createElement("button");
+  del.className = "danger";
+  del.textContent = "删除";
+  del.addEventListener("click", async () => {
+    if (!confirm(`删除 #${item.id}？不可恢复。`)) return;
+    try {
+      await apiPost("/ncd-memory/delete", { umo: currentUmo, id: item.id });
+      setStatus(`已删除 #${item.id}`, "ok");
+      await loadEntries(currentUmo, $("currentLabel").textContent || "");
+      await loadSessions();
+    } catch (e) {
+      setStatus("删除失败：" + (e.message || e), "err");
+    }
+  });
+  const save = document.createElement("button");
+  save.className = "primary";
+  save.textContent = "保存";
+  save.addEventListener("click", async () => {
+    const text = ta.value.trim();
+    if (!text) { setStatus("内容不能为空", "err"); return; }
+    try {
+      await apiPost("/ncd-memory/update", {
+        umo: currentUmo, id: item.id, content: text,
+      });
+      setStatus(`已保存 #${item.id}`, "ok");
+      await loadEntries(currentUmo, $("currentLabel").textContent || "");
+    } catch (e) {
+      setStatus("保存失败：" + (e.message || e), "err");
+    }
+  });
+  actions.appendChild(del);
+  actions.appendChild(save);
+  card.appendChild(top);
+  card.appendChild(ta);
+  card.appendChild(actions);
+  return card;
+}
+
+async function loadEntries(umo, label) {
+  currentUmo = umo;
+  $("currentLabel").textContent = label || umo;
+  document.querySelectorAll(".sess").forEach((b) => b.classList.remove("on"));
+  const box = $("entries");
+  box.innerHTML = '<div class="empty">加载中…</div>';
+  try {
+    const data = await apiPost("/ncd-memory/entries", { umo });
+    const items = data.items || [];
+    box.innerHTML = "";
+    if (!items.length) {
+      box.innerHTML = '<div class="empty">这个会话还没有记忆。</div>';
+      return;
+    }
+    items.forEach((it) => box.appendChild(entryCard(it)));
+    setStatus(`共 ${items.length} 条`, "");
+  } catch (e) {
+    box.innerHTML = '<div class="empty">拉取失败</div>';
+    setStatus("条目拉取失败：" + (e.message || e), "err");
+  }
+}
+
+if (P) {
+  $("refreshBtn").addEventListener("click", () => {
+    loadSessions();
+    if (currentUmo) loadEntries(currentUmo, $("currentLabel").textContent || "");
+  });
+  loadSessions();
+  P.ready().then(() => loadSessions()).catch(() => {});
+} else {
+  setStatus("桥接 SDK 未加载（检查 /api/plugin/page/bridge-sdk.js）", "err");
+}
+</script>
+</body>
+</html>

@@ -106,6 +106,10 @@ class ComfyClient:
         self._last_used = 0.0
         self._idle_task: asyncio.Task | None = None
         self._object_info: dict | None = None
+        # ★ 2026-10-30：远程模式下拉模型清单要过网络，抖一下就空。
+        #   这里留一份「上次成功的清单」，网络失败时继续用它，
+        #   免得把「ComfyUI 暂时没起来」误报成「模型不属于这个家族」。
+        self._obj_cache: dict[tuple[str, str], tuple[float, list[str]]] = {}
         self._busy = False  # 正在出图（空闲自退要跳过）
         self._starting = False  # 正在冷启动（同样不能杀）
         self._model_loaded = False  # 显存里有没有模型（决定该不该先卸模型）
@@ -183,6 +187,13 @@ class ComfyClient:
             ) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
         except Exception:  # noqa: BLE001
+            # 网络失败：有旧清单就继续用旧的（远程 ComfyUI 重启/抖动时别中断出图）
+            old = self._obj_cache.get((node, field))
+            if old is not None:
+                logger.warning(
+                    f"[comfy] 拉 {node}.{field} 失败，沿用上次缓存的 {len(old[1])} 条"
+                )
+                return list(old[1])
             return []
         try:
             spec = data[node]["input"]["required"][field][0]
@@ -190,7 +201,10 @@ class ComfyClient:
             return []
         if not isinstance(spec, list):
             return []
-        return [str(x) for x in spec if isinstance(x, str)]
+        names = [str(x) for x in spec if isinstance(x, str)]
+        if names:
+            self._obj_cache[(node, field)] = (time.time(), names)
+        return names
 
     def list_models_sync(self, kind: str) -> list[str]:
         """按类别取模型名：checkpoints / loras / diffusion_models。"""

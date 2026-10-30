@@ -1,0 +1,6 @@
+name: astrbot_plugin_ncd_welcome
+display_name: 链路迎新
+desc: 群聊专属迎新：新人入群时直接回复固定欢迎语，不经过 LLM（默认关闭，打开后生效）。
+author: 本地自用
+version: 1.0.0
+repo: ""

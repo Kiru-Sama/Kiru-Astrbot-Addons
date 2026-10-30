@@ -1072,14 +1072,22 @@ class NcdToolboxPlugin(star.Star):
         key = self._conf_str("deepseek_api_key")
         if key:
             return key
+        # ★ 2026-10-30：原来这里写死 get_provider_by_id("deepseek")，
+        #   但 "deepseek" 是 provider_sources 的 id，真实 provider id 是
+        #   "deepseek/deepseek-flash"，于是每次都刷一条
+        #   "Provider deepseek was not found" 的警告（功能还能靠下面的文件回退救回来）。
+        #   改成直接从 provider 实例表里按前缀找，找不到再看配置文件。
         try:
-            provider = self.context.get_provider_by_id("deepseek")
-            cfg = dict(getattr(provider, "provider_config", {}) or {})
-            raw = cfg.get("key")
-            if isinstance(raw, (list, tuple)) and raw:
-                return str(raw[0])
-            if isinstance(raw, str) and raw:
-                return raw
+            pm = getattr(self.context, "provider_manager", None)
+            inst = dict(getattr(pm, "inst_map", {}) or {})
+            prov = next((v for k, v in inst.items() if str(k).startswith("deepseek/")), None)
+            if prov is not None:
+                cfg = dict(getattr(prov, "provider_config", {}) or {})
+                raw = cfg.get("key")
+                if isinstance(raw, (list, tuple)) and raw:
+                    return str(raw[0])
+                if isinstance(raw, str) and raw:
+                    return raw
         except Exception:  # noqa: BLE001
             pass
         try:

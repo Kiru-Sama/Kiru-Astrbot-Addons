@@ -155,6 +155,12 @@
     "hint": "开（默认）：这一轮只要发过语音，文字整段不发——避免文字和语音说同一句话。\n关：只去掉与语音内容重复的那部分文字。\n★ 表情包/图片不受影响，照常发。",
     "default": true
   },
+  "comfy_image_drop_text_group": {
+    "type": "bool",
+    "description": "群聊出图轮不再补文字",
+    "hint": "开（默认）：群里出图只发「开始采样」+「图+说明」两条，\n模型那句“画好啦”会被去掉。\n关：模型照常补一句。私聊不受此开关影响。",
+    "default": true
+  },
   "comfy_default_lora": {
     "type": "string",
     "description": "sdxl 预设默认叠的 LoRA",

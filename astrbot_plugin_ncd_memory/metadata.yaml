@@ -1,0 +1,6 @@
+name: astrbot_plugin_ncd_memory
+display_name: 链路记忆
+desc: 按会话持久化的纯文本记忆：模型可写/查/忘，新记忆后提示一轮；压缩摘要自动入库，面板显示对端昵称/头像，可改可删。
+author: 本地自用
+version: 1.1.2
+repo: ""

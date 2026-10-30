@@ -1,0 +1,26 @@
+{
+  "welcome_enabled": {
+    "type": "bool",
+    "description": "开启群聊迎新",
+    "hint": "开：新人入群时自动发固定欢迎语；关（默认）：完全不响应。只在群聊生效，私聊无关。",
+    "default": false
+  },
+  "welcome_text": {
+    "type": "string",
+    "description": "欢迎语模板",
+    "hint": "用 {name} 代表新成员昵称/群名片；取不到昵称时自动用 QQ 号。留空则用内置默认欢迎语。",
+    "default": "欢迎{name}入群喵，我是大画家丝瓜喵，可以@我免费约稿哦"
+  },
+  "welcome_at_newcomer": {
+    "type": "bool",
+    "description": "欢迎语里 @ 一下新人",
+    "hint": "开：欢迎语末尾加 @新人。关（默认）：只发纯文本，不 @。",
+    "default": false
+  },
+  "welcome_fetch_member_name": {
+    "type": "bool",
+    "description": "拿不到昵称时向协议端查询群成员名片",
+    "hint": "开（默认）：用 get_group_member_info 补一次名片/昵称。关：只用事件里带的名字，QQ 号兜底。",
+    "default": true
+  }
+}

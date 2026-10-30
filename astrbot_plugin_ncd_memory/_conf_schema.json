@@ -1,0 +1,38 @@
+{
+  "max_entries": {
+    "type": "int",
+    "description": "每个会话最多存几条记忆",
+    "hint": "默认 100。到上限后 memory_write 会提示先忘掉或合并；面板里也能删。",
+    "default": 100
+  },
+  "max_total_kb": {
+    "type": "int",
+    "description": "每个会话记忆正文最多多少 KB",
+    "hint": "默认 200。只算正文，不算索引；防止一个会话写爆磁盘。",
+    "default": 200
+  },
+  "max_entry_chars": {
+    "type": "int",
+    "description": "单条普通笔记最多多少字",
+    "hint": "默认 500。压缩摘要单独放宽到 1200 字。超长会截断并加省略号。",
+    "default": 500
+  },
+  "max_writes_per_minute": {
+    "type": "int",
+    "description": "每个会话每分钟最多写几次",
+    "hint": "默认 8。防止模型抽风循环写；压缩摘要入库不占这个额度。",
+    "default": 8
+  },
+  "summary_capture": {
+    "type": "bool",
+    "description": "自动把压缩摘要存成记忆",
+    "hint": "默认开。on_llm_request 扫 contexts 里的【此前对话摘要】/AstrBot 摘要前缀，按 hash 去重；不额外调 LLM。",
+    "default": true
+  },
+  "hint_enabled": {
+    "type": "bool",
+    "description": "有新记忆时提示模型一轮",
+    "hint": "默认开。每写入一条新记忆（手动 memory_write 或压缩摘要自动入库）后，下一轮对话追加一行短提示，告诉模型可以查记忆；注入一次就复位，不会每轮都发。\n★ 提示拼在最新 user 消息尾部，不动前缀，不影响 DeepSeek 缓存命中。\n★ 关掉后模型只能靠自己记得调 memory_search —— 实测很容易忘，一般不建议关。",
+    "default": true
+  }
+}

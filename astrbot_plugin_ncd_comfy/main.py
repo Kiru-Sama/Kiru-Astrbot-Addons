@@ -131,9 +131,12 @@ QUOTA_CONFIG_BOUNDS = {
 }
 
 # 出错时给模型的保底建议：别让它继续瞎试
+# ★ 2026-10-30：以前这里写死了「预设 sdxl、底模 waiIllustrious、不叠 LoRA」，
+#   改成 moss 之后这句话就变成误导，模型会照着它去覆盖真实默认。
+#   现在不写具体名字，一律以 comfy_tools 现报的配置为准。
 RECOMMENDED_HINT = (
-    "\n★ 非用户特别要求，直接用预设 sdxl（默认底模 waiIllustriousSDXL_v170，不叠 LoRA），"
-    "不要手动指定 model / lora。"
+    "\n★ 非用户特别要求，直接用默认预设（底模/步数/CFG/LoRA 都已配好），"
+    "不要手动指定 model / lora；想看当前默认值就调 comfy_tools。"
 )
 
 TOOL_NAMES = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help", "comfy_tag_lookup")
@@ -212,7 +215,7 @@ class NcdComfyPlugin(star.Star):
         self._voice_ref_name: str = ""
         # 刚发过的语音文本（同一轮去掉重复文字用）
         self._spoken: dict[str, tuple[str, float]] = {}
-        # comfy_output 用：每个会话已发过的文件、最近一次生成的图
+                # comfy_output 用：每个会话已发过的文件、最近一次生成的图
         self._sent_files: dict[str, list[str]] = {}
         self._sent_at: dict[str, dict[str, float]] = {}
         self._last_output: dict[str, str] = {}
@@ -2448,8 +2451,43 @@ class NcdComfyPlugin(star.Star):
         )
         return name if name in presets.PRESETS else presets.DEFAULT_PRESET
 
+    def _default_style_line(self) -> str:
+        """把「当前默认风格」按真实配置说出来。
+
+        ★ 2026-10-30：这段原来是写死的「sdxl + waiIllustrious、不叠 LoRA」，
+          默认改成 moss 之后就成了误导，模型会跟着旧文案去覆盖配置。
+          现在全部从配置/工作流现算，改配置这里自动跟着变。
+        """
+        try:
+            preset = self._preset("")
+            label = presets.PRESETS[preset]["label"]
+            try:
+                model = presets.summarize(presets.load_graph(preset)).get("model") or "-"
+            except Exception:  # noqa: BLE001
+                model = "-"
+            lora = self._conf_str("comfy_default_lora")
+            steps = self._conf_int("comfy_steps", 0)
+            cfg = self._conf_float("comfy_cfg", 0.0)
+            bits = [f"默认风格：{preset} 预设（{label}），底模 {model}"]
+            if lora:
+                strength = self._conf_float("comfy_default_lora_strength", 0.8)
+                bits.append(f"自动叠 LoRA {os.path.basename(lora)}（{strength:g}）")
+            else:
+                bits.append("不自动叠 LoRA")
+            if steps:
+                bits.append(f"步数 {steps}")
+            if cfg:
+                bits.append(f"CFG {cfg:g}")
+            return "，".join(bits) + "。"
+        except Exception:  # noqa: BLE001
+            return "默认风格：按当前插件配置（用 comfy_tools 可看现值）。"
+
     async def _notify(self, event: AstrMessageEvent, text: str) -> None:
-        """往会话发一条纯文本提示（失败/超时不影响出图）。"""
+        """往会话发一条纯文本提示（失败/超时不影响出图）。
+
+        ★ 2026-10-30：群聊只保留「开始采样」这一条进度；
+          「正在加载权重」由 _notify_loading 里单独拦掉，不要在这里一刀切静默。
+        """
         if not self._conf_bool("comfy_notify", True):
             return
         try:
@@ -2496,7 +2534,14 @@ class NcdComfyPlugin(star.Star):
     async def _notify_loading(
         self, event: AstrMessageEvent, preset: str, model: str
     ) -> None:
-        """换工作流 / 换底模 / 冷启动时，先把"要等"说清楚。"""
+        """换工作流 / 换底模 / 冷启动时，先把"要等"说清楚。
+
+        ★ 2026-10-30：群聊里这条**不发**。群里只保留两条：
+          「🖌️ 开始采样了…」和「图 + 说明」；加载权重这条属于过程噪音，
+          私聊留着自己看，群聊直接省掉（由 comfy_say 之外的出图路径触发）。
+        """
+        if self._is_group_chat(event):
+            return
         client = self._client()
         try:
             # ★ 线程池可能被别的工具占满；这里不能无限等，否则整条后台出图
@@ -2877,6 +2922,9 @@ class NcdComfyPlugin(star.Star):
             enabled = True
         if not enabled:
             return
+        # 群聊里这些「工具开工提示」同样默认静默，避免刷屏
+        if self._is_group_chat(event) and not self._conf_bool("comfy_notify_group", False):
+            return
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if not umo:
             return
@@ -3223,8 +3271,8 @@ class NcdComfyPlugin(star.Star):
             "翻旧图：comfy_gallery(query) 看列表，comfy_output(index/file) 直接发；本会话保留 "
             f"{self._history_days()} 天 / {self._history_limit()} 张，不会串到别的会话。",
             "超时兜底：comfy_output() 可以把已经画好的图直接发出来，不用重画。",
-            "默认风格：sdxl 预设默认底模 waiIllustriousSDXL_v170，不自动叠 LoRA；要加风格用 lora 参数。",
-            "推荐组合：sdxl + waiIllustriousSDXL_v170（无 LoRA，默认即此）。非用户特别要求，别手动指定 model / lora。",
+            self._default_style_line(),
+            "非用户特别要求，别手动指定 model / lora —— 默认值已经配好，手动覆盖只会更差。",
             "",
             "绘图 SOP（按这个顺序判断，不要直接套模板）：",
             "1. 参考图先认人：先问清图上是谁/要画谁，不猜角色。",
@@ -3232,7 +3280,7 @@ class NcdComfyPlugin(star.Star):
             "3. 写法按模型：sdxl 用英文标签；krea2/anima/moss 可用自然语言，但角色名/标志特征保留英文 tag。",
             "4. 动作/场景/构图查 comfy_prompt_help；先确认 SFW/NSFW 与具体要求。",
             "5. 画风优先用 LoRA；6. 默认文生图，改图用 reference，锁姿势/结构用 control；",
-            "7. 普通用 sdxl，细节要求高再换底模；8. 反复不像就换模型/LoRA，不要死磕同一串 prompt。",
+            "7. 默认预设已按当前配置调好，细节要求高再换预设；8. 反复不像就换模型/LoRA，不要死磕同一串 prompt。",
             "",
             "comfy_generate 参数（都能留空 = 用工作流里的默认值）：",
             "· prompt      sdxl 用英文标签（10~15 个逗号分隔短标签）；krea2/anima/moss 可用自然语言，角色/标志特征保留英文 tag",
@@ -3257,21 +3305,23 @@ class NcdComfyPlugin(star.Star):
             "★ 文生图是主线；只有用户明确要改图/锁结构才用图生图。"
             "普通降噪选 reference，结构控制选 control——由你按用户意图判断，插件不猜。",
             "",
-            "★ 第一次出图、换工作流、换底模都会先往会话发一条加载提示，",
-            "  调用后会有「加载权重 / 开始采样」两条进度提示，不用重复调用。",
+            "★ 第一次出图、换工作流、换底模都会先往会话发一条加载提示。",
+            "  进度提示：私聊两条（加载权重 / 开始采样），群聊只有「开始采样」一条。",
+            "  调用后不用重复调用。",
             f"★ 空闲 {self._conf_int('comfy_unload_timeout', 300) // 60} 分钟后 ComfyUI 会卸掉模型，",
             f"  {self._conf_int('comfy_idle_timeout', 1800) // 60} 分钟后关掉进程。",
         ]
+        # ★ 2026-10-30：这里原来把当前预设的底模**全列出来**（最多 20 条），
+        #   一次工具返回就几百字，模型上下文被模型清单挤满，而且每次调用都重复。
+        #   改成只报一句「有几个」，真要清单让模型按需调 comfy_models。
         models = self._scan(default)
         if models:
             lines += [
                 "",
-                f"{presets.PRESETS[default]['label']} 可用底模（共 {len(models)} 个）：",
+                f"底模：{presets.PRESETS[default]['label']} 当前有 {len(models)} 个可选"
+                "（默认已选好，一般不用指定 model）。",
+                "需要看具体清单时再调 comfy_models，它会按需列出。",
             ]
-            for m in models[:20]:
-                lines.append(f"· {m['name']}{self._size_text(m)}")
-            if len(models) > 20:
-                lines.append(f"……还有 {len(models) - 20} 个，用 comfy_models 看全")
         else:
             _cli = self._client()
             if getattr(_cli, "is_remote", False):
@@ -3703,8 +3753,11 @@ class NcdComfyPlugin(star.Star):
             except (ComfyError, ValueError) as exc:
                 return f"出图失败：{exc}"
 
-        # 默认 LoRA：只有 sdxl 预设、且用户没指定 lora 时，自动叠一个风格 LoRA
-        if not loras and preset_name == "sdxl":
+        # 默认 LoRA：用户没指定 lora 时，自动叠配置里那个（在该预设的族内解析）。
+        # ★ 2026-10-30：原来这里写死 `preset_name == "sdxl"`，默认预设一改成 moss，
+        #   8 步加速 LoRA 就再也没被加载过（图注上显示「LoRA: 无」是对的）。
+        #   现在对所有预设生效；解析仍在 preset 自己的 lora_dirs 里做，不会跨族硬套。
+        if not loras:
             auto_lora = self._conf_str("comfy_default_lora")
             if auto_lora:
                 try:
@@ -3720,8 +3773,9 @@ class NcdComfyPlugin(star.Star):
                         }
                     )
                 except ComfyError as exc:
-                    logger.warning(
-                        f"[comfy] 默认 LoRA 在本族里没找到，已跳过（不会跨族硬套）: {exc}"
+                    # 本族里没有（比如切到 anima/krea2）就跳过，别刷 WARNING
+                    logger.info(
+                        f"[comfy] 默认 LoRA 在 {preset_name} 族里不可用，本次不叠: {exc}"
                     )
 
         used_model = model_name or info["model"]
@@ -3895,6 +3949,15 @@ class NcdComfyPlugin(star.Star):
             except Exception as exc2:  # noqa: BLE001
                 logger.error(f"[comfy] 发送生成的图失败: {exc2}", exc_info=True)
                 return f"图画好了但发送失败：{type(exc2).__name__}: {exc2}"
+        # ★ 2026-10-30：群聊出图轮标记，直接打在**事件自己身上**（set_extra）。
+        #   早先我用「umo → 时间戳」缓存，结果 120 秒内这个群的任何回复都被剥光文字，
+        #   连命令回执（/reset 的 ✅）都被吞掉——命令看着像没执行。
+        #   改成事件内标记：事件被重建/换成下一条消息时自然不匹配，不会误伤。
+        #   （异步出图那条事件早已结束，标记也就不会落到别人身上。）
+        try:
+            event.set_extra("_comfy_image_turn", True)
+        except Exception:  # noqa: BLE001
+            pass
 
         # ★ 图已经发出去了，才计入额度；失败/NSFW/会话间隔丢弃都不算。
         await self._quota_on_success(
@@ -4407,8 +4470,43 @@ class NcdComfyPlugin(star.Star):
     #  语音（IndexTTS-2 克隆音色）
     # ------------------------------------------------------------------
     async def _ensure_voice_ref(self, client: ComfyClient) -> str:
-        """把参考音频传进 ComfyUI 的 input 目录，返回 LoadAudio 认的名字。"""
-        raw = self._conf_str("comfy_voice_reference", "参考音频.wav")
+        """把参考音频送进 ComfyUI 的 input 目录，返回 LoadAudio 认的名字。
+
+        ★ 2026-10-30：手机端跑 bot、ComfyUI 在电脑上时，手机里根本没有这个 wav，
+          原来「本地路径必须存在」的写法必然失败（报「参考音频不存在」）。
+          现在支持三种写法：
+            1) http(s)://…   下载后上传（零文件依赖，最省事）
+            2) 纯文件名       认为它已经在 ComfyUI 的 input 里，直接返回原名
+            3) 本地存在的路径 读字节上传（原来的行为，本机跑时仍可用）
+        """
+        raw = self._conf_str("comfy_voice_reference", "参考音频.wav").strip()
+        if not raw:
+            raise ComfyError("comfy_voice_reference 没配置（参考音频路径或文件名）")
+
+        # ① 远程 URL
+        if raw.lower().startswith(("http://", "https://")):
+            key = f"url|{raw}"
+            if self._voice_ref_key == key and self._voice_ref_name:
+                return self._voice_ref_name
+            import urllib.request
+            from urllib.parse import unquote, urlparse
+
+            try:
+                with urllib.request.urlopen(raw, timeout=30) as resp:
+                    data = resp.read()
+            except Exception as exc:  # noqa: BLE001
+                raise ComfyError(f"下载参考音频失败：{raw}（{exc}）") from exc
+            name = unquote(os.path.basename(urlparse(raw).path)) or "参考音频.wav"
+            name = await client.upload_image(data, name)
+            self._voice_ref_key, self._voice_ref_name = key, name
+            return name
+
+        # ② 纯文件名：当作 ComfyUI input 里已有的文件，不上传
+        if not any(ch in raw for ch in ("/", "\\")):
+            self._voice_ref_key, self._voice_ref_name = f"bare|{raw}", raw
+            return raw
+
+        # ③ 本地文件
         p = Path(raw)
         if not p.is_absolute():
             base = Path(self._conf_str("comfy_dir") or ".")
@@ -4499,6 +4597,11 @@ class NcdComfyPlugin(star.Star):
             text,
             time.time(),
         )
+        # 门禁：只有这条事件自己才允许被剥文字（避免误伤后续无关消息/命令回执）
+        try:
+            event.set_extra("_comfy_voice_turn", True)
+        except Exception:  # noqa: BLE001
+            pass
         used = [f"{len(data):,} 字节", f"{result['seconds']} 秒"]
         if emotion_val:
             used.append(f"情绪 {emotion_val}")
@@ -4509,14 +4612,59 @@ class NcdComfyPlugin(star.Star):
         )
 
     @filter.on_decorating_result()
+    async def _image_turn_no_text_group(self, event: AstrMessageEvent) -> None:
+        """群聊出图轮：图已经带着说明发过了，模型补的文字就不再发。
+
+        ★ 2026-10-30：群里期望只有两条 ——「🖌️ 开始采样」和「图 + 说明」。
+          AstrBot 默认还会把模型那句"画好啦喵"也发出去，变成第三条。
+          这里只对**群聊**生效；私聊保持原样（自用迭代时需要看模型怎么说）。
+        ★ 只剥 Plain，图片/表情/At 等组件照常保留。
+        ★ 2026-10-30 事故修复：判据改成「事件内标记 + 只剥模型结果」。
+          不能用 umo 时间戳缓存，也不能用 id(event)（对象回收后 id 会被复用，
+          跨事件缓存必然假阳性）；异步出图那条事件早已结束，缓存更不可能合法命中。
+          is_model_result() 保证命令回执（GENERAL_RESULT）永远不会被剥——这是兜底。
+        """
+        try:
+            if not self._conf_bool("comfy_image_drop_text_group", True):
+                return
+            if not self._is_group_chat(event):
+                return
+            if not event.get_extra("_comfy_image_turn"):
+                return
+            result = event.get_result()
+            if result is None:
+                return
+            if hasattr(result, "is_model_result") and not result.is_model_result():
+                return  # 命令/系统结果，绝不碰
+            chain = getattr(result, "chain", None)
+            if not chain:
+                return
+            kept = [c for c in chain if not isinstance(c, Comp.Plain)]
+            if len(kept) != len(chain):
+                removed = len(chain) - len(kept)
+                logger.info(f"[comfy] 群聊出图轮去掉 {removed} 段多余文字")
+                result.chain = kept
+                if not self._chain_sendable(kept):
+                    # 只剩引用/At，发出去也没有内容 → 直接丢结果，
+                    # 否则 respond 阶段会刷 "only Reply and At segments; skipping"
+                    logger.info("[comfy] 剥完只剩引用，丢弃这条结果")
+                    event.clear_result()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 群聊去文字失败（忽略）: {exc}")
+
+    @filter.on_decorating_result()
     async def _voice_turn_no_text(self, event: AstrMessageEvent) -> None:
         """语音轮强制不带文字：这一轮刚发过语音 → 把最终消息里的纯文字全去掉。
 
         ★ 只动 Plain，图片/表情/语音等组件照常保留 —— 这样"语音 + 表情包"
           这种组合仍然成立。
         ★ 受 comfy_voice_drop_text 开关控制；关掉就退回"只去重复文字"。
+        ★ 2026-10-30：门禁改成「事件内标记」，不再只看 umo 的 120 秒缓存——
+          否则语音之后两分钟内，这个会话任何一条回复（含命令回执）都会被吞。
         """
         try:
+            if not event.get_extra("_comfy_voice_turn"):
+                return
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             record = self._spoken.pop(umo, None)
             if not record:
@@ -4525,6 +4673,8 @@ class NcdComfyPlugin(star.Star):
             if time.time() - stamp > 120:
                 return
             result = event.get_result()
+            if result is not None and hasattr(result, "is_model_result") and not result.is_model_result():
+                return  # 命令/系统结果，绝不碰
             chain = getattr(result, "chain", None) if result is not None else None
             if not chain:
                 return
@@ -4550,8 +4700,17 @@ class NcdComfyPlugin(star.Star):
             if removed:
                 result.chain = kept
                 logger.info(f"[comfy] 语音轮去掉了 {removed} 段文字（drop_all={drop_all}）")
+                if not self._chain_sendable(kept):
+                    logger.info("[comfy] 剥完只剩引用，丢弃这条结果")
+                    event.clear_result()
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 语音轮去文字失败（忽略）: {exc}")
+
+    @staticmethod
+    def _chain_sendable(chain) -> bool:
+        """链里还有没有真正可发的内容（引用/At 不算）。"""
+        skip = {"Reply", "At", "AtAll", "ReplyAll"}
+        return any(type(c).__name__ not in skip for c in (chain or []))
 
     @staticmethod
     def _norm_text(text: str) -> str:

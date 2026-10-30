@@ -5,6 +5,27 @@
 
 ## 更新记录
 
+**2026-10-30（第三版：comfy 2.18.3 / toolbox 2.17.9 / session 1.0.3）**
+
+- **群聊只发两条**：出图轮原来是「加载权重 + 开始采样 + 图 + 模型补一句」四条，
+  群里刷屏感很强。现在群里只保留「开始采样」和「图+说明」；私聊保持不变。
+  可用 `comfy_notify_group` / `comfy_image_drop_text_group` 单独开关。
+- **修掉一个「命令像没执行」的严重 bug**（我自己引入的）：出图后 120 秒内，
+  这个会话的任何回复都会被去文字钩子剥光 Plain，只剩引用组件，
+  于是 `respond.stage` 判定「only Reply and At」直接跳过发送，
+  `_has_send_oper` 保持 False，消息最终落到 LLM——表现为 `/reset` 之类命令
+  毫无反应、只回一句聊天。现在改成 **事件内标记（`set_extra`）+ 只剥
+  `is_model_result()`**，命令/系统结果永远不会被碰，也不再误伤后续消息。
+- **默认 LoRA 对所有预设生效**：原来写死 `preset_name == "sdxl"`，
+  默认预设换成 moss 后，8 步加速 LoRA 再也没被加载过（图注显示「LoRA: 无」是对的）。
+- **`comfy_tools` 不再一口气列出底模清单**（最多 20 条带大小），只报数量并提示
+  按需调用 `comfy_models`，避免每次工具返回都挤占上下文。
+- **`toolbox` 取 DeepSeek Key 时不再刷警告**：原来用 `get_provider_by_id("deepseek")`，
+  而 `deepseek` 是 provider_sources 的 id，真实 provider id 是 `deepseek/deepseek-flash`，
+  每次都打一条 "Provider deepseek was not found"。
+- **`session` 回退**：曾试过自己实现一份 `/reset`，定位后发现内置命令本身没问题，
+  已移除，避免同名命令重复触发。
+
 **2026-10-30（第二版：monitor 1.7.25 / toolbox 2.17.8）**
 
 - **收藏表情在 NapCat 上修好了**（此前"一张都没有"）。根因是 NapCat 的
