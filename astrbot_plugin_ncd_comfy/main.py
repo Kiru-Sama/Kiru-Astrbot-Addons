@@ -1647,6 +1647,19 @@ class NcdComfyPlugin(star.Star):
         for name in names:
             if os.path.basename(name).lower() == low:
                 return name
+        # ★ 容错「少子目录 / 少扩展名」：模型经常写 Moss\cunnyfunky_xxx 而不是
+        #   Moss\画风\cunnyfunky_xxx.safetensors，严格比较会把能用的名字判成不存在。
+        want_stem = os.path.splitext(os.path.basename(low))[0]
+        if want_stem:
+            for name in names:
+                if os.path.splitext(os.path.basename(name.lower()))[0] == want_stem:
+                    return name
+            for name in names:
+                nl = name.lower()
+                if nl.endswith(low) or nl.endswith(want_stem):
+                    return name
+                if os.path.splitext(nl)[0].endswith(low):
+                    return name
         for name in names:
             if low in name.lower():
                 return name
