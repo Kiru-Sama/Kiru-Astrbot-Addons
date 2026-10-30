@@ -197,6 +197,12 @@
     "hint": "models/upscale_models 里的文件名，例如 4x-UltraSharp.pth。\n留空 = 只用通用缩放（lanczos），不加载放大模型。\n放大模型是 4x，想要 2x 时会自动再缩到目标尺寸。",
     "default": ""
   },
+  "comfy_upscale_model_scale": {
+    "type": "float",
+    "description": "放大模型的标称倍率",
+    "hint": "4x-UltraSharp / 4x-AnimeSharp 这类都是 4。\n用来在模型放大前先把输入压到「上限/倍率」，避免中间图爆显存。",
+    "default": 4.0
+  },
   "comfy_upscale_factor": {
     "type": "float",
     "description": "默认放大倍率",

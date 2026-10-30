@@ -317,6 +317,7 @@ def apply_params(
     upscale_factor: float = 0.0,
     upscale_method: str = "lanczos",
     upscale_max_side: int = 0,
+    upscale_model_scale: float = 4.0,
 ) -> dict:
     """按参数改一份新图（不动传入的 dict）。
 
@@ -396,6 +397,7 @@ def apply_params(
             model_name=str(upscale_model or ""),
             method=str(upscale_method or "lanczos"),
             max_side=int(upscale_max_side or 0),
+            model_scale=float(upscale_model_scale or 4.0),
         )
 
     return g
@@ -411,6 +413,7 @@ def _insert_upscale(
     model_name: str = "",
     method: str = "lanczos",
     max_side: int = 0,
+    model_scale: float = 4.0,
 ) -> dict:
     """在 VAEDecode 之后接一段放大。
 
@@ -423,6 +426,7 @@ def _insert_upscale(
     并对齐到 8 的倍数（ComfyUI 的常规要求）。
     """
     if width <= 0 or height <= 0:
+        logger.warning(f"[comfy] 放大未生效：宽高无效 ({width}x{height})")
         return graph
 
     decode_id = next(
@@ -431,6 +435,7 @@ def _insert_upscale(
         None,
     )
     if not decode_id:
+        logger.warning("[comfy] 放大未生效：工作流里找不到 VAEDecode 节点")
         return graph
 
     outs = [
@@ -443,10 +448,28 @@ def _insert_upscale(
         )
     ]
     if not outs:
+        logger.warning("[comfy] 放大未生效：VAEDecode 没有直接接到 SaveImage/PreviewImage")
         return graph
 
     prev = [decode_id, 0]
     if model_name:
+        # ★ 模型本身是 4x：1024 底图经它放大就是 4096，中间图不受 max_side 约束，
+        #   显存会先炸掉。所以先把输入压到 max_side / model_scale 以内再喂给模型。
+        scale = float(model_scale or 4.0)
+        if max_side and scale > 1.0 and width * scale > max_side:
+            pre_w = max(64, int(width * max_side / (width * scale)) // 8 * 8)
+            pre_h = max(64, int(height * max_side / (height * scale)) // 8 * 8)
+            graph["upscale_preshrink"] = {
+                "class_type": "ImageScale",
+                "inputs": {
+                    "image": prev,
+                    "upscale_method": method,
+                    "width": pre_w,
+                    "height": pre_h,
+                    "crop": "disabled",
+                },
+            }
+            prev = ["upscale_preshrink", 0]
         graph["upscale_model"] = {
             "class_type": "UpscaleModelLoader",
             "inputs": {"model_name": model_name},

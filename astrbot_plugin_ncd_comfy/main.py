@@ -2522,6 +2522,8 @@ class NcdComfyPlugin(star.Star):
                 factor = float(m.group(1))
             except ValueError:
                 factor = cfg_factor
+            # ★ 模型可能把 1024 当倍率传进来；上限 8 倍，防 1024 倍把显存撑爆
+            factor = min(max(factor, 1.0), 8.0)
             return ("", factor) if factor > 1.0 else ("", 0.0)
         # 其它文字当作放大模型名的一段（模糊匹配）
         try:
@@ -2579,7 +2581,10 @@ class NcdComfyPlugin(star.Star):
             if not raw:
                 continue
             base = os.path.basename(raw)
-            strength = float(l.get("strength") or 0)
+            try:
+                strength = float(l.get("strength") or 0)
+            except (TypeError, ValueError):
+                strength = 0.0  # 模型可能传 "强"/"1,0" 这种，别让卡片生成失败
             tag = "（加速）" if accel and base == accel else ""
             lora_parts.append(f"{base}:{strength:g}{tag}")
         lora_text = "、".join(lora_parts) if lora_parts else "无"
@@ -2589,7 +2594,7 @@ class NcdComfyPlugin(star.Star):
             f"模型：{model_name}\n"
             f"LoRA：{lora_text}\n"
             f"尺寸：{int(width)}×{int(height)}\n"
-            f"步数：{int(steps)} 步\n"
+            + (f"步数：{int(steps)} 步\n" if int(steps) > 0 else "")
             + (f"放大：{upscale_text}\n" if upscale_text else "")
             + f"生成耗时：{max(0.0, float(elapsed or 0)):.1f}s（含权重加载）"
         )
@@ -3940,7 +3945,8 @@ class NcdComfyPlugin(star.Star):
                     )
                 # ▲ 可选放大（超分）：四个精简工作流本身没有超分节点，动态接在 VAEDecode 之后
                 up_model, up_factor = self._parse_upscale(upscale)
-                up_max_side = self._conf_int("comfy_upscale_max_side", 2560)
+                # 0 原本表示「不限」，但配合 4x 模型很容易把显存打爆 → 兜底 2560
+                up_max_side = self._conf_int("comfy_upscale_max_side", 2560) or 2560
                 final = presets.apply_params(
                     graph,
                     prompt=text,
@@ -3966,6 +3972,7 @@ class NcdComfyPlugin(star.Star):
                     upscale_factor=up_factor,
                     upscale_method=self._conf_str("comfy_upscale_method") or "lanczos",
                     upscale_max_side=up_max_side,
+                    upscale_model_scale=self._conf_float("comfy_upscale_model_scale", 4.0),
                 )
                 # 放大信息：读图里真实的目标尺寸（可能被 max_side 削过），别只报倍率
                 _us = (final.get("upscale_resize") or {}).get("inputs") or {}
@@ -4795,10 +4802,9 @@ class NcdComfyPlugin(star.Star):
             if not event.get_extra("_comfy_image_turn"):
                 return
             result = event.get_result()
-            if result is None:
+            # ★ fail-closed：判据缺失时不动手（宁可少剥，不可误伤命令回执）
+            if result is None or not getattr(result, "is_model_result", lambda: False)():
                 return
-            if hasattr(result, "is_model_result") and not result.is_model_result():
-                return  # 命令/系统结果，绝不碰
             chain = getattr(result, "chain", None)
             if not chain:
                 return
@@ -4829,21 +4835,28 @@ class NcdComfyPlugin(star.Star):
             if not event.get_extra("_comfy_voice_turn"):
                 return
             umo = str(getattr(event, "unified_msg_origin", "") or "")
-            record = self._spoken.pop(umo, None)
+            # ★ 不能先 pop：后面有多处早退，一旦早退记录就没了，
+            #   同一轮的第二次 decorator 调用就取不到 spoken 文本
+            record = self._spoken.get(umo)
             if not record:
                 return
             spoken, stamp = record
             if time.time() - stamp > 120:
                 return
             result = event.get_result()
-            if result is not None and hasattr(result, "is_model_result") and not result.is_model_result():
-                return  # 命令/系统结果，绝不碰
+            # ★ fail-closed：拿不到「这是模型结果」的判据就不动手，
+            #   宁可少剥一条，也不能把命令回执剥成空壳
+            if result is None or not getattr(result, "is_model_result", lambda: False)():
+                return
             chain = getattr(result, "chain", None) if result is not None else None
             if not chain:
                 return
 
             drop_all = self._conf_bool("comfy_voice_drop_text", True)
             spoken_n = self._norm_text(spoken)
+            if not drop_all and not spoken_n:
+                # "" in 任何字符串恒为 True —— 不挡住就会把整段文字删光
+                return
             kept = []
             removed = 0
             for comp in chain:
@@ -4862,6 +4875,7 @@ class NcdComfyPlugin(star.Star):
                 kept.append(comp)
             if removed:
                 result.chain = kept
+                self._spoken.pop(umo, None)  # 真的剥过了才消费记录
                 logger.info(f"[comfy] 语音轮去掉了 {removed} 段文字（drop_all={drop_all}）")
                 if not self._chain_sendable(kept):
                     logger.info("[comfy] 剥完只剩引用，丢弃这条结果")
