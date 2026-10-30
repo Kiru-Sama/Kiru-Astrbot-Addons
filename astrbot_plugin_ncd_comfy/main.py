@@ -2473,7 +2473,7 @@ class NcdComfyPlugin(star.Star):
                 strength = self._conf_float("comfy_default_lora_strength", 1.0)
                 bits.append(
                     f"★ 必带加速 LoRA {os.path.basename(lora)}（强度 {strength:g}）"
-                    " —— 步数 ≤12 时插件会自动插到最前面，"
+                    " —— 步数 4~14 时插件会自动插到最前面，"
                     "你再用 lora 参数指定风格 LoRA 会串在它后面（叠加，不是替换）"
                 )
             else:
@@ -2517,13 +2517,22 @@ class NcdComfyPlugin(star.Star):
         height: int,
         steps: int = 0,
     ) -> str:
-        """自动发图时附在图片后面的参数卡片。"""
+        """自动发图时附在图片后面的参数卡片。
+
+        ★ 2026-10-30：加速 LoRA 会标出来（“（加速）”），这样用户一眼能确认
+          「8 步档强制叠的加速 LoRA 到底有没有真的进图」，不用去翻日志。
+        """
         model_name = os.path.basename(str(used_model or "")) or "未知"
-        lora_parts = [
-            f"{os.path.basename(str(l.get('name') or ''))}:{float(l.get('strength') or 0):g}"
-            for l in (loras or [])
-            if l.get("name")
-        ]
+        accel = os.path.basename(str(self._conf_str("comfy_default_lora") or ""))
+        lora_parts = []
+        for l in (loras or []):
+            raw = str(l.get("name") or "")
+            if not raw:
+                continue
+            base = os.path.basename(raw)
+            strength = float(l.get("strength") or 0)
+            tag = "（加速）" if accel and base == accel else ""
+            lora_parts.append(f"{base}:{strength:g}{tag}")
         lora_text = "、".join(lora_parts) if lora_parts else "无"
         if lora_parts:
             lora_text += f"（{len(lora_parts)} 个）"
@@ -3276,7 +3285,7 @@ class NcdComfyPlugin(star.Star):
             f"{self._history_days()} 天 / {self._history_limit()} 张，不会串到别的会话。",
             "超时兜底：comfy_output() 可以把已经画好的图直接发出来，不用重画。",
             self._default_style_line(),
-            "★ 步数 ≤12 时**必须**带 8 步加速 LoRA（默认已配好，插件自动插最前面，强度 1.0）；"
+            "★ 步数 4~14 时**必须**带 8 步加速 LoRA（默认已配好，插件自动插最前面，强度 1.0）；"
             "要风格就再用 lora 参数叠一个，会串在加速 LoRA 后面，**不会替换它**。",
             "非用户特别要求，别手动指定 model；8 步档也别把加速 LoRA 换掉。",
             "",
@@ -3394,7 +3403,7 @@ class NcdComfyPlugin(star.Star):
             seed(int): 随机种子；-1 = 每次随机。
             model(string): 换底模（写文件名或其中一段）；留空 = 工作流里那个。
             lora(string): 加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号分隔。
-                ★ 留空也会自动叠 8 步加速 LoRA（强度 1.0，步数 ≤12 时必须带）；
+                ★ 留空也会自动叠 8 步加速 LoRA（强度 1.0，步数 4~14 时必须带）；
                   这里填的是**叠加**，加速 LoRA 仍会在最前面，不会被替换。
             reference(string): **普通降噪图生图**（不锁结构）：留空 = 文生图；
                 "auto" = 插件自动找（当前/引用消息 → 最近用户图 → 最近生成图）；
@@ -3767,7 +3776,7 @@ class NcdComfyPlugin(star.Star):
         #   ① 写死 `preset_name == "sdxl"`，默认预设改 moss 后再也没加载过；
         #   ② 用 `if not loras` 判断，模型一指定风格 LoRA，8 步 LoRA 就被挤掉了，
         #      8 步蒸馏模型没有加速 LoRA 会明显发糊（图注也会显示成只有风格 LoRA）。
-        #   现在：只要步数在 8 步档（<=12），就把加速 LoRA 插到 loras 最前面，
+        #   现在：只要步数在 4~14（蒸馏 LoRA 的有效区间），就把加速 LoRA 插到最前面，
         #   风格 LoRA 串在它后面（presets._insert_loras 是链式的 LoraLoader）。
         auto_lora = self._conf_str("comfy_default_lora")
         if auto_lora:
@@ -3780,7 +3789,7 @@ class NcdComfyPlugin(star.Star):
                 )
                 if already:
                     logger.info(f"[comfy] 加速 LoRA 已在列表里，不重复叠加: {auto_name}")
-                elif int(steps_val) <= 12:
+                elif 4 <= int(steps_val) <= 14:
                     loras.insert(
                         0,
                         {
@@ -3792,8 +3801,8 @@ class NcdComfyPlugin(star.Star):
                     )
                 else:
                     logger.info(
-                        f"[comfy] 步数 {steps_val} > 12，不加 8 步加速 LoRA"
-                        "（高步数会被蒸馏 LoRA 带偏，这里按普通模型跑）"
+                        f"[comfy] 步数 {steps_val} 不在 4~14 区间，不加加速 LoRA"
+                        "（蒸馏 LoRA 只在 4~14 步区间有效，其他步数按普通模型跑）"
                     )
             except ComfyError as exc:
                 # 本族里没有（比如切到 anima/krea2）就跳过，别刷 WARNING
@@ -4035,10 +4044,15 @@ class NcdComfyPlugin(star.Star):
             f"seed {seed_val}",
         ]
         if loras:
-            used.append(
-                "LoRA "
-                + "、".join(f"{os.path.basename(l['name'])}:{l['strength']:g}" for l in loras)
-            )
+            accel_base = os.path.basename(str(self._conf_str("comfy_default_lora") or ""))
+            parts = []
+            for l in loras:
+                base = os.path.basename(str(l["name"]))
+                tag = "（加速·强制）" if accel_base and base == accel_base else ""
+                parts.append(f"{base}:{l['strength']:g}{tag}")
+            used.append("LoRA " + "、".join(parts))
+            if accel_base and 4 <= int(steps_val) <= 14:
+                used.append(f"4~14 步档已强制叠加加速 LoRA（强度 {self._conf_float('comfy_default_lora_strength', 1.0):g}）")
         if ref_name:
             used.append(f"图生图（普通降噪，denoise {denoise_val:g}）")
         if ctrl_name:
