@@ -3511,7 +3511,7 @@ class NcdComfyPlugin(star.Star):
             f"{self._history_days()} 天 / {self._history_limit()} 张，不会串到别的会话。",
             "超时兜底：comfy_output() 可以把已经画好的图直接发出来，不用重画。",
             self._default_style_line(),
-            "★ 加速 LoRA 的作用是「少步数更快收敛」：步数 4~14 时插件自动插到最前面（强度 1.0），"
+            "★ 步数 4~14 = 加速档：自动叠加速 LoRA（强度 1.0）+ CFG 1；"
             "要风格就再用 lora 参数叠一个，会串在加速 LoRA 后面，**不会替换它**。",
             "非用户特别要求，别手动指定 model；4~14 步时也别把加速 LoRA 换掉。",
             "",
@@ -3937,13 +3937,19 @@ class NcdComfyPlugin(star.Star):
             steps_val = other_steps or int(info["steps"]) or conf_steps
         steps_val = max(1, min(150, steps_val))
         steps_val = self._quota_effective_steps(event, steps_val)
+        # ★ 2026-10-30 定稿的「加速档」规则：
+        #     步数 4~14  → 加速档：自动叠加速 LoRA，CFG 用 comfy_cfg（默认 1.0）
+        #     步数 >14   → 正常档：不叠加速 LoRA，CFG 回落 comfy_cfg_normal（默认 5.5）
+        #   以前 CFG 跟着预设走（moss 永远 1.0），50 步那种正常档也吃 CFG 1，画面发灰。
+        fast_mode = 4 <= int(steps_val) <= 14
         explicit_cfg = float(cfg or 0)
         conf_cfg = float(self._conf_float("comfy_cfg", 0) or 0)
         other_cfg = float(self._conf_float("comfy_cfg_other", 0) or 0)
+        normal_cfg = float(self._conf_float("comfy_cfg_normal", 5.5) or 5.5)
         if explicit_cfg:
             cfg_val = explicit_cfg
         elif preset_name == "moss":
-            cfg_val = conf_cfg or float(info["cfg"])
+            cfg_val = (conf_cfg or 1.0) if fast_mode else normal_cfg
         else:
             cfg_val = other_cfg or float(info["cfg"]) or conf_cfg
         cfg_val = max(0.0, min(30.0, cfg_val))
@@ -4080,7 +4086,7 @@ class NcdComfyPlugin(star.Star):
         #   ① 写死 `preset_name == "sdxl"`，默认预设改 moss 后再也没加载过；
         #   ② 用 `if not loras` 判断，模型一指定风格 LoRA，8 步 LoRA 就被挤掉了，
         #      少步数不叠加速 LoRA 会明显发糊（图注也会显示成只有风格 LoRA）。
-        #   现在：只要步数在 4~14（加速 LoRA 生效区间），就把加速 LoRA 插到最前面，
+        #   现在：只要步数在 4~14（加速档），就把加速 LoRA 插到最前面，
         #   风格 LoRA 串在它后面（presets._insert_loras 是链式的 LoraLoader）。
         auto_lora = self._conf_str("comfy_default_lora")
         if auto_lora:
@@ -4093,7 +4099,7 @@ class NcdComfyPlugin(star.Star):
                 )
                 if already:
                     logger.info(f"[comfy] 加速 LoRA 已在列表里，不重复叠加: {auto_name}")
-                elif 4 <= int(steps_val) <= 14:
+                elif fast_mode:
                     loras.insert(
                         0,
                         {
@@ -4413,7 +4419,7 @@ class NcdComfyPlugin(star.Star):
                 parts.append(f"{base}:{l['strength']:g}{tag}")
             used.append("LoRA " + "、".join(parts))
             if accel_base and 4 <= int(steps_val) <= 14:
-                used.append(f"4~14 步：已叠加加速 LoRA（强度 {self._conf_float('comfy_default_lora_strength', 1.0):g}）")
+                used.append(f"4~14 步加速档：已叠加加速 LoRA（强度 {self._conf_float('comfy_default_lora_strength', 1.0):g}）")
         if ref_name:
             used.append(f"图生图（普通降噪，denoise {denoise_val:g}）")
         if ctrl_name:
