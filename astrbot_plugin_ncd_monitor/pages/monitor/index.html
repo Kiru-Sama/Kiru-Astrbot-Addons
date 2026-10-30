@@ -3593,12 +3593,23 @@ function renderComfy(d) {
   const qPending = queueOk ? Number(actual.display_pending ?? actual.pending ?? 0) : 0;
   const alive = queueOk ? !!actual.alive : false;
   const active = queueOk ? qRun > 0 : false;
-  const pendingOnly = queueOk && !active && qPending > 0;
+  // ★ 2026-10-30：不能只看 ComfyUI 的队列。冷启动（拉起器正在起 ComfyUI）时
+  //   ComfyUI 的 /queue 是空的，但插件队列里已经压着任务了 —— 以前会显示「空闲」，
+  //   用户以为没在画。这里把「插件队列」和「排队列表」也算进忙闲判断。
+  const plugRun = Number(st.queue_plugin_running || 0);
+  const plugPend = Number(st.queue_plugin_pending || 0);
+  const qEntries = Array.isArray(d.queue_entries) ? d.queue_entries : [];
+  const waitingCold = !queueOk && qEntries.length > 0;
+  const busyByPlugin = active ? false : (plugRun + plugPend) > 0 || waitingCold;
+  const pendingOnly = !active && (qPending > 0 || busyByPlugin);
   const pct = Math.round((pr.overall || 0) * 100);
   const genMode = st.mode === "img2img" ? "图生图" : (st.mode === "txt2img" ? "文生图" : "");
+  const queueN = qPending || plugPend || qEntries.length;
   const barLabel = active
     ? [pr.label || "执行中", genMode, pct + "%"].filter(Boolean).join(" · ")
-    : (pendingOnly ? "排队中 · 等 " + qPending + " 张" : "空闲");
+    : (waitingCold
+        ? "等待出图服务就绪 · " + qEntries.length + " 张在等"
+        : (pendingOnly ? "排队中 · 等 " + queueN + " 张" : "空闲"));
   const barPct = active ? pct : (pendingOnly ? 0 : 100);
   let html = comfyBar(barPct, barLabel);
   const comfyPort = parseInt(st.port, 10) || 8199;
@@ -3617,7 +3628,7 @@ function renderComfy(d) {
   html += '</div><div>';
   const qText = queueOk
     ? '跑 ' + qRun + ' · 等 ' + qPending
-    : '跑 — · 等 —';
+    : '跑 — · 等 ' + qEntries.length + '（插件队列）';
   const pos = active ? '进行中' : (pendingOnly ? '排队中' : '—');
   html += '<div class="kv"><span class="k">队列（实际）</span><span class="v">' + qText + ' · ' + pos + '</span></div>';
   html += '<div class="kv"><span class="k">审核 通过/拦截</span><span class="v">' + (au.pass || 0) + ' / ' + (au.reject || 0) + '</span></div>';
@@ -3667,8 +3678,10 @@ function renderComfyQueue(d) {
   if (sig === _comfyQueueSig) return;
   _comfyQueueSig = sig;
   // 标题写的是“排队”，所以胶囊只数 pending；正在画的那张在列表里单独高亮。
+  // ★ 胶囊原来只数 pending，正在画的那张会让它显示 0，看着像没在干活；
+  //   现在把 running 也算进去，标题下方就能看出「有任务」。
   var pending = entries.filter(function (e) {
-    return e && e.status === "pending";
+    return e && (e.status === "pending" || e.status === "running");
   }).length;
   countEl.textContent = String(pending);
   if (!entries.length) {
