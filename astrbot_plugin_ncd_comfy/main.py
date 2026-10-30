@@ -135,8 +135,8 @@ QUOTA_CONFIG_BOUNDS = {
 #   改成 moss 之后这句话就变成误导，模型会照着它去覆盖真实默认。
 #   现在不写具体名字，一律以 comfy_tools 现报的配置为准。
 RECOMMENDED_HINT = (
-    "\n★ 非用户特别要求，直接用默认预设（底模/步数/CFG/LoRA 都已配好），"
-    "不要手动指定 model / lora；想看当前默认值就调 comfy_tools。"
+    "\n★ 非用户特别要求，直接用默认预设（底模/步数/CFG 都已配好），不要手动换底模；"
+    "8 步档必须带 8 步加速 LoRA（插件自动加），想加风格用 lora 参数叠加即可。"
 )
 
 TOOL_NAMES = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status", "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help", "comfy_tag_lookup")
@@ -2470,8 +2470,12 @@ class NcdComfyPlugin(star.Star):
             cfg = self._conf_float("comfy_cfg", 0.0)
             bits = [f"默认风格：{preset} 预设（{label}），底模 {model}"]
             if lora:
-                strength = self._conf_float("comfy_default_lora_strength", 0.8)
-                bits.append(f"自动叠 LoRA {os.path.basename(lora)}（{strength:g}）")
+                strength = self._conf_float("comfy_default_lora_strength", 1.0)
+                bits.append(
+                    f"★ 必带加速 LoRA {os.path.basename(lora)}（强度 {strength:g}）"
+                    " —— 步数 ≤12 时插件会自动插到最前面，"
+                    "你再用 lora 参数指定风格 LoRA 会串在它后面（叠加，不是替换）"
+                )
             else:
                 bits.append("不自动叠 LoRA")
             if steps:
@@ -3272,7 +3276,9 @@ class NcdComfyPlugin(star.Star):
             f"{self._history_days()} 天 / {self._history_limit()} 张，不会串到别的会话。",
             "超时兜底：comfy_output() 可以把已经画好的图直接发出来，不用重画。",
             self._default_style_line(),
-            "非用户特别要求，别手动指定 model / lora —— 默认值已经配好，手动覆盖只会更差。",
+            "★ 步数 ≤12 时**必须**带 8 步加速 LoRA（默认已配好，插件自动插最前面，强度 1.0）；"
+            "要风格就再用 lora 参数叠一个，会串在加速 LoRA 后面，**不会替换它**。",
+            "非用户特别要求，别手动指定 model；8 步档也别把加速 LoRA 换掉。",
             "",
             "绘图 SOP（按这个顺序判断，不要直接套模板）：",
             "1. 参考图先认人：先问清图上是谁/要画谁，不猜角色。",
@@ -3290,7 +3296,8 @@ class NcdComfyPlugin(star.Star):
             "· width/height 像素直接给（8 的倍数，覆盖 size）",
             "· steps       1~150；cfg 0~30；seed 整数（-1 = 随机）",
             "· model       换底模（写文件名或其中一段，大小写不敏感）",
-            '· lora        加 LoRA，如 "cunnyfunky:0.8"；多个用逗号隔开',
+            '· lora        加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号隔开。'
+            "留空也会自动叠 8 步加速 LoRA；这里给的是叠加，不会替换加速 LoRA。",
             "· reference   普通降噪图生图（不锁结构）：auto/message/last；留空=文生图。"
             "用户要“改图/重绘/换风格/换服装”才用；只是风格参考时留空按文生图写 tags。",
             '· denoise     普通图生图重绘强度 0.05~1（越大越像重画）；0 = 用配置默认',
@@ -3386,7 +3393,9 @@ class NcdComfyPlugin(star.Star):
             cfg(float): CFG 0~30；0 = 工作流默认。
             seed(int): 随机种子；-1 = 每次随机。
             model(string): 换底模（写文件名或其中一段）；留空 = 工作流里那个。
-            lora(string): 加 LoRA，如 "cunnyfunky:0.8"；多个用逗号分隔；留空 = 不加。
+            lora(string): 加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号分隔。
+                ★ 留空也会自动叠 8 步加速 LoRA（强度 1.0，步数 ≤12 时必须带）；
+                  这里填的是**叠加**，加速 LoRA 仍会在最前面，不会被替换。
             reference(string): **普通降噪图生图**（不锁结构）：留空 = 文生图；
                 "auto" = 插件自动找（当前/引用消息 → 最近用户图 → 最近生成图）；
                 "message" = 这条或被引用消息里的图；"last" = 上一张生成的图。
@@ -3753,30 +3762,44 @@ class NcdComfyPlugin(star.Star):
             except (ComfyError, ValueError) as exc:
                 return f"出图失败：{exc}"
 
-        # 默认 LoRA：用户没指定 lora 时，自动叠配置里那个（在该预设的族内解析）。
-        # ★ 2026-10-30：原来这里写死 `preset_name == "sdxl"`，默认预设一改成 moss，
-        #   8 步加速 LoRA 就再也没被加载过（图注上显示「LoRA: 无」是对的）。
-        #   现在对所有预设生效；解析仍在 preset 自己的 lora_dirs 里做，不会跨族硬套。
-        if not loras:
-            auto_lora = self._conf_str("comfy_default_lora")
-            if auto_lora:
-                try:
-                    auto_name = self._resolve_name(
-                        auto_lora, self._scan_loras(preset_name), "LoRA"
-                    )
-                    loras.append(
+        # 默认 LoRA（8 步加速）：**必须**叠，不是「没指定才叠」。
+        # ★ 2026-10-30：原来有两个坑——
+        #   ① 写死 `preset_name == "sdxl"`，默认预设改 moss 后再也没加载过；
+        #   ② 用 `if not loras` 判断，模型一指定风格 LoRA，8 步 LoRA 就被挤掉了，
+        #      8 步蒸馏模型没有加速 LoRA 会明显发糊（图注也会显示成只有风格 LoRA）。
+        #   现在：只要步数在 8 步档（<=12），就把加速 LoRA 插到 loras 最前面，
+        #   风格 LoRA 串在它后面（presets._insert_loras 是链式的 LoraLoader）。
+        auto_lora = self._conf_str("comfy_default_lora")
+        if auto_lora:
+            try:
+                auto_name = self._resolve_name(
+                    auto_lora, self._scan_loras(preset_name), "LoRA"
+                )
+                already = any(
+                    str(l.get("name") or "") == auto_name for l in loras
+                )
+                if already:
+                    logger.info(f"[comfy] 加速 LoRA 已在列表里，不重复叠加: {auto_name}")
+                elif int(steps_val) <= 12:
+                    loras.insert(
+                        0,
                         {
                             "name": auto_name,
                             "strength": self._conf_float(
-                                "comfy_default_lora_strength", 0.8
+                                "comfy_default_lora_strength", 1.0
                             ),
-                        }
+                        },
                     )
-                except ComfyError as exc:
-                    # 本族里没有（比如切到 anima/krea2）就跳过，别刷 WARNING
+                else:
                     logger.info(
-                        f"[comfy] 默认 LoRA 在 {preset_name} 族里不可用，本次不叠: {exc}"
+                        f"[comfy] 步数 {steps_val} > 12，不加 8 步加速 LoRA"
+                        "（高步数会被蒸馏 LoRA 带偏，这里按普通模型跑）"
                     )
+            except ComfyError as exc:
+                # 本族里没有（比如切到 anima/krea2）就跳过，别刷 WARNING
+                logger.info(
+                    f"[comfy] 默认 LoRA 在 {preset_name} 族里不可用，本次不叠: {exc}"
+                )
 
         used_model = model_name or info["model"]
         if _ASYNC_RUN.get():

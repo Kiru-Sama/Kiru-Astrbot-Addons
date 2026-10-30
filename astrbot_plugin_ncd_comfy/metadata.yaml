@@ -2,5 +2,5 @@ name: astrbot_plugin_ncd_comfy
 display_name: 链路本地生成
 desc: 本地 ComfyUI 出图 + IndexTTS2 语音：预设工作流参数注入、LoRA/图生图动态接线、克隆音色发语音，空闲自动卸模型；带绘图额度统计/限流执行、发言统计、提示词库/法典范本查询、/排名、额度面板数值控制与赞助者单独额度。
 author: 本地自用
-version: 2.18.3
+version: 2.18.4
 repo: ""
