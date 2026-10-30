@@ -68,6 +68,7 @@ class ComfyClient:
         comfy_dir: str,
         python: str = "",
         port: int = 8199,
+        host: str = "127.0.0.1",
         idle_timeout: float = 300.0,
         unload_timeout: float = 300.0,
         startup_timeout: float = 240.0,
@@ -82,6 +83,10 @@ class ComfyClient:
         # 留空 = <comfy_dir>\python_embeded\python.exe
         self.python = str(python or "").strip().strip('"')
         self.port = int(port or 8199)
+        # ★ 2026-10-30：ComfyUI 不一定在本机。
+        #   手机端跑 AstrBot、电脑端跑 ComfyUI 时，这里填电脑的局域网 IP
+        #   （电脑热点是 192.168.137.1），否则插件永远只会连手机自己的 127.0.0.1。
+        self.host = str(host or "").strip().strip('"') or "127.0.0.1"
         self.idle_timeout = float(idle_timeout or 300.0)
         # ★ 两档回收：先卸模型（还显存、进程留着），再关进程（连内存也还）
         self.unload_timeout = float(unload_timeout or 300.0)
@@ -91,7 +96,7 @@ class ComfyClient:
         self.output_dir = str(output_dir or "").strip()
         self.temp_dir = str(temp_dir or "").strip()
         self.log_path = Path(log_path) if log_path else None
-        self.base = f"http://127.0.0.1:{self.port}"
+        self.base = f"http://{self.host}:{self.port}"
 
         self._proc: subprocess.Popen | None = None
         self._owned = False  # True = 进程是我们拉起来的（空闲时才敢杀）
@@ -155,7 +160,46 @@ class ComfyClient:
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(1.0)
-            return s.connect_ex(("127.0.0.1", self.port)) == 0
+            return s.connect_ex((self.host, self.port)) == 0
+
+    @property
+    def is_remote(self) -> bool:
+        """ComfyUI 是不是在别的机器上（远程模式不归我们管进程）。"""
+        return self.host not in ("127.0.0.1", "localhost", "::1")
+
+    def list_object_names(self, node: str, field: str, timeout: float = 8.0) -> list[str]:
+        """从 /object_info/<node> 取某个输入字段的可选值（就是模型名列表）。
+
+        ★ 2026-10-30：远程模式下 comfy_dir 是对方机器的路径，本机读不到
+          extra_model_paths.yaml，扫目录永远是空。而 ComfyUI 的 /object_info
+          本来就会列出它自己认得的模型名 —— 直接问它更准，也能反映对方的真实模型库。
+          代价：拿不到文件大小（调用方自己处理 size_mb=0）。
+        """
+        try:
+            with urllib.request.urlopen(
+                f"{self.base}/object_info/{node}", timeout=timeout
+            ) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except Exception:  # noqa: BLE001
+            return []
+        try:
+            spec = data[node]["input"]["required"][field][0]
+        except Exception:  # noqa: BLE001
+            return []
+        if not isinstance(spec, list):
+            return []
+        return [str(x) for x in spec if isinstance(x, str)]
+
+    def list_models_sync(self, kind: str) -> list[str]:
+        """按类别取模型名：checkpoints / loras / diffusion_models。"""
+        node_field = {
+            "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
+            "diffusion_models": ("UNETLoader", "unet_name"),
+            "loras": ("LoraLoader", "lora_name"),
+        }.get(kind)
+        if not node_field:
+            return []
+        return self.list_object_names(node_field[0], node_field[1])
 
     def _drop_stale_proc(self) -> None:
         """丢掉已经退出的旧进程句柄，改为接管端口上的 ComfyUI。
@@ -177,6 +221,15 @@ class ComfyClient:
                     self._drop_stale_proc()
                 self._last_used = time.time()
                 return stats
+            if self.is_remote:
+                # ★ 远程模式：连不上就直说。绝不往下走 check_paths() ——
+                #   手机上没有 ComfyUI，报「comfy_dir 不存在」只会让人更糊涂。
+                raise ComfyError(
+                    f"远程 ComfyUI 不可达：{self.host}:{self.port}。"
+                    "请确认：① 电脑已启动 ComfyUI 且用 --listen 0.0.0.0；"
+                    "② 手机连的是电脑热点（本机 IP 应形如 192.168.137.x）；"
+                    "③ 电脑防火墙已放行该端口。"
+                )
             if await asyncio.to_thread(self._port_busy):
                 raise ComfyError(
                     f"端口 {self.port} 被别的程序占着（不是 ComfyUI）。"
@@ -194,6 +247,11 @@ class ComfyClient:
             return stats
 
     def _spawn(self) -> None:
+        if self.is_remote:
+            # 保险：远程模式下绝不该走到这里（ensure_server 会提前报错）。
+            raise ComfyError(
+                f"comfy_host={self.host} 是远程主机，插件不会在本地拉起 ComfyUI。"
+            )
         if self._proc is not None and self._proc.poll() is None:
             return
         cmd = [
@@ -562,7 +620,8 @@ class ComfyClient:
             if on_progress is not None:
                 await emit(force=True)
             # ★ 必须和 /prompt 用同一个 clientId：ComfyUI 只把执行事件发给提交者
-            url = f"ws://127.0.0.1:{self.port}/ws?clientId={client_id or uuid.uuid4().hex}"
+            # ★ 也跟着 self.host 走 —— 远程 ComfyUI 时 ws 也要连对方，否则拿不到进度
+            url = f"ws://{self.host}:{self.port}/ws?clientId={client_id or uuid.uuid4().hex}"
             deadline = time.time() + max(60.0, self.gen_timeout)
             async with websockets.connect(url, max_size=8 * 1024 * 1024) as ws:
                 if ready is not None:

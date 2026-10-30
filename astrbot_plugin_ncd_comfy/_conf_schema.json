@@ -17,6 +17,12 @@
     "hint": "默认 8199。别和你在用的完整版（一般 8188）撞车。\n★ 端口上已经有 ComfyUI 在跑时插件会直接用它（不会重复拉起、也不会杀它）。",
     "default": 8199
   },
+  "comfy_host": {
+    "type": "string",
+    "description": "ComfyUI 所在主机（127.0.0.1 = 本机）",
+    "hint": "★ 手机端接电脑出图时填对方 IP，例如 192.168.137.1（Windows 移动热点的网关地址）。\n留空或 127.0.0.1 = 只连本机，插件会自己拉起 ComfyUI。\n\n★ 填了非本机地址后，插件不会再尝试本地拉起 —— 探活失败会直接报「远程 ComfyUI 不可达」，不会去检查 comfy_dir。\n★ 远程模式下 ComfyUI 必须监听 0.0.0.0（例如 python main.py --port 8199 --listen 0.0.0.0），且对方防火墙要放行该端口。",
+    "default": "127.0.0.1"
+  },
   "comfy_extra_paths": {
     "type": "string",
     "description": "extra_model_paths.yaml 路径（留空 = <comfy_dir>\\ComfyUI\\extra_model_paths.yaml）",

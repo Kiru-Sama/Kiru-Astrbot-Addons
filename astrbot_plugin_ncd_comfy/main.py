@@ -1140,6 +1140,7 @@ class NcdComfyPlugin(star.Star):
             self._conf_str("comfy_dir"),
             self._conf_str("comfy_python"),
             self._conf_int("comfy_port", 8199),
+            self._conf_str("comfy_host") or "127.0.0.1",
         )
         if self._client_obj is not None and self._client_key != key:
             self._client_obj.stop()
@@ -1149,6 +1150,7 @@ class NcdComfyPlugin(star.Star):
                 comfy_dir=self._conf_str("comfy_dir"),
                 python=self._conf_str("comfy_python"),
                 port=self._conf_int("comfy_port", 8199),
+                host=self._conf_str("comfy_host") or "127.0.0.1",
                 # ★ 两档回收：先卸模型（5 分钟），再关进程（30 分钟）
                 unload_timeout=float(self._conf_int("comfy_unload_timeout", 300)),
                 idle_timeout=float(self._conf_int("comfy_idle_timeout", 1800)),
@@ -1416,6 +1418,40 @@ class NcdComfyPlugin(star.Star):
         """kind = checkpoints / diffusion_models / loras"""
         return model_paths.parse_yaml(self._yaml_path()).get(kind, [])
 
+    def _remote_models(self, kind: str) -> list[dict] | None:
+        """远程模式下从 ComfyUI 的 /object_info 拉模型清单。
+
+        ★ 2026-10-30：手机端 bot 连电脑 ComfyUI 时，comfy_dir 是电脑路径、
+          手机容器里不存在，读本地 yaml 永远扫不到，于是每次都报
+          「没扫到底模」。改成直接问 ComfyUI 拿它认得的模型名，
+          既能消掉误导性的警告，反映的也是对方真实的模型库。
+          代价：拿不到文件大小，size_mb 记 0（显示时省略）。
+        返回 None = 不是远程 / 拉取失败，调用方回落到本地扫描。
+        """
+        client = self._client()
+        if not getattr(client, "is_remote", False):
+            return None
+        try:
+            names = client.list_models_sync(kind)
+        except Exception:  # noqa: BLE001
+            return None
+        if not names:
+            return None
+        return [
+            {"name": str(n).replace("/", "\\"), "size_mb": 0, "path": ""} for n in names
+        ]
+
+    @staticmethod
+    def _size_text(model: dict) -> str:
+        """模型大小文案。远程模式拿不到大小（0），就不显示，别写成「0.00 GB」。"""
+        try:
+            mb = float(model.get("size_mb") or 0)
+        except (TypeError, ValueError):
+            mb = 0.0
+        if mb <= 0:
+            return ""
+        return f"（{mb / 1024:.2f} GB）" if mb >= 1024 else f"（{mb:.0f} MB）"
+
     def _scan(self, preset: str) -> list[dict]:
         """预设对应的底模清单（按预设的 model_dir 过滤 + 60 秒缓存）。
 
@@ -1428,10 +1464,14 @@ class NcdComfyPlugin(star.Star):
         hit = self._scan_cache.get(key)
         if hit and time.time() - hit[0] < 60:
             return hit[1]
-        items = model_paths.scan(
-            self._categories(kind),
-            min_mb=max(0.0, self._conf_float("comfy_min_model_gb", 0.5)),
-        )
+        remote = self._remote_models(kind)
+        if remote is not None:
+            items = remote
+        else:
+            items = model_paths.scan(
+                self._categories(kind),
+                min_mb=max(0.0, self._conf_float("comfy_min_model_gb", 0.5)),
+            )
         want = str(meta.get("model_dir") or "").lower()
         if want:
             items = [m for m in items if m["name"].lower().startswith(want + "\\")]
@@ -1444,7 +1484,11 @@ class NcdComfyPlugin(star.Star):
         hit = self._scan_cache.get(key)
         if hit and time.time() - hit[0] < 60:
             return hit[1]
-        items = model_paths.scan(self._categories("loras"), min_mb=0.0)
+        remote = self._remote_models("loras")
+        if remote is not None:
+            items = remote
+        else:
+            items = model_paths.scan(self._categories("loras"), min_mb=0.0)
         if preset:
             dirs = [d.lower() for d in (presets.PRESETS[preset].get("lora_dirs") or ())]
             if dirs:
@@ -3202,14 +3246,21 @@ class NcdComfyPlugin(star.Star):
                 f"{presets.PRESETS[default]['label']} 可用底模（共 {len(models)} 个）：",
             ]
             for m in models[:20]:
-                lines.append(f"· {m['name']}（{m['size_mb'] / 1024:.2f} GB）")
+                lines.append(f"· {m['name']}{self._size_text(m)}")
             if len(models) > 20:
                 lines.append(f"……还有 {len(models) - 20} 个，用 comfy_models 看全")
         else:
-            lines += [
-                "",
-                "⚠ 没扫到底模：检查 comfy_extra_paths / comfy_dir 指向的 extra_model_paths.yaml",
-            ]
+            _cli = self._client()
+            if getattr(_cli, "is_remote", False):
+                _hint = (
+                    f"⚠ 远程 ComfyUI（{_cli.host}:{_cli.port}）没有返回底模清单，"
+                    "确认它已启动且 /object_info 可访问"
+                )
+            else:
+                _hint = (
+                    "⚠ 没扫到底模：检查 comfy_extra_paths / comfy_dir 指向的 extra_model_paths.yaml"
+                )
+            lines += ["", _hint]
         return "\n".join(lines)
 
     @filter.llm_tool(name="comfy_generate")
@@ -4077,7 +4128,7 @@ class NcdComfyPlugin(star.Star):
                 f"可用 LoRA（{len(items)} 个，comfy_generate 的 lora 参数填文件名即可）："
             ]
             for m in items[:60]:
-                lines.append(f"· {m['name']}（{m['size_mb']:.0f} MB）")
+                lines.append(f"· {m['name']}{self._size_text(m)}")
             if len(items) > 60:
                 lines.append(f"……还有 {len(items) - 60} 个")
             return "\n".join(lines)
@@ -4086,6 +4137,12 @@ class NcdComfyPlugin(star.Star):
         items = self._scan(preset_name)
         label = presets.PRESETS[preset_name]["label"]
         if not items:
+            _cli = self._client()
+            if getattr(_cli, "is_remote", False):
+                return (
+                    f"{label}：远程 ComfyUI（{_cli.host}:{_cli.port}）没有返回底模清单，"
+                    "确认它已启动且 /object_info 可访问。"
+                )
             return (
                 f"{label} 没有扫到底模。检查 extra_model_paths.yaml 里的 "
                 f"{'checkpoints' if preset_name == 'sdxl' else 'diffusion_models'} 目录。"
@@ -4098,7 +4155,7 @@ class NcdComfyPlugin(star.Star):
         lines = [f"{label} 可用底模（{len(items)} 个）："]
         for m in items[:60]:
             mark = " ← 当前" if m["name"] == current else ""
-            lines.append(f"· {m['name']}（{m['size_mb'] / 1024:.2f} GB）{mark}")
+            lines.append(f"· {m['name']}{self._size_text(m)}{mark}")
         if len(items) > 60:
             lines.append(f"……还有 {len(items) - 60} 个")
         return "\n".join(lines)
