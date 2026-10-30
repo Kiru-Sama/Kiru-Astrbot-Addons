@@ -3947,6 +3947,28 @@ class NcdComfyPlugin(star.Star):
                 up_model, up_factor = self._parse_upscale(upscale)
                 # 0 原本表示「不限」，但配合 4x 模型很容易把显存打爆 → 兜底 2560
                 up_max_side = self._conf_int("comfy_upscale_max_side", 2560) or 2560
+                # 控制 LoRA：按 basename 在当前族里解析（库结构变了也不会断）
+                ctrl_lora_kwargs: dict = {}
+                if ctrl_name:
+                    try:
+                        if preset_name == "moss":
+                            ctrl_lora_kwargs["moss_control_lora"] = self._resolve_name(
+                                "moss_image_color_depth_control",
+                                self._scan_loras("moss"),
+                                "LoRA",
+                            )
+                        elif preset_name == "krea2":
+                            want = presets.KREA2_CONTROL_TYPES.get(ctrl_type or "depth", "")
+                            if want:
+                                ctrl_lora_kwargs["krea2_control_lora"] = self._resolve_name(
+                                    os.path.basename(want),
+                                    self._scan_loras("krea2"),
+                                    "LoRA",
+                                )
+                    except ComfyError as exc:
+                        logger.warning(
+                            f"[comfy] 控制 LoRA 解析失败，回退到默认路径: {exc}"
+                        )
                 final = presets.apply_params(
                     graph,
                     prompt=text,
@@ -3968,6 +3990,7 @@ class NcdComfyPlugin(star.Star):
                     control_start=ctrl_start,
                     control_end=ctrl_end,
                     control_preprocess=bool(control_preprocess),
+                    **ctrl_lora_kwargs,
                     upscale_model=up_model or None,
                     upscale_factor=up_factor,
                     upscale_method=self._conf_str("comfy_upscale_method") or "lanczos",

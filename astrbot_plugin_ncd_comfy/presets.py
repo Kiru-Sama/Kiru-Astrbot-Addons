@@ -102,13 +102,13 @@ MOSS_CONTROL_TYPES = {
     "depth": "depth_map",
     "color": "color_map",
 }
-MOSS_CONTROL_LORA = "Moss\\moss_image_color_depth_control.safetensors"
+MOSS_CONTROL_LORA = "Moss\\工具\\moss_image_color_depth_control.safetensors"
 
 # Krea2：Control LoRA（第三方节点）；depth 与社区 pose 权重
 KREA2_CONTROL_TYPES = {
-    "depth": "Krea2-功能\\depth-control-lora.safetensors",
-    "pose": "Krea2-功能\\krea2-pose-control-mix025.safetensors",
-    "openpose": "Krea2-功能\\krea2-pose-control-mix025.safetensors",
+    "depth": "Krea2\\工具\\depth-control-lora.safetensors",
+    "pose": "Krea2\\工具\\krea2-pose-control-mix025.safetensors",
+    "openpose": "Krea2\\工具\\krea2-pose-control-mix025.safetensors",
 }
 
 #: 已经接线控制能力的预设。
@@ -313,6 +313,8 @@ def apply_params(
     control_start: float = 0.0,
     control_end: float = 1.0,
     control_preprocess: bool = True,
+    moss_control_lora: str | None = None,
+    krea2_control_lora: str | None = None,
     upscale_model: str | None = None,
     upscale_factor: float = 0.0,
     upscale_method: str = "lanczos",
@@ -381,6 +383,8 @@ def apply_params(
             width=width,
             height=height,
             preprocess=bool(control_preprocess),
+            moss_control_lora=moss_control_lora,
+            krea2_control_lora=krea2_control_lora,
         )
 
     # ★ 2026-10-30：可选放大（超分）。四个工作流本身是精简版、没有超分节点，
@@ -615,6 +619,8 @@ def _insert_controlnet(
     width: int | None,
     height: int | None,
     preprocess: bool = True,
+    moss_control_lora: str | None = None,
+    krea2_control_lora: str | None = None,
 ) -> dict:
     """插入 ControlNet / LLLite 控制链（只改内存图）。
 
@@ -721,7 +727,7 @@ def _insert_controlnet(
             "class_type": "LoraLoaderModelOnly",
             "inputs": {
                 "model": list(graph[roles["sampler"]]["inputs"]["model"]),
-                "lora_name": MOSS_CONTROL_LORA,
+                "lora_name": moss_control_lora or MOSS_CONTROL_LORA,
                 "strength_model": 1.0,
             },
         }
@@ -742,7 +748,7 @@ def _insert_controlnet(
         return graph
 
     if preset == "krea2":
-        lora_name = KREA2_CONTROL_TYPES.get(ctype or "depth")
+        lora_name = krea2_control_lora or KREA2_CONTROL_TYPES.get(ctype or "depth")
         if not lora_name:
             raise WorkflowError(
                 f"Krea2 不支持控制类型「{control_type}」。可用："
