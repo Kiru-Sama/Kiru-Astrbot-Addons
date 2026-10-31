@@ -3507,6 +3507,21 @@ class NcdComfyPlugin(star.Star):
             ok = bool(client.healthy_sync())
         except Exception:  # noqa: BLE001
             ok = False
+        if not ok:
+            # ★ ComfyUI 没在跑 ≠ 电脑没连上：电脑上的拉起器（8200）还活着就说明链路通，
+            #   出图时可以自动把 ComfyUI 拉起来。只有拉起器也联系不上才算「未连接电脑」。
+            launcher = self._conf_str("comfy_launcher", "").strip()
+            if launcher:
+                try:
+                    import urllib.request as _urlreq
+
+                    with _urlreq.urlopen(
+                        launcher.rstrip("/") + "/status", timeout=2.5
+                    ) as resp:
+                        if int(getattr(resp, "status", 0) or 0) == 200:
+                            ok = True
+                except Exception:  # noqa: BLE001
+                    ok = False
         why = "" if ok else f"comfy未连接电脑（{client.host}:{client.port} 不可达）"
         self._pc_link_cache = (now, ok, why)
         return ok, why

@@ -860,7 +860,13 @@ class Main(star.Star):
                 self.api_overview,
                 ["GET"],
                 "链路监控总览",
-            )
+
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/napcat-token",
+                self.api_napcat_token,
+                ["GET"],
+                "读 NapCat WebUI token",
+            )            )
             self.context.register_web_api(
                 f"/{PLUGIN_DIR_NAME}/ncd-monitor/history",
                 self.api_history,
@@ -4618,6 +4624,41 @@ class Main(star.Star):
     # =================================================================
     #  五、Web API（前端用 apiGet 调用）
     # =================================================================
+
+
+
+    async def api_napcat_token(self):
+        """读出 NapCat WebUI 的 token（面板/脚本自动登录用）。
+
+        扫码重登后 token 会轮换，而它只存在容器的 webui.json 里；
+        手机是非 debug 包又没 root，adb 读不到，所以让容器内的插件代读。
+        """
+        import glob
+        import json as _json
+
+        paths = []
+        for pat in (
+            "/root/napcat/config/webui.json",
+            "/root/NapCat/config/webui.json",
+            "/root/napcat/config/*.json",
+            "/root/*/config/webui.json",
+            "/root/.config/napcat/webui.json",
+            "/root/napcat/webui.json",
+            "/opt/napcat/config/webui.json",
+            "/root/*/webui.json",
+            "/root/*/*/webui.json",
+            "/root/*/*/*/webui.json",
+        ):
+            paths.extend(glob.glob(pat))
+        for path in dict.fromkeys(paths):
+            try:
+                data = _json.load(open(path, encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            token = str((data or {}).get("token") or "")
+            if token:
+                return {"token": token, "path": path}
+        return {"token": "", "path": "", "searched": list(dict.fromkeys(paths))[:15]}
 
     async def api_overview(self):
         """一次返回页面需要的全部数据。"""
