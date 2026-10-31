@@ -19,6 +19,7 @@ from typing import Any
 
 from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.message_components import Plain
 from astrbot.core.star.filter.command import GreedyStr
 
 
@@ -29,6 +30,63 @@ class NcdSessionPlugin(star.Star):
         super().__init__(context, config)
         self.context = context
         self._conf: dict[str, Any] = config or {}
+
+    # ------------------------------------------------------------------
+    #  内置命令回执本地化
+    # ------------------------------------------------------------------
+    @filter.on_decorating_result()
+    async def localize_builtin_notice(self, event: AstrMessageEvent) -> None:
+        """把内置命令的英文回执换成中文，并补回会话 ID。
+
+        ★ 为什么这样做：AstrBot 4.29 的 /reset 回执写死成英文
+          "The current conversation context has been cleared."（且不再显示 ID）。
+          改界面语言只影响 WebUI，不影响命令回执；抢注同名命令又会和内置冲突。
+          在 on_decorating_result 里只改文案，最省事也最安全。
+        """
+        try:
+            result = event.get_result()
+            if result is None or not getattr(result, "chain", None):
+                return
+            targets = (
+                "The current conversation context has been cleared.",
+                "The current conversation context has been cleared",
+            )
+            hit = any(
+                isinstance(getattr(c, "text", None), str)
+                and any(t in c.text for t in targets)
+                for c in result.chain
+            )
+            if not hit:
+                # 老版本 4.28：✅ Switched to new conversation: a1b2.
+                hit = any(
+                    isinstance(getattr(c, "text", None), str)
+                    and "Switched to new conversation" in c.text
+                    for c in result.chain
+                )
+            if not hit:
+                return
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            cid = ""
+            try:
+                cid = (
+                    await self.context.conversation_manager.get_curr_conversation_id(umo)
+                    or ""
+                )
+            except Exception:  # noqa: BLE001
+                cid = ""
+            text = "✅ 已清空当前对话上下文"
+            if cid:
+                text += f"（会话 ID：{cid[:8]}）"
+            text += "。"
+            for c in result.chain:
+                if isinstance(getattr(c, "text", None), str) and (
+                    "conversation context has been cleared" in c.text
+                    or "Switched to new conversation" in c.text
+                ):
+                    c.text = text
+            logger.info(f"[session] 内置回执已本地化 → {umo}")
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[session] 回执本地化失败（不影响功能）: {exc}")
 
     # ------------------------------------------------------------------
     #  工具
