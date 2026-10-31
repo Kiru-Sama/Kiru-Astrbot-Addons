@@ -289,6 +289,8 @@ class NcdComfyPlugin(star.Star):
         self._state_ts = 0.0
         # 反风控：每个会话上次发图/发语音的时间、上次任意消息时间
         self._last_image_at: dict[str, float] = {}
+        # 风控降频：umo -> 解封时间（发图被 retcode 1200 拦下后，这段时间只发文字）
+        self._img_send_block: dict[str, float] = {}
         self._last_voice_at: dict[str, float] = {}
         self._last_reply_at: dict[str, float] = {}
         # 云端 API 下的异步出图任务：不让回复等画完
@@ -3140,6 +3142,34 @@ class NcdComfyPlugin(star.Star):
             "任务已经结束，不要再声称它还在排队/在画。",
         )
 
+    def _send_block_left(self, umo: str) -> float:
+        """该会话还要等多少秒才能再发图（0 = 可以发）。"""
+        until = self._img_send_block.get(umo, 0.0)
+        if not until:
+            return 0.0
+        left = until - time.time()
+        if left <= 0:
+            self._img_send_block.pop(umo, None)
+            return 0.0
+        return left
+
+    def _note_send_failure(self, umo: str, exc: object) -> None:
+        """发送失败时判断是不是风控；是的话给这个会话上冷却。
+
+        只对「像风控」的失败降频（retcode 1200 / ActionFailed / 频繁），
+        普通网络错误不动，避免误伤。
+        """
+        text = f"{exc}"
+        if not any(
+            k in text for k in ("1200", "ActionFailed", "频繁", "风控", "risk", "block")
+        ):
+            return
+        mins = float(self._conf_float("comfy_send_block_minutes", 10.0) or 10.0)
+        self._img_send_block[umo] = time.time() + mins * 60
+        logger.warning(
+            f"[comfy] 发图疑似被风控（{text[:70]}）→ {umo} 冷却 {mins:g} 分钟，只发文字"
+        )
+
     async def _send_chat(self, umo: str, text: str) -> None:
         if not umo or not text:
             return
@@ -3461,6 +3491,26 @@ class NcdComfyPlugin(star.Star):
         return lines
 
     @filter.llm_tool(name="comfy_tools")
+    def _pc_link_state(self, force: bool = False) -> tuple[bool, str]:
+        """手机能不能连到电脑上的 ComfyUI。返回 (可用, 说明)。
+
+        缓存 15 秒：工具一进来就问，太频繁会拖慢回复；但也不能缓存太久，
+        用户刚开热点就该马上恢复。
+        """
+        now = time.time()
+        cache = getattr(self, "_pc_link_cache", None)
+        if not force and cache and now - float(cache[0]) < 15.0:
+            return bool(cache[1]), str(cache[2])
+        client = self._client()
+        ok = False
+        try:
+            ok = bool(client.healthy_sync())
+        except Exception:  # noqa: BLE001
+            ok = False
+        why = "" if ok else f"comfy未连接电脑（{client.host}:{client.port} 不可达）"
+        self._pc_link_cache = (now, ok, why)
+        return ok, why
+
     async def comfy_tools(self, event: AstrMessageEvent) -> str:
         """出图入口（必须先调）：四个工作流、各自默认参数、当前可选底模。
 
@@ -3480,6 +3530,15 @@ class NcdComfyPlugin(star.Star):
                 (notice + "\n" if notice else "")
                 + "入口已经开过了，别重复调 comfy_tools。\n"
                 "直接调 comfy_generate（参数见上一轮说明）即可。"
+            )
+
+        online, why = self._pc_link_state()
+        if not online:
+            return (
+                f"⚠ {why}。\n"
+                "现在**不能画图、也不能发语音**（ComfyUI 在电脑上，手机没连上）。\n"
+                "★ 不要调 comfy_generate / comfy_say，也不要让用户重试——重试不会成功。\n"
+                "请直接用一句话告诉用户：「电脑那边没连上，现在画不了，等连上再画」。"
             )
 
         lines = ["ComfyUI 出图入口已打开。四个工作流（用 preset 参数选，留空=默认）："]
@@ -3681,6 +3740,14 @@ class NcdComfyPlugin(star.Star):
         lookup_gate = self._lookup_gate(event)
         if lookup_gate:
             return lookup_gate
+        online, why = self._pc_link_state()
+        if not online:
+            logger.info(f"[comfy] 跳过出图（{why}）")
+            return (
+                f"出图失败：{why}。\n"
+                "★ 这不是提示词/参数的问题，重试也没用。"
+                "请直接用一句话告诉用户「电脑没连上，现在画不了」，不要再调 comfy_generate。"
+            )
         if _ASYNC_RUN.get():
             logger.info("[comfy] 后台参数解析开始")
         else:
@@ -4340,6 +4407,18 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 生成图注失败（只丢文案，不影响出图）: {exc}")
             caption = ""
+        _send_umo = str(getattr(event, "unified_msg_origin", "") or "")
+        _left = self._send_block_left(_send_umo)
+        if _left > 0:
+            # ★ 风控冷却中：图已经画好了，但继续发只会把风控顶得更久。
+            mins = int(_left / 60) + 1
+            logger.warning(
+                f"[comfy] 会话处于风控冷却（还剩 {mins} 分钟），本次不发图 → {_send_umo}"
+            )
+            return (
+                f"图画好了，但这个会话刚才被风控，冷却还要约 {mins} 分钟，这次先不发图。"
+                "请用一句话告诉用户「图已画好，稍后再发」，不要重复调用 comfy_generate。"
+            )
         try:
             await self.context.send_message(
                 event.unified_msg_origin,
@@ -4353,6 +4432,7 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             # 某些平台对「图 + 文」同链支持不好：至少把图发出去。
             logger.warning(f"[comfy] 图文合并发送失败，回退纯图: {exc}")
+            self._note_send_failure(_send_umo, exc)
             try:
                 await self.context.send_message(
                     event.unified_msg_origin,
@@ -4360,6 +4440,7 @@ class NcdComfyPlugin(star.Star):
                 )
             except Exception as exc2:  # noqa: BLE001
                 logger.error(f"[comfy] 发送生成的图失败: {exc2}", exc_info=True)
+                self._note_send_failure(_send_umo, exc2)
                 return f"图画好了但发送失败：{type(exc2).__name__}: {exc2}"
         # ★ 2026-10-30：群聊出图轮标记，直接打在**事件自己身上**（set_extra）。
         #   早先我用「umo → 时间戳」缓存，结果 120 秒内这个群的任何回复都被剥光文字，
@@ -4913,6 +4994,11 @@ class NcdComfyPlugin(star.Star):
         client = self._client()
         stats = await asyncio.to_thread(client.healthy_sync)
         if not stats:
+            if client.is_remote:
+                return (
+                    f"comfy未连接电脑（{client.host}:{client.port} 不可达）。\n"
+                    "手机没连上电脑时画图/语音都用不了；等连上（开热点 + 电脑开 ComfyUI）再画。"
+                )
             return (
                 f"ComfyUI 没在运行（端口 {client.port}）。\n"
                 "下一次 comfy_generate 会自动拉起它。"
