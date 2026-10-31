@@ -4090,6 +4090,22 @@ class NcdComfyPlugin(star.Star):
         #   现在：只要步数在 4~14（加速档），就把加速 LoRA 插到最前面，
         #   风格 LoRA 串在它后面（presets._insert_loras 是链式的 LoraLoader）。
         auto_lora = self._conf_str("comfy_default_lora")
+        if not auto_lora and preset_name == "moss":
+            # ★ 新装的机器（比如纯电脑版）默认配置是空的。以前这时候完全不叠
+            #   加速 LoRA，4~14 步直接糊；现在自动在本族里找「8-steps」权重兜底。
+            try:
+                cand = next(
+                    (
+                        m["name"]
+                        for m in self._scan_loras("moss")
+                        if "8-steps" in str(m["name"]).lower()
+                    ),
+                    "",
+                )
+            except Exception:  # noqa: BLE001
+                cand = ""
+            auto_lora = cand or "Moss\\工具\\MOSS-Image-SFT-8-steps.safetensors"
+            logger.info(f"[comfy] 未配置默认 LoRA，自动用 {auto_lora}")
         if auto_lora:
             try:
                 auto_name = self._resolve_name(
