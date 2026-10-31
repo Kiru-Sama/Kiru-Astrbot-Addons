@@ -5004,15 +5004,47 @@ class Main(star.Star):
                     except Exception:  # noqa: BLE001
                         pass
 
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        # ★ 绑 0.0.0.0：面板可能在另一台机器（浏览器在电脑上）打开，
+        #   只绑 127.0.0.1 的话直链只能在手机内部访问，外部永远加载失败。
+        srv = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
         srv.daemon_threads = True
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         self._file_srv = srv
-        logger.info(f"[ncd-monitor] 本地图片服务已启动: 127.0.0.1:{srv.server_address[1]}")
+        logger.info(f"[ncd-monitor] 图片服务已启动: 0.0.0.0:{srv.server_address[1]}")
         return srv.server_address[1]
 
+    def _lan_ip(self) -> str:
+        """本机局域网 IP（面板在那个网段的机器上打开时要靠它访问）。"""
+        cached = getattr(self, "_lan_ip_cache", "")
+        if cached:
+            return cached
+        ip = ""
+        try:
+            import socket as _socket
+
+            s = _socket.socket(_socket.AF_INET, _socket.SOCK_DGRAM)
+            try:
+                # 不会真的发包，只让内核选出口地址
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+            finally:
+                s.close()
+        except Exception:  # noqa: BLE001
+            ip = ""
+        if not ip or ip.startswith("127."):
+            try:
+                ip = _socket.gethostbyname(_socket.gethostname())
+            except Exception:  # noqa: BLE001
+                ip = "127.0.0.1"
+        self._lan_ip_cache = ip
+        return ip
+
     def _view_url(self, path: str) -> str:
-        """给面板用的直链（带签名）。"""
+        """给面板用的直链（带签名）。
+
+        ★ 不能写 127.0.0.1：AstrBot 在手机上跑，浏览器在电脑上打开面板，
+          127.0.0.1 会指向电脑自己 → 大图永远加载失败。
+        """
         try:
             from urllib.parse import quote
 
@@ -5020,7 +5052,7 @@ class Main(star.Star):
             sig = hmac.new(
                 self._file_secret.encode(), path.encode(), hashlib.sha256
             ).hexdigest()[:16]
-            return f"http://127.0.0.1:{port}/i?p={quote(path)}&s={sig}"
+            return f"http://{self._lan_ip()}:{port}/i?p={quote(path)}&s={sig}"
         except Exception:  # noqa: BLE001
             return ""
 

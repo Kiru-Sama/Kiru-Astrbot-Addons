@@ -2,5 +2,5 @@ name: astrbot_plugin_ncd_monitor
 display_name: 链路监控
 desc: 端到端链路监控。把 QQ(SnowLuma) / AstrBot / LM Studio / 宿主机 四个环节的数据整合到一个页面，并显示上下文压缩产生的摘要文字。
 author: 本地自用
-version: 1.7.27
+version: 1.7.28
 repo: ""
