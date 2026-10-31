@@ -3490,7 +3490,6 @@ class NcdComfyPlugin(star.Star):
         cache[cat] = lines
         return lines
 
-    @filter.llm_tool(name="comfy_tools")
     def _pc_link_state(self, force: bool = False) -> tuple[bool, str]:
         """手机能不能连到电脑上的 ComfyUI。返回 (可用, 说明)。
 
@@ -3526,6 +3525,7 @@ class NcdComfyPlugin(star.Star):
         self._pc_link_cache = (now, ok, why)
         return ok, why
 
+    @filter.llm_tool(name="comfy_tools")
     async def comfy_tools(self, event: AstrMessageEvent) -> str:
         """出图入口（必须先调）：四个工作流、各自默认参数、当前可选底模。
 
