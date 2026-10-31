@@ -28,8 +28,12 @@
     color:var(--muted); }
   .tabs button.on { background:var(--soft); color:var(--accent);
     border-color:#c7dbff; }
-  .cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+  /* KPI 卡片：5 张时按 5/3/2 列自适应，避免出现「4 张 + 1 张吊在第二行」的孤行 */
+  .cards { display:grid; grid-template-columns:repeat(5,minmax(0,1fr));
     gap:12px; margin-bottom:12px; }
+  @media (max-width:1440px) {
+    .cards { grid-template-columns:repeat(3,minmax(0,1fr)); }
+  }
   .card { background:var(--card); border:1px solid var(--border);
     border-radius:12px; padding:12px; }
   .kpi .num { font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; }
@@ -93,6 +97,8 @@
   .sponsor-row button { padding:3px 9px; font-size:12px; }
   @media (max-width:860px) {
     .cards { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    /* 奇数张时最后一张拉通整行，不要孤零零占半行 */
+    .cards > .card:last-child:nth-child(odd) { grid-column:1 / -1; }
     .grid { grid-template-columns:1fr; }
     .ctrls { grid-template-columns:repeat(2,minmax(0,1fr)); }
   }
