@@ -123,6 +123,9 @@ class QuotaState:
     counted_set: set[str] = field(default_factory=set, repr=False, compare=False)
     bans: dict[str, float] = field(default_factory=dict)
     # 发言统计：日计数、累计、最后一次发言时间（同分先到先排）
+    # 群聊成功出图（不占额度，只做统计）：日计数 + 累计
+    group_counts: dict[str, int] = field(default_factory=dict)
+    group_totals: dict[str, int] = field(default_factory=dict)
     speech_counts: dict[str, int] = field(default_factory=dict)
     speech_totals: dict[str, int] = field(default_factory=dict)
     speech_last: dict[str, float] = field(default_factory=dict)
@@ -144,6 +147,12 @@ class QuotaState:
             "reminded": sorted(str(x) for x in self.reminded),
             "counted_jobs": [str(x) for x in self.counted_jobs],
             "bans": {str(k): float(v) for k, v in self.bans.items()},
+            "group_counts": {
+                str(k): int(v) for k, v in self.group_counts.items()
+            },
+            "group_totals": {
+                str(k): int(v) for k, v in self.group_totals.items()
+            },
             "speech_counts": {
                 str(k): int(v) for k, v in self.speech_counts.items()
             },
@@ -180,6 +189,14 @@ class QuotaState:
             counted_jobs=jobs,
             counted_set=set(jobs),
             bans={str(k): float(v) for k, v in (data.get("bans") or {}).items()},
+            group_counts={
+                str(k): int(v)
+                for k, v in (data.get("group_counts") or {}).items()
+            },
+            group_totals={
+                str(k): int(v)
+                for k, v in (data.get("group_totals") or {}).items()
+            },
             speech_counts={
                 str(k): int(v)
                 for k, v in (data.get("speech_counts") or {}).items()
@@ -210,6 +227,7 @@ class RecordResult:
     ban_triggered: bool
     ban_until: float | None
     degraded: bool
+    group: bool = False          # True = 这次是群聊统计，不占额度
 
 
 @dataclass(frozen=True)
@@ -235,6 +253,7 @@ class QuotaSnapshot:
     banned: bool
     ban_until: float | None
     sponsor: bool = False
+    group: bool = False
 
 
 @dataclass(frozen=True)
@@ -303,6 +322,7 @@ class QuotaEngine:
             self.state.reminded.clear()
             self.state.counted_jobs.clear()
             self.state.counted_set.clear()
+            self.state.group_counts.clear()
             self.state.speech_counts.clear()
             self.state.speech_last.clear()
         self._prune_bans(now)
@@ -664,6 +684,9 @@ class QuotaEngine:
                 "enabled": bool(self.config.global_enabled),
                 "triggered": self._pools_active(),
                 "percent": percent,
+                # 群聊口径（不占额度，仅统计）
+                "group_count": sum(int(v) for v in self.state.group_counts.values()),
+                "group_total": sum(int(v) for v in self.state.group_totals.values()),
             },
             "pools": {
                 "throttle": list(self.state.throttle_pool),
@@ -734,7 +757,26 @@ class QuotaEngine:
             user_id, "ban_hours", int(self.config.ban_hours)
         )
 
-        if bypass or not private:
+        if not private and not bypass:
+            # ★ 群聊出图不占额度，但要能统计：单独记一笔群聊成功
+            gd = int(self.state.group_counts.get(user_id, 0)) + 1
+            self.state.group_counts[user_id] = gd
+            self.state.group_totals[user_id] = (
+                int(self.state.group_totals.get(user_id, 0)) + 1
+            )
+            self.state.last_success[user_id] = now
+            return RecordResult(
+                counted=True,
+                duplicate=False,
+                daily_count=daily,
+                total_count=total,
+                reminder_due=False,
+                ban_triggered=False,
+                ban_until=None,
+                degraded=False,
+                group=True,
+            )
+        if bypass:
             return RecordResult(
                 counted=False,
                 duplicate=False,

@@ -823,6 +823,7 @@ class NcdComfyPlugin(star.Star):
             logger.info(
                 f"[comfy] 额度 +1 user={sender} daily={result.daily_count} "
                 f"total={result.total_count} private={private} admin={admin}"
+                f" group={getattr(result, 'group', False)}"
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(

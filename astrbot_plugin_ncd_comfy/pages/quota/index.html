@@ -492,12 +492,17 @@ function render(data) {
   const cards = $("cards");
   cards.replaceChildren();
   cards.appendChild(kpi(
-    "全局成功生图",
+    "私聊全局成功生图",
     (g.count || 0) + " / " + (g.limit || 30),
     g.enabled === false ? "全局 30 已关闭" :
       (g.triggered ? "已触发前 5 限流" : "未触发限流池"),
     g.enabled === false ? null : (g.percent || 0),
     g.triggered ? "over" : ""
+  ));
+  cards.appendChild(kpi(
+    "群聊全局生图",
+    (g.group_count || 0) + " 张",
+    "累计 " + (g.group_total || 0) + " 张 · 不占私聊额度"
   ));
   cards.appendChild(kpi(
     "本时段参与用户", totals.users || 0,
