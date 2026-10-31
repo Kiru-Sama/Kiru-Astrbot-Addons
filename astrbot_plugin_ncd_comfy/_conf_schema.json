@@ -49,9 +49,9 @@
   },
   "comfy_steps": {
     "type": "int",
-    "description": "默认步数（0 = 用工作流里的）",
-    "hint": "四个工作流各自调好了步数（30 / 10 / 22 / 50），一般不用动。",
-    "default": 0
+    "description": "默认步数（moss 默认 12；0 = 用工作流里的）",
+    "hint": "moss 建议 12 步（步数 4~14 会自动叠加速 LoRA + CFG1）；\n8 步虽然更快，但坏图明显更多。",
+    "default": 12
   },
   "comfy_steps_other": {
     "type": "int",
@@ -69,7 +69,7 @@
     "type": "float",
     "description": "默认 CFG（0 = 用工作流里的）",
     "hint": "各自是 5.5 / 1.0 / 5.5 / 4.5。",
-    "default": 0.0
+    "default": 1.0
   },
   "comfy_cfg_normal": {
     "type": "float",

@@ -3530,8 +3530,8 @@ class NcdComfyPlugin(star.Star):
             "· size        画幅，如 720x960，或 竖/横/方",
             "· width/height 像素直接给（8 的倍数，覆盖 size）",
             "· steps       1~150；cfg 0~30；seed 整数（-1 = 随机）",
-            "　★ moss 用 8 步 + 加速 LoRA 最省时间；sdxl/anima/krea2 默认 28 步、CFG 6。"
-            "　  别把 8 步/CFG1 套到 sdxl 上，会出灰白糊图。",
+            "　★ moss **默认 12 步** + 加速 LoRA（8 步坏图概率高，别默认用 8）；sdxl/anima/krea2 默认 28 步、CFG 6。"
+            "　  别把 12 步/CFG1 套到 sdxl 上，会出灰白糊图。",
             "· model       换底模（写文件名或其中一段，大小写不敏感）",
             '· lora        加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号隔开。'
             "  找不到名字时用 comfy_models(kind=\"lora\", preset=\"anima\") 或 comfy_models(kind=\"lora\", q=\"deepseek\") 精确查，别猜路径。",
@@ -3923,7 +3923,7 @@ class NcdComfyPlugin(star.Star):
             return _canvas_reminder(w, h, warn)
 
         # ★ 2026-10-30：步数与 CFG 不能全局一刀切。
-        #   comfy_steps=8 / comfy_cfg=1 是给 moss（配 8步加速 LoRA，少步数快速收敛）用的；
+        #   comfy_steps=12 / comfy_cfg=1 是给 moss（配 8步加速 LoRA，少步数快速收敛）用的；
         #   套到 SDXL 上就是灰白糊（实测 960x720 8步 CFG1 出图一片雾）。
         #   所以：显式传参优先；没传时按预设取不同默认值。
         explicit_steps = int(steps or 0)
