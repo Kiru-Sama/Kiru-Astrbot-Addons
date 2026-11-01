@@ -4571,8 +4571,11 @@ class NcdComfyPlugin(star.Star):
                 MessageChain(chain=chain),
             )
         except Exception as exc2:  # noqa: BLE001
-            logger.error(f"[comfy] 发送生成的图失败: {exc2}", exc_info=True)
-            return f"图画好了但发送失败：{type(exc2).__name__}: {exc2}"
+            # ★ 2026-11-01：QQ 侧经常「消息其实已送达，但接口抛 retcode=1200 / NTEvent Timeout」。
+            #   以前把异常文本 return 给模型 → 模型原样复述到群里，用户看到一串内部报错。
+            #   现在只记日志，不回给模型任何可复述文本（真没发出时用户会问，再画一张即可）。
+            logger.error(f"[comfy] 发送生成的图失败（可能已送达）: {exc2}", exc_info=True)
+            return ""
         # ★ 2026-10-30：群聊出图轮标记，直接打在**事件自己身上**（set_extra）。
         #   早先我用「umo → 时间戳」缓存，结果 120 秒内这个群的任何回复都被剥光文字，
         #   连命令回执（/reset 的 ✅）都被吞掉——命令看着像没执行。
