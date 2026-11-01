@@ -1,0 +1,5 @@
+{
+  "probe_interval": {"description": "探测间隔（秒）", "type": "int", "default": 30},
+  "notice_after": {"description": "断线超过多少秒才提示", "type": "int", "default": 45},
+  "notify": {"description": "恢复后是否主动提示", "type": "bool", "default": true}
+}

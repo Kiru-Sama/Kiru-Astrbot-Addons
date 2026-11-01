@@ -860,13 +860,13 @@ class Main(star.Star):
                 self.api_overview,
                 ["GET"],
                 "链路监控总览",
-
+            )
             self.context.register_web_api(
                 f"/{PLUGIN_DIR_NAME}/ncd-monitor/napcat-token",
                 self.api_napcat_token,
                 ["GET"],
                 "读 NapCat WebUI token",
-            )            )
+            )
             self.context.register_web_api(
                 f"/{PLUGIN_DIR_NAME}/ncd-monitor/history",
                 self.api_history,

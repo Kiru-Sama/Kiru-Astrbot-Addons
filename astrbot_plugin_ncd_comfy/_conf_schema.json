@@ -312,10 +312,10 @@
     "default": true
   },
   "comfy_send_block_minutes": {
-    "type": "float",
-    "description": "发图被风控后冷却分钟数",
-    "hint": "发图返回 retcode=1200 之类的拦截后，该会话在这段时间内只发文字不发票，\n避免越顶越久。默认 10 分钟。",
-    "default": 10.0
+    "description": "发图被风控后，该会话冷却多少分钟",
+    "type": "int",
+    "default": 3,
+    "hint": "冷却期内不发文，图会进待发队列，到期自动补发。"
   },
   "comfy_failure_nudge": {
     "type": "bool",
@@ -496,5 +496,23 @@
     "description": "每日统计窗口起点（小时）",
     "hint": "默认 8，即 08:00–次日 08:00；中国时区固定 +8。",
     "default": 8
+  },
+  "comfy_send_gap_sec": {
+    "description": "同一会话两次发图的最小间隔（秒）",
+    "type": "int",
+    "default": 15,
+    "hint": "太小容易连撞风控；15~30 比较稳。"
+  },
+  "comfy_default_style_lora": {
+    "description": "moss 默认风格 LoRA（用户没指定 LoRA 时自动叠）",
+    "type": "string",
+    "default": "",
+    "hint": "只影响 moss 预设；填 LoRA 文件名或 Moss\\\\画风\\\\xxx.safetensors。留空=不叠。"
+  },
+  "comfy_default_style_strength": {
+    "description": "默认风格 LoRA 强度",
+    "type": "float",
+    "default": 0.8,
+    "hint": "0.6~0.9 比较稳；1.0 容易把别的风格压掉。"
   }
 }

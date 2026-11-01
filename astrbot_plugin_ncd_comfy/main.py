@@ -872,6 +872,12 @@ class NcdComfyPlugin(star.Star):
     def _register_quota_api(self) -> None:
         try:
             self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/link",
+                self.api_link,
+                ["GET"],
+                "电脑链路状态（linkd 探针）",
+            )
+            self.context.register_web_api(
                 f"/{PLUGIN_DIR_NAME}/ncd-comfy/quota",
                 self.api_quota,
                 ["GET"],
@@ -920,6 +926,29 @@ class NcdComfyPlugin(star.Star):
             self._quota_names = names
             self._quota_names_ts = now
         return self._quota_names or names
+
+    async def api_link(self):
+        """链路状态：电脑在不在、ComfyUI 起没起。
+
+        ★ 2026-11-01：面板/排查用。它跑在手机上，所以“能返回”本身就证明
+          手机→电脑这条链路是通的（linkd 探针在电脑 8201）。
+        """
+        try:
+            ok, why = self._pc_link_state(force=True)
+            client = self._client()
+            host = str(getattr(client, "host", "") or "")
+            return {
+                "can_draw": bool(ok),
+                "source": getattr(self, "_pc_link_source", ""),
+                "reason": why,
+                "comfy": f"{client.host}:{client.port}",
+                "linkd": self._conf_str("comfy_linkd", "").strip()
+                or (f"http://{host}:8201/link/state" if host else ""),
+                "ts": time.time(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 链路状态取数失败: {exc}", exc_info=True)
+            return {"can_draw": False, "reason": f"{type(exc).__name__}: {exc}"}
 
     async def api_quota(self):
         try:
@@ -2538,6 +2567,7 @@ class NcdComfyPlugin(star.Star):
             except Exception:  # noqa: BLE001
                 model = "-"
             lora = self._conf_str("comfy_default_lora")
+            style_lora = (self._conf_str("comfy_default_style_lora") or "").strip()
             steps = self._conf_int("comfy_steps", 0)
             cfg = self._conf_float("comfy_cfg", 0.0)
             bits = [f"默认风格：{preset} 预设（{label}），底模 {model}"]
@@ -3142,6 +3172,45 @@ class NcdComfyPlugin(star.Star):
             "任务已经结束，不要再声称它还在排队/在画。",
         )
 
+    async def _drain_pending_images(self) -> None:
+        """冷却到期后自动补发待发的图（图不丢）。"""
+        pending = getattr(self, "_pending_images", None)
+        if not pending:
+            return
+        now = time.time()
+        for umo, item in list(pending.items()):
+            if item.get("due", 0) > now:
+                continue
+            if self._send_block_left(umo) > 0:
+                continue
+            pending.pop(umo, None)
+            try:
+                chain = [Comp.Image.fromFileSystem(str(item["path"]))]
+                if item.get("caption"):
+                    chain.append(Comp.Plain("\n" + item["caption"]))
+                await self.context.send_message(umo, MessageChain(chain=chain))
+                if not hasattr(self, "_last_img_sent_at"):
+                    self._last_img_sent_at = {}
+                self._last_img_sent_at[umo] = time.time()
+                logger.info(f"[comfy] 待发图已补发 → {umo}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 待发图补发失败（已丢弃）: {exc}")
+
+    async def _pending_loop(self) -> None:
+        while True:
+            try:
+                await self._drain_pending_images()
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[comfy] 待发队列检查异常: {exc}")
+            await asyncio.sleep(20)
+
+    def _ensure_pending_loop(self) -> None:
+        if getattr(self, "_pending_task", None) is None:
+            try:
+                self._pending_task = asyncio.create_task(self._pending_loop())
+            except Exception:  # noqa: BLE001
+                pass
+
     def _send_block_left(self, umo: str) -> float:
         """该会话还要等多少秒才能再发图（0 = 可以发）。"""
         until = self._img_send_block.get(umo, 0.0)
@@ -3164,7 +3233,7 @@ class NcdComfyPlugin(star.Star):
             k in text for k in ("1200", "ActionFailed", "频繁", "风控", "risk", "block")
         ):
             return
-        mins = float(self._conf_float("comfy_send_block_minutes", 10.0) or 10.0)
+        mins = float(self._conf_float("comfy_send_block_minutes", 3.0) or 3.0)
         self._img_send_block[umo] = time.time() + mins * 60
         logger.warning(
             f"[comfy] 发图疑似被风控（{text[:70]}）→ {umo} 冷却 {mins:g} 分钟，只发文字"
@@ -3493,35 +3562,77 @@ class NcdComfyPlugin(star.Star):
     def _pc_link_state(self, force: bool = False) -> tuple[bool, str]:
         """手机能不能连到电脑上的 ComfyUI。返回 (可用, 说明)。
 
-        缓存 15 秒：工具一进来就问，太频繁会拖慢回复；但也不能缓存太久，
-        用户刚开热点就该马上恢复。
+        ★ 2026-11-01：先问电脑上的 linkd（默认 http://<comfy host>:8201/link/state）。
+          它是「电脑到底在不在」的唯一可靠信号：
+            · 连得上 linkd → 电脑在线、网络可达；再看 ComfyUI/拉起器决定能不能画
+            · 连不上 linkd → 才能断定是「链路不通」（热点断了/电脑关机/换网络）
+          以前只探 ComfyUI 与拉起器，两者都不通时分不清是网络断了还是 ComfyUI 没起，
+          只能统一报 comfy未连接电脑，用户不知道该修网络还是修 ComfyUI。
+        缓存 15 秒：工具一进来就问，太频繁会拖慢回复，但也不能缓存太久。
         """
         now = time.time()
         cache = getattr(self, "_pc_link_cache", None)
         if not force and cache and now - float(cache[0]) < 15.0:
             return bool(cache[1]), str(cache[2])
-        client = self._client()
-        ok = False
-        try:
-            ok = bool(client.healthy_sync())
-        except Exception:  # noqa: BLE001
-            ok = False
-        if not ok:
-            # ★ ComfyUI 没在跑 ≠ 电脑没连上：电脑上的拉起器（8200）还活着就说明链路通，
-            #   出图时可以自动把 ComfyUI 拉起来。只有拉起器也联系不上才算「未连接电脑」。
-            launcher = self._conf_str("comfy_launcher", "").strip()
-            if launcher:
-                try:
-                    import urllib.request as _urlreq
 
-                    with _urlreq.urlopen(
-                        launcher.rstrip("/") + "/status", timeout=2.5
-                    ) as resp:
-                        if int(getattr(resp, "status", 0) or 0) == 200:
-                            ok = True
-                except Exception:  # noqa: BLE001
+        client = self._client()
+        host = str(getattr(client, "host", "") or "").strip()
+        linkd = self._conf_str("comfy_linkd", "").strip() or (
+            f"http://{host}:8201/link/state" if host else ""
+        )
+
+        ok, why = False, ""
+        used_linkd = False
+        if linkd:
+            try:
+                import urllib.request as _urlreq
+
+                with _urlreq.urlopen(linkd, timeout=2.5) as resp:
+                    data = json.loads(resp.read().decode("utf-8", "replace"))
+                used_linkd = True
+                self._pc_link_source = "linkd"
+                comfy_ok = bool((data.get("comfy") or {}).get("ok"))
+                launcher_ok = bool((data.get("launcher") or {}).get("ok"))
+                if comfy_ok or launcher_ok:
+                    ok, why = True, ""
+                else:
                     ok = False
-        why = "" if ok else f"comfy未连接电脑（{client.host}:{client.port} 不可达）"
+                    why = (
+                        "comfy未启动（电脑在线，但 ComfyUI 与拉起器都没响应；"
+                        "请先在电脑上打开出图程序）"
+                    )
+            except Exception:  # noqa: BLE001
+                used_linkd = False
+
+        if not used_linkd:
+            self._pc_link_source = "direct"
+            # 探针不通（电脑没开 linkd 或链路真断）→ 回落到原来的直连探测
+            try:
+                ok = bool(client.healthy_sync())
+            except Exception:  # noqa: BLE001
+                ok = False
+            if not ok:
+                launcher = self._conf_str("comfy_launcher", "").strip()
+                if launcher:
+                    try:
+                        import urllib.request as _urlreq
+
+                        with _urlreq.urlopen(
+                            launcher.rstrip("/") + "/status", timeout=2.5
+                        ) as resp:
+                            if int(getattr(resp, "status", 0) or 0) == 200:
+                                ok = True
+                    except Exception:  # noqa: BLE001
+                        ok = False
+            why = (
+                ""
+                if ok
+                else (
+                    f"comfy未连接电脑（{client.host}:{client.port} 不可达："
+                    "热点/网络不通，或电脑没开机/没开 linkd）"
+                )
+            )
+
         self._pc_link_cache = (now, ok, why)
         return ok, why
 
@@ -3531,8 +3642,12 @@ class NcdComfyPlugin(star.Star):
 
         ★ comfy_generate / comfy_models 都要先调一次本工具；没调会返回错误。
         ★ 每个会话调一次即可，第二次起只回一句提醒（省上下文）。
+        ★ 电脑是「出图服务器」，不是某个人的私人电脑：
+          · 是否可用只看链路探测结果，不要臆测归属、不要编造用户说过的话；
+          · 服务器不在线就直接说“出图服务器暂时连不上”，不要追问电脑是谁的。
         """
         umo = str(getattr(event, "unified_msg_origin", "") or "")
+        self._ensure_pending_loop()
         notice = self._take_reload_notice(umo)
         already = umo in self._revealed
         self._revealed[umo] = time.time()
@@ -3713,8 +3828,11 @@ class NcdComfyPlugin(star.Star):
             lora(string): 加**风格** LoRA，如 "cunnyfunky:0.8"；多个用逗号分隔。
                 ★ 只能填**当前预设这一族**的名字（moss 用 Moss\…，anima 用 anima\…）。
                   填了别族的同名文件会自动换成本族那个，但最好一开始就用对。
-                ★ 留空也会自动叠加速 LoRA（强度 1.0，仅步数 4~14 时叠，>14 步不叠）；
-                  这里填的是**叠加**，加速 LoRA 仍会在最前面，不会被替换。
+                ★ 三种写法（moss 有默认风格「秘制柔和动漫风」时）：
+                  · 留空            → 加速 LoRA + 默认风格
+                  · "鬼针草:0.8"     → 加速 + 鬼针草（**替换**默认风格）
+                  · "+鬼针草:0.8"    → 加速 + 默认风格 + 鬼针草（**叠加**）
+                ★ 加速 LoRA 始终在最前面（仅步数 4~14 时叠，>14 步不叠），不会被替换。
             reference(string): **普通降噪图生图**（不锁结构）：留空 = 文生图；
                 "auto" = 插件自动找（当前/引用消息 → 最近用户图 → 最近生成图）；
                 "message" = 这条或被引用消息里的图；"last" = 上一张生成的图。
@@ -4095,6 +4213,14 @@ class NcdComfyPlugin(star.Star):
                     + RECOMMENDED_HINT
                 )
 
+        # ★ 2026-11-01：lora 参数支持 "+" 前缀 = 在默认风格（猫猫）基础上叠加；
+        #   不带前缀 = 替换默认风格；留空 = 只用默认风格。
+        _lora_raw = (lora or "").strip()
+        _add_on_default = _lora_raw.startswith("+") or _lora_raw.startswith("＋")
+        if _add_on_default:
+            lora = _lora_raw[1:].strip()
+        _keep_default_style = _add_on_default or not (lora or "").strip()
+
         # LoRA（提交前动态插节点）
         loras: list[dict] = []
         lora_auto: list[str] = []   # 跨族自动纠正记录（函数级，空 lora 也要有）
@@ -4163,6 +4289,39 @@ class NcdComfyPlugin(star.Star):
                     )
             except (ComfyError, ValueError) as exc:
                 return f"出图失败：{exc}" + TOOL_RETRY_HINT
+
+        # 默认风格 LoRA（moss 专属）：只在用户没指定风格 LoRA 时叠加。
+        # ★ 2026-11-01：跟「加速 LoRA」是两个槽位 —— comfy_default_lora 是 8 步蒸馏加速，
+        #   必须贴近底模；这里放的是画风/角色，串在加速后面。
+        if preset_name == "moss" and _keep_default_style:
+            # ★ 2026-11-01 改：三态语义 ——
+            #   留空 = 叠默认风格；带 "+" = 在默认风格上加；不带前缀 = 替换默认风格。
+            #   MOSS 支持多 LoRA 链式叠加；猫猫当底子、用户点的风格串在后面，
+            #   实际链路：加速 → 默认风格 → 用户指定的 LoRA。
+            _style_lora = (self._conf_str("comfy_default_style_lora") or "").strip()
+            if _style_lora:
+                try:
+                    _style_name = self._resolve_name(
+                        _style_lora, self._scan_loras("moss"), "LoRA"
+                    )
+                    already = any(
+                        str(l.get("name") or "") == str(_style_name) for l in loras
+                    )
+                    if already:
+                        logger.info(
+                            f"[comfy] 默认风格 LoRA 用户已显式指定，不重复叠: {_style_name}"
+                        )
+                    else:
+                        _style_w = self._conf_float("comfy_default_style_strength", 0.8)
+                        loras.insert(
+                            0,
+                            {"name": _style_name, "strength": max(0.0, min(2.0, _style_w))},
+                        )
+                        logger.info(
+                            f"[comfy] 叠加默认风格 LoRA: {_style_name}（强度 {_style_w:g}）"
+                        )
+                except ComfyError as exc:
+                    logger.info(f"[comfy] 默认风格 LoRA 不可用，本次不叠: {exc}")
 
         # 默认 LoRA（8 步加速）：**必须**叠，不是「没指定才叠」。
         # ★ 2026-10-30：原来有两个坑——
@@ -4423,17 +4582,52 @@ class NcdComfyPlugin(star.Star):
             logger.warning(f"[comfy] 生成图注失败（只丢文案，不影响出图）: {exc}")
             caption = ""
         _send_umo = str(getattr(event, "unified_msg_origin", "") or "")
+
+        # ★ 2026-11-01：发送间隔（默认 15 秒）——连着发图更容易被风控。
+        try:
+            gap = float(self._conf_float("comfy_send_gap_sec", 15.0) or 0.0)
+        except Exception:  # noqa: BLE001
+            gap = 15.0
+        if gap > 0:
+            last = getattr(self, "_last_img_sent_at", {})
+            left_gap = gap - (time.time() - float(last.get(_send_umo, 0.0)))
+            if 0 < left_gap <= gap:
+                logger.info(f"[comfy] 发送间隔控制：等 {left_gap:.1f}s 再发 → {_send_umo}")
+                await asyncio.sleep(min(left_gap, gap))
+
         _left = self._send_block_left(_send_umo)
         if _left > 0:
-            # ★ 风控冷却中：图已经画好了，但继续发只会把风控顶得更久。
+            # ★ 风控冷却中：图已经画好了，继续发只会把风控顶得更久。
+            #   图不能丢 —— 存进待发队列，冷却到期自动补发。
             mins = int(_left / 60) + 1
             logger.warning(
                 f"[comfy] 会话处于风控冷却（还剩 {mins} 分钟），本次不发图 → {_send_umo}"
             )
-            return (
-                f"图画好了，但这个会话刚才被风控，冷却还要约 {mins} 分钟，这次先不发图。"
-                "请用一句话告诉用户「图已画好，稍后再发」，不要重复调用 comfy_generate。"
-            )
+            try:
+                pending = getattr(self, "_pending_images", None)
+                if pending is None:
+                    pending = self._pending_images = {}
+                pending[_send_umo] = {
+                    "path": str(path),
+                    "caption": caption,
+                    "due": time.time() + max(30.0, _left),
+                }
+                logger.info(f"[comfy] 图已入待发队列，约 {mins} 分钟后自动补发 → {_send_umo}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 待发队列写入失败: {exc}")
+            # 只提醒一次，避免每张图刷一条
+            if not getattr(self, "_block_notice_sent", None):
+                self._block_notice_sent = {}
+            if not self._block_notice_sent.get(_send_umo):
+                self._block_notice_sent[_send_umo] = time.time()
+                try:
+                    await self._send_chat(
+                        _send_umo, f"图已经画好了，这会儿发图被平台限流，约 {mins} 分钟后我自动发给你喵。"
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[comfy] 限流提示发送失败: {exc}")
+            # 工具结果只回一句「已处理」，不给模型可复述的内部说明
+            return "已自动告知用户（图稍后自动补发）。不要复述本句，也不要提到风控/冷却/工具等内部细节。"
         try:
             await self.context.send_message(
                 event.unified_msg_origin,
@@ -4464,6 +4658,15 @@ class NcdComfyPlugin(star.Star):
         #   （异步出图那条事件早已结束，标记也就不会落到别人身上。）
         try:
             event.set_extra("_comfy_image_turn", True)
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            if not hasattr(self, "_last_img_sent_at"):
+                self._last_img_sent_at = {}
+            self._last_img_sent_at[_send_umo] = time.time()
+            if getattr(self, "_block_notice_sent", None):
+                self._block_notice_sent.pop(_send_umo, None)
         except Exception:  # noqa: BLE001
             pass
 

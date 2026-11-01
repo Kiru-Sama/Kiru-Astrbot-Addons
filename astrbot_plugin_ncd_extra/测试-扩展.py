@@ -105,7 +105,7 @@ class FakeEvent:
         return text
 
     def get_sender_id(self):
-        return "10001"
+        return "3384998797"
 
     def is_admin(self):
         return True
