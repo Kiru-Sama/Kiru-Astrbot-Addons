@@ -289,8 +289,6 @@ class NcdComfyPlugin(star.Star):
         self._state_ts = 0.0
         # 反风控：每个会话上次发图/发语音的时间、上次任意消息时间
         self._last_image_at: dict[str, float] = {}
-        # 风控降频：umo -> 解封时间（发图被 retcode 1200 拦下后，这段时间只发文字）
-        self._img_send_block: dict[str, float] = {}
         self._last_voice_at: dict[str, float] = {}
         self._last_reply_at: dict[str, float] = {}
         # 云端 API 下的异步出图任务：不让回复等画完
@@ -3172,72 +3170,50 @@ class NcdComfyPlugin(star.Star):
             "任务已经结束，不要再声称它还在排队/在画。",
         )
 
-    async def _drain_pending_images(self) -> None:
-        """冷却到期后自动补发待发的图（图不丢）。"""
-        pending = getattr(self, "_pending_images", None)
-        if not pending:
-            return
-        now = time.time()
-        for umo, item in list(pending.items()):
-            if item.get("due", 0) > now:
-                continue
-            if self._send_block_left(umo) > 0:
-                continue
-            pending.pop(umo, None)
-            try:
-                chain = [Comp.Image.fromFileSystem(str(item["path"]))]
-                if item.get("caption"):
-                    chain.append(Comp.Plain("\n" + item["caption"]))
-                await self.context.send_message(umo, MessageChain(chain=chain))
-                if not hasattr(self, "_last_img_sent_at"):
-                    self._last_img_sent_at = {}
-                self._last_img_sent_at[umo] = time.time()
-                logger.info(f"[comfy] 待发图已补发 → {umo}")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[comfy] 待发图补发失败（已丢弃）: {exc}")
+    # ------------------------------------------------------------------
+    #  内部提示泄漏的兜底（2026-11-01）
+    # ------------------------------------------------------------------
+    _LEAK_MARKERS = (
+        "不要复述本句",
+        "不要提到风控",
+        "已自动告知用户",
+        "请用一句话告诉用户",
+        "不要重复调用",
+        "内部细节",
+        "这是系统提示",
+    )
 
-    async def _pending_loop(self) -> None:
-        while True:
-            try:
-                await self._drain_pending_images()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug(f"[comfy] 待发队列检查异常: {exc}")
-            await asyncio.sleep(20)
+    @filter.on_decorating_result()
+    async def _drop_internal_leak(self, event: AstrMessageEvent) -> None:
+        """发送前扫一遍：只要命中「内部指令」片段，整条结果丢掉。
 
-    def _ensure_pending_loop(self) -> None:
-        if getattr(self, "_pending_task", None) is None:
+        为什么放在这里：工具返回值里写给模型的话，模型有概率原样复述给用户；
+        与其反复叮嘱提示词，不如在真正发出去之前拦一刀。图注、正常回复不含这些片段。
+        """
+        try:
+            result = event.get_result()
+            if result is None or not getattr(result, "chain", None):
+                return
+            texts = [
+                c.text
+                for c in result.chain
+                if isinstance(getattr(c, "text", None), str)
+            ]
+            if not texts:
+                return
+            joined = "\n".join(texts)
+            hit = next((m for m in self._LEAK_MARKERS if m in joined), "")
+            if not hit:
+                return
+            logger.warning(
+                f"[comfy] 拦下内部提示泄漏（命中 {hit!r}）→ {getattr(event, 'unified_msg_origin', '')}"
+            )
             try:
-                self._pending_task = asyncio.create_task(self._pending_loop())
+                result.chain.clear()
             except Exception:  # noqa: BLE001
                 pass
-
-    def _send_block_left(self, umo: str) -> float:
-        """该会话还要等多少秒才能再发图（0 = 可以发）。"""
-        until = self._img_send_block.get(umo, 0.0)
-        if not until:
-            return 0.0
-        left = until - time.time()
-        if left <= 0:
-            self._img_send_block.pop(umo, None)
-            return 0.0
-        return left
-
-    def _note_send_failure(self, umo: str, exc: object) -> None:
-        """发送失败时判断是不是风控；是的话给这个会话上冷却。
-
-        只对「像风控」的失败降频（retcode 1200 / ActionFailed / 频繁），
-        普通网络错误不动，避免误伤。
-        """
-        text = f"{exc}"
-        if not any(
-            k in text for k in ("1200", "ActionFailed", "频繁", "风控", "risk", "block")
-        ):
-            return
-        mins = float(self._conf_float("comfy_send_block_minutes", 3.0) or 3.0)
-        self._img_send_block[umo] = time.time() + mins * 60
-        logger.warning(
-            f"[comfy] 发图疑似被风控（{text[:70]}）→ {umo} 冷却 {mins:g} 分钟，只发文字"
-        )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 泄漏净化失败（忽略）: {exc}")
 
     async def _send_chat(self, umo: str, text: str) -> None:
         if not umo or not text:
@@ -3647,7 +3623,6 @@ class NcdComfyPlugin(star.Star):
           · 服务器不在线就直接说“出图服务器暂时连不上”，不要追问电脑是谁的。
         """
         umo = str(getattr(event, "unified_msg_origin", "") or "")
-        self._ensure_pending_loop()
         notice = self._take_reload_notice(umo)
         already = umo in self._revealed
         self._revealed[umo] = time.time()
@@ -4582,75 +4557,22 @@ class NcdComfyPlugin(star.Star):
             logger.warning(f"[comfy] 生成图注失败（只丢文案，不影响出图）: {exc}")
             caption = ""
         _send_umo = str(getattr(event, "unified_msg_origin", "") or "")
-
-        # ★ 2026-11-01：发送间隔（默认 15 秒）——连着发图更容易被风控。
+        # ★ 2026-11-01：按用户要求回退「风控限时」——不再有冷却、待发队列、自动补发。
+        #   发送失败就按旧版处理：先试纯图，再失败就把错误回给模型（用户能看见原因）。
+        # ★ 2026-11-01（按用户要求）：图 + 图注 放同一条消息链，**失败就直接报错，不做回退**。
+        #   之前「失败回退只发图」会把已经在平台侧发出的图再发一遍（群里出现两张同样的图），
+        #   现在干脆没有兜底重发路径：一次发送，失败就把原因回给模型。
         try:
-            gap = float(self._conf_float("comfy_send_gap_sec", 15.0) or 0.0)
-        except Exception:  # noqa: BLE001
-            gap = 15.0
-        if gap > 0:
-            last = getattr(self, "_last_img_sent_at", {})
-            left_gap = gap - (time.time() - float(last.get(_send_umo, 0.0)))
-            if 0 < left_gap <= gap:
-                logger.info(f"[comfy] 发送间隔控制：等 {left_gap:.1f}s 再发 → {_send_umo}")
-                await asyncio.sleep(min(left_gap, gap))
-
-        _left = self._send_block_left(_send_umo)
-        if _left > 0:
-            # ★ 风控冷却中：图已经画好了，继续发只会把风控顶得更久。
-            #   图不能丢 —— 存进待发队列，冷却到期自动补发。
-            mins = int(_left / 60) + 1
-            logger.warning(
-                f"[comfy] 会话处于风控冷却（还剩 {mins} 分钟），本次不发图 → {_send_umo}"
-            )
-            try:
-                pending = getattr(self, "_pending_images", None)
-                if pending is None:
-                    pending = self._pending_images = {}
-                pending[_send_umo] = {
-                    "path": str(path),
-                    "caption": caption,
-                    "due": time.time() + max(30.0, _left),
-                }
-                logger.info(f"[comfy] 图已入待发队列，约 {mins} 分钟后自动补发 → {_send_umo}")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[comfy] 待发队列写入失败: {exc}")
-            # 只提醒一次，避免每张图刷一条
-            if not getattr(self, "_block_notice_sent", None):
-                self._block_notice_sent = {}
-            if not self._block_notice_sent.get(_send_umo):
-                self._block_notice_sent[_send_umo] = time.time()
-                try:
-                    await self._send_chat(
-                        _send_umo, f"图已经画好了，这会儿发图被平台限流，约 {mins} 分钟后我自动发给你喵。"
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"[comfy] 限流提示发送失败: {exc}")
-            # 工具结果只回一句「已处理」，不给模型可复述的内部说明
-            return "已自动告知用户（图稍后自动补发）。不要复述本句，也不要提到风控/冷却/工具等内部细节。"
-        try:
+            chain = [Comp.Image.fromFileSystem(str(path))]
+            if caption:
+                chain.append(Comp.Plain("\n" + caption))
             await self.context.send_message(
                 event.unified_msg_origin,
-                MessageChain(
-                    chain=[
-                        Comp.Image.fromFileSystem(str(path)),
-                        Comp.Plain("\n" + caption),
-                    ]
-                ),
+                MessageChain(chain=chain),
             )
-        except Exception as exc:  # noqa: BLE001
-            # 某些平台对「图 + 文」同链支持不好：至少把图发出去。
-            logger.warning(f"[comfy] 图文合并发送失败，回退纯图: {exc}")
-            self._note_send_failure(_send_umo, exc)
-            try:
-                await self.context.send_message(
-                    event.unified_msg_origin,
-                    MessageChain(chain=[Comp.Image.fromFileSystem(str(path))]),
-                )
-            except Exception as exc2:  # noqa: BLE001
-                logger.error(f"[comfy] 发送生成的图失败: {exc2}", exc_info=True)
-                self._note_send_failure(_send_umo, exc2)
-                return f"图画好了但发送失败：{type(exc2).__name__}: {exc2}"
+        except Exception as exc2:  # noqa: BLE001
+            logger.error(f"[comfy] 发送生成的图失败: {exc2}", exc_info=True)
+            return f"图画好了但发送失败：{type(exc2).__name__}: {exc2}"
         # ★ 2026-10-30：群聊出图轮标记，直接打在**事件自己身上**（set_extra）。
         #   早先我用「umo → 时间戳」缓存，结果 120 秒内这个群的任何回复都被剥光文字，
         #   连命令回执（/reset 的 ✅）都被吞掉——命令看着像没执行。
@@ -4658,15 +4580,6 @@ class NcdComfyPlugin(star.Star):
         #   （异步出图那条事件早已结束，标记也就不会落到别人身上。）
         try:
             event.set_extra("_comfy_image_turn", True)
-        except Exception:  # noqa: BLE001
-            pass
-
-        try:
-            if not hasattr(self, "_last_img_sent_at"):
-                self._last_img_sent_at = {}
-            self._last_img_sent_at[_send_umo] = time.time()
-            if getattr(self, "_block_notice_sent", None):
-                self._block_notice_sent.pop(_send_umo, None)
         except Exception:  # noqa: BLE001
             pass
 

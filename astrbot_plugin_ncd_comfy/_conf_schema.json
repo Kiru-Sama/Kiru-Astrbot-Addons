@@ -314,8 +314,8 @@
   "comfy_send_block_minutes": {
     "description": "发图被风控后，该会话冷却多少分钟",
     "type": "int",
-    "default": 3,
-    "hint": "冷却期内不发文，图会进待发队列，到期自动补发。"
+    "default": 0,
+    "hint": "0 = 关闭（默认）；>0 才会冷却并自动补发。"
   },
   "comfy_failure_nudge": {
     "type": "bool",
@@ -500,8 +500,8 @@
   "comfy_send_gap_sec": {
     "description": "同一会话两次发图的最小间隔（秒）",
     "type": "int",
-    "default": 15,
-    "hint": "太小容易连撞风控；15~30 比较稳。"
+    "default": 0,
+    "hint": "0 = 不限间隔（默认）。"
   },
   "comfy_default_style_lora": {
     "description": "moss 默认风格 LoRA（用户没指定 LoRA 时自动叠）",
