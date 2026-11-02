@@ -454,12 +454,32 @@ def _is_private_session(umo: Any) -> bool:
 #   「插件操作失败，请查看服务端日志」）。
 import importlib.util as _ilu
 import os as _os_path
+import sys as _sys_path
 
 _PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.path.abspath(__file__))
-_TEXT_UTILS_PATH = _os_path.path.join(_PLUGIN_DIR_PATH, 'text_utils.py')
-_spec = _ilu.spec_from_file_location('ncd_monitor_text_utils', _TEXT_UTILS_PATH)
-_text_utils = _ilu.module_from_spec(_spec)
-_spec.loader.exec_module(_text_utils)
+def _load_local_module(name: str, filename: str):
+    """按路径加载同目录模块；文件 mtime 变了就重新加载。
+
+    ★ 2026-11-02：重装插件后，模块名不带 data.plugins 前缀的 `sys.modules` 条目
+      框架清不掉，会一直用旧模块（comfy 那边真机踩过 Transport auth_token 报错）。
+    """
+    path = _os_path.path.join(_PLUGIN_DIR_PATH, filename)
+    key = "ncd_monitor_" + name
+    try:
+        stamp = _os_path.path.getmtime(path)
+    except OSError:
+        stamp = 0.0
+    cached = _sys_path.modules.get(key)
+    if cached is not None and getattr(cached, "__ncd_mtime__", None) == stamp:
+        return cached
+    spec = _ilu.spec_from_file_location(key, path)
+    mod = _ilu.module_from_spec(spec)
+    setattr(mod, "__ncd_mtime__", stamp)
+    _sys_path.modules[key] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+_text_utils = _load_local_module('text_utils', 'text_utils.py')
 
 _INTERNAL_REQUEST_MARKERS = _text_utils.INTERNAL_REQUEST_MARKERS
 _chunk_text = _text_utils.chunk_text
@@ -471,18 +491,12 @@ _is_think_part = _text_utils.is_think_part
 _plugin_content_text = _text_utils.plugin_content_text
 _strip_think_parts = _text_utils.strip_think_parts
 
-_CONTENT_PARSE_PATH = _os_path.path.join(_PLUGIN_DIR_PATH, 'content_parse.py')
-_cp_spec = _ilu.spec_from_file_location('ncd_monitor_content_parse', _CONTENT_PARSE_PATH)
-_content_parse = _ilu.module_from_spec(_cp_spec)
-_cp_spec.loader.exec_module(_content_parse)
+_content_parse = _load_local_module('content_parse', 'content_parse.py')
 _IMG_ATTACH_RE = _content_parse.IMG_ATTACH_RE
 _QUOTED_IMG_RE = _content_parse.QUOTED_IMG_RE
 _SYS_REMINDER_RE = _content_parse.SYS_REMINDER_RE
 
-_PATHS_PATH = _os_path.path.join(_PLUGIN_DIR_PATH, 'paths.py')
-_paths_spec = _ilu.spec_from_file_location('ncd_monitor_paths', _PATHS_PATH)
-_paths = _ilu.module_from_spec(_paths_spec)
-_paths_spec.loader.exec_module(_paths)
+_paths = _load_local_module('paths', 'paths.py')
 
 
 

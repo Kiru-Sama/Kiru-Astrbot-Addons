@@ -18,16 +18,37 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
-# ★ 2026-11-02：安全护栏抽到同目录 safety.py（纯函数），
-#   好处是离线测试能直接 import 断言行为，而不是只断言源码里有这个字符串。
+# ★ 2026-11-02：安全护栏抽到同目录 safety.py（纯函数），可离线测。
+#   用「按路径显式加载 + mtime」——裸 import 会因 sys.modules 残留旧模块，
+#   重装插件后新代码拿到旧类（真机踩过：Transport auth_token 报错）。
+import importlib.util as _ilu
 import os as _os_path
 import sys as _sys_path
 
 _PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.path.abspath(__file__))
-if _PLUGIN_DIR_PATH not in _sys_path.path:
-    _sys_path.path.insert(0, _PLUGIN_DIR_PATH)
+
+
+def _load_local(name: str, filename: str):
+    """按路径加载同目录模块；文件 mtime 变了就重新加载。"""
+    path = _os_path.path.join(_PLUGIN_DIR_PATH, filename)
+    key = "ncd_comfy_" + name
+    try:
+        stamp = _os_path.path.getmtime(path)
+    except OSError:
+        stamp = 0.0
+    cached = _sys_path.modules.get(key)
+    if cached is not None and getattr(cached, "__ncd_mtime__", None) == stamp:
+        return cached
+    spec = _ilu.spec_from_file_location(key, path)
+    mod = _ilu.module_from_spec(spec)
+    setattr(mod, "__ncd_mtime__", stamp)
+    _sys_path.modules[key] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
 try:
-    import safety as _safety
+    _safety = _load_local("safety", "safety.py")
 except Exception:  # noqa: BLE001
     _safety = None
 

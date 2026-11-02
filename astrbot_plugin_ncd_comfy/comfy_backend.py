@@ -27,16 +27,40 @@ from pathlib import Path
 
 from astrbot.api import logger
 
-# ★ 2026-11-02（S2）：HTTP 收发统一走 comfy_transport.Transport（纯 stdlib、可离线测）。
-#   ComfyClient 只保留进程管理 / 排队 / 进度解析，不再自己拼 urllib。
+import importlib.util as _ilu
 import os as _os_path
 import sys as _sys_path
 
 _PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.path.abspath(__file__))
-if _PLUGIN_DIR_PATH not in _sys_path.path:
-    _sys_path.path.insert(0, _PLUGIN_DIR_PATH)
-import comfy_transport as transport_mod
-import comfy_settings as settings_mod
+
+
+def _load_local(name: str, filename: str):
+    """按路径加载同目录模块；文件 mtime 变了就重新加载。
+
+    ★ 2026-11-02：裸 `import xxx` 的模块名不带插件前缀，AstrBot 重载插件时
+      清不掉 sys.modules 里的旧模块 —— 重装后新代码会拿到旧类
+      （真机表现：`Transport.__init__() got an unexpected keyword argument`）。
+      这里用唯一模块名 + mtime 判断，重装就会刷新。
+    """
+    path = _os_path.path.join(_PLUGIN_DIR_PATH, filename)
+    key = "ncd_comfy_" + name
+    try:
+        stamp = _os_path.path.getmtime(path)
+    except OSError:
+        stamp = 0.0
+    cached = _sys_path.modules.get(key)
+    if cached is not None and getattr(cached, "__ncd_mtime__", None) == stamp:
+        return cached
+    spec = _ilu.spec_from_file_location(key, path)
+    mod = _ilu.module_from_spec(spec)
+    setattr(mod, "__ncd_mtime__", stamp)
+    _sys_path.modules[key] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+transport_mod = _load_local("transport", "comfy_transport.py")
+settings_mod = _load_local("settings", "comfy_settings.py")
 
 
 
