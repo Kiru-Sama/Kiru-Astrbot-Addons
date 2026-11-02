@@ -102,10 +102,17 @@ class Transport:
             with _OPENER.open(req, timeout=timeout or self.timeout) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
-            # ★ 5xx 是「服务端报错」，不是「连不上」——别把 /prompt 500 说成电脑没开机
+            # ★ 2026-11-02（盲审 P1-1）：ComfyUI 的「工作流校验失败」正是 400 +
+            #   {error, node_errors}，不读 body 就只剩一句 "HTTP 400"，用户没法按节点修。
+            detail = ""
+            try:
+                detail = _error_detail_text(exc.read().decode("utf-8", "replace"))
+            except Exception:  # noqa: BLE001
+                detail = ""
+            # 5xx 是「服务端报错」，不是「连不上」——别把 /prompt 500 说成电脑没开机
             if exc.code >= 500:
-                raise ProtocolError(f"ComfyUI 服务端 HTTP {exc.code} @ {path}") from None
-            raise ProtocolError(f"HTTP {exc.code} @ {path}") from None
+                raise ProtocolError(f"ComfyUI 服务端 HTTP {exc.code} @ {path}{detail}") from None
+            raise ProtocolError(f"HTTP {exc.code} @ {path}{detail}") from None
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as exc:
             raise TransportUnreachable(f"连不上 {self.base_url}（{type(exc).__name__}）") from None
 
@@ -266,6 +273,33 @@ class Transport:
         except Exception:  # noqa: BLE001
             raise ProtocolError("queue 返回格式不对") from None
         return {"running": running, "pending": pending}
+
+
+def _error_detail_text(raw: str) -> str:
+    """把 ComfyUI 的错误响应压成一句可读的话。
+
+    校验失败长这样：{"error": {"type": "invalid_prompt", "message": "..."},
+                    "node_errors": {"3": {"class_type": "CheckpointLoaderSimple",
+                                          "errors": [{"message": "Value not in list: ckpt_name ..."}]}}}
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return f"：{raw[:200]}"
+    parts: list[str] = []
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            err = err.get("message") or err.get("type")
+        if err:
+            parts.append(str(err)[:200])
+        node_errors = data.get("node_errors")
+        if isinstance(node_errors, dict) and node_errors:
+            parts.append(_node_errors_text(node_errors))
+    return ("：" + "；".join(p for p in parts if p)) if parts else ""
 
 
 def _node_errors_text(node_errors: dict) -> str:

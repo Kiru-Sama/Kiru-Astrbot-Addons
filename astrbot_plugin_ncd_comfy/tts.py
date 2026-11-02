@@ -65,7 +65,7 @@ EMOTION_ALIASES = {
 
 
 #: 省略号 / 连续点 → 停顿标记（IndexTTS 支持 -0.5s- 这种写法）
-_ELLIPSIS = re.compile(r"(?:…{1,}|\\.{3,}|。{2,}|，{2,}|、{2,})")
+_ELLIPSIS = re.compile(r"(?:…{1,}|\.{3,}|。{2,}|，{2,}|、{2,})")
 
 
 def normalize_pauses(text: str, seconds: float = 1.0) -> str:

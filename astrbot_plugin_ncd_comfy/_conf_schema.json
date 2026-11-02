@@ -543,10 +543,10 @@
     "default": ""
   },
   "comfy_notify_group": {
-    "type": "string",
-    "description": "出错/告警要发到哪个群（可选）",
-    "hint": "填群号。留空 = 不发到群，只写日志与面板。",
-    "default": ""
+    "type": "bool",
+    "description": "群聊里是否给出「出图/语音出错」的提示",
+    "hint": "关掉后群聊里出错只写日志与面板，不在群里说话。",
+    "default": false
   },
   "comfy_quota_counted_jobs_limit": {
     "type": "int",

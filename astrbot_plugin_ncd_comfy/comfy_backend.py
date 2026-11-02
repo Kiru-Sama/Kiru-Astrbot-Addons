@@ -568,6 +568,7 @@ class ComfyClient:
         self._last_used = time.time()
         self._busy = True
         self._model_loaded = True  # 提交就意味着要把模型搬进显存
+        watch = None
         try:
             started = time.time()
             client_id = uuid.uuid4().hex
@@ -624,6 +625,10 @@ class ComfyClient:
                 raise ComfyError("ComfyUI 跑完了，但没有任何图片输出（工作流里要留 SaveImage）")
             return {"images": images, "seconds": round(time.time() - started, 1)}
         finally:
+            # ★ 2026-11-02（盲审 P2-1）：提交失败时 watch 不会被内层 finally 取消，
+            #   会带着 WebSocket 活到 deadline；这里兜底取消。
+            if watch is not None:
+                watch.cancel()
             self._busy = False
             self._last_used = time.time()
 

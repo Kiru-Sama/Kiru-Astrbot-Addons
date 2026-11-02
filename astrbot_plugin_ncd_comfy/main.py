@@ -615,6 +615,10 @@ class NcdComfyPlugin(star.Star):
         """
         try:
             sender = str(event.get_sender_id() or "")
+            # ★ 2026-11-02（盲审 P3）：配置为空时 sender 与 _DEPUTY_ADMIN 都是 ""，
+            #   相等就会往下走进「副管理员」分支 —— 必须先排除空值。
+            if not self._DEPUTY_ADMIN or not sender:
+                return False
             if sender != self._DEPUTY_ADMIN:
                 return False
             gid = str(event.get_group_id() or "")
@@ -1766,7 +1770,8 @@ class NcdComfyPlugin(star.Star):
         else:
             items = model_paths.scan(
                 self._categories(kind),
-                min_mb=max(0.0, self._conf_float("comfy_min_model_gb", 0.5)),
+                # ★ 2026-11-02（盲审 P2）：配置是 GB，scan 要的是 MB，别把 0.5GB 当 0.5MB
+                min_mb=max(0.0, self._conf_float("comfy_min_model_gb", 0.5)) * 1024,
             )
         want = str(meta.get("model_dir") or "").lower()
         if want:
@@ -2188,7 +2193,13 @@ class NcdComfyPlugin(star.Star):
 
     async def _llm_is_local(self, event: AstrMessageEvent) -> bool:
         """当前会话用的模型是不是本机（30 秒缓存；拿不到按本地处理，宁可多卸一次）。"""
-        cached = getattr(self, "_llm_local_cache", None)
+        # ★ 2026-11-02（盲审 P2-2）：缓存按 umo 分键。原来只有一个全局值，
+        #   多 provider/多会话时会把「本地/云端」判断串用（选错同步/异步路径）。
+        cache_map = getattr(self, "_llm_local_cache_map", None)
+        if cache_map is None:
+            cache_map = self._llm_local_cache_map = {}
+        key = str(getattr(event, "unified_msg_origin", "") or "")
+        cached = cache_map.get(key)
         if cached and time.time() - cached[0] < 30:
             return cached[1]
         local = True
@@ -2202,7 +2213,10 @@ class NcdComfyPlugin(star.Star):
                 local = self._is_local_base(base)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 读取 provider 失败（按本地处理）: {exc}")
-        self._llm_local_cache = (time.time(), local)
+        cache_map[key] = (time.time(), local)
+        if len(cache_map) > 200:
+            keep = sorted(cache_map.items(), key=lambda kv: kv[1][0])[-100:]
+            self._llm_local_cache_map = dict(keep)
         return local
 
     @staticmethod
@@ -2849,10 +2863,18 @@ class NcdComfyPlugin(star.Star):
             spec = spec.strip()
             if not spec:
                 continue
+            # ★ 2026-11-02（盲审 P1-2）："+名字" 是「叠加」语法，查库要剥掉 "+"，
+            #   但返回时必须把 "+" 带回去，否则异步路径会报「LoRA「+鬼针草」不在这一族」。
+            add_on = spec.startswith("+")
+            if add_on:
+                spec = spec[1:].strip()
+                if not spec:
+                    continue
             name_part, _, strength = spec.partition(":")
+            prefix = "+" if add_on else ""
             try:
                 self._resolve_name(name_part, pool, "LoRA")
-                out_specs.append(spec)
+                out_specs.append(prefix + spec)
                 continue
             except ComfyError:
                 pass
@@ -2866,7 +2888,7 @@ class NcdComfyPlugin(star.Star):
                 os.path.basename(str(other or name_part).replace("/", "\\")), pool
             )
             if same:
-                out_specs.append(f"{same}:{strength}" if strength else same)
+                out_specs.append(prefix + (f"{same}:{strength}" if strength else same))
                 notes.append(f"{os.path.basename(str(other or name_part))} → {same}（{why}）")
                 logger.info(
                     f"[comfy] 入队前修正 LoRA: {name_part} -> {same}（{why}）"
@@ -2894,7 +2916,8 @@ class NcdComfyPlugin(star.Star):
         """
         cfg_model = self._conf_str("comfy_upscale_model")
         cfg_factor = self._conf_float("comfy_upscale_factor", 2.0)
-        if cfg_factor <= 1.0:
+        if cfg_factor <= 0:
+            # ★ 2026-11-02（盲审 P2-15）：schema 说 1.0 = 不放大，别再强改 2.0。
             cfg_factor = 2.0
         text = str(raw or "").strip()
         low = text.lower()
@@ -3114,6 +3137,15 @@ class NcdComfyPlugin(star.Star):
             "reference",
             "denoise",
             "force",
+            # ★ 2026-11-02（盲审 P2-9）：这些也决定出图结果，
+            #   不纳入指纹会把「只改了 control/upscale」的请求误判成重复。
+            "control",
+            "control_type",
+            "control_strength",
+            "control_start",
+            "control_end",
+            "control_preprocess",
+            "upscale",
         )
         data = {}
         for key in keys:
@@ -3897,10 +3929,6 @@ class NcdComfyPlugin(star.Star):
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         notice = self._take_reload_notice(umo)
         already = umo in self._revealed
-        self._revealed[umo] = time.time()
-        if len(self._revealed) > 200:
-            keep = sorted(self._revealed.items(), key=lambda kv: kv[1])[-100:]
-            self._revealed = dict(keep)
         logger.info(f"[comfy] 出图入口被调用：{umo or '（未知会话）'}")
         if already:
             return (
@@ -3910,6 +3938,13 @@ class NcdComfyPlugin(star.Star):
             )
 
         online, why = await self._pc_link_state()
+        # ★ 2026-11-02（盲审 P2-4）：只有「真的把参数契约发出去」才标记入口已开。
+        #   原来先标记再查在线，断线一次之后这个会话就永远只回「入口开过了」，
+        #   而门禁已经放行 → 模型只能靠猜参数出图。
+        self._revealed[umo] = time.time()
+        if len(self._revealed) > 200:
+            keep = sorted(self._revealed.items(), key=lambda kv: kv[1])[-100:]
+            self._revealed = dict(keep)
         if not online:
             return (
                 f"⚠ {why}。\n"

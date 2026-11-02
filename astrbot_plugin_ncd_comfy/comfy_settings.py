@@ -16,6 +16,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+def _as_bool(raw, default: bool = True) -> bool:
+    """把配置里的真假值解析准（bool("false") 是 True，不能用）。"""
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, bool):
+        return raw
+    return str(raw).strip().lower() in ("1", "true", "yes", "on", "是")
+
+
 LOCAL_HOSTS = ("", "127.0.0.1", "localhost", "::1", "0.0.0.0")
 
 
@@ -121,6 +130,6 @@ class ComfySettings:
             idle_timeout=float(i("comfy_idle_timeout", 1800)),
             startup_timeout=float(i("comfy_startup_timeout", 240)),
             gen_timeout=float(i("comfy_timeout", 300)),
-            manage_process=bool(conf.get("comfy_manage_process", True)),
+            manage_process=_as_bool(conf.get("comfy_manage_process", True)),
             extra_args=s("comfy_extra_args"),
         )
