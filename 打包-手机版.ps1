@@ -264,7 +264,10 @@ Move-Item -LiteralPath $tmp -Destination $zip -Force
 $py = 'F:\NapCatDesk\ASTRBOT\.venv\Scripts\python.exe'
 $repack = Join-Path $Work 'repack_phone.py'
 if ((Test-Path $py) -and (Test-Path $repack)) {
-    & $py $repack | Out-Null
+    & $py $repack $stage $zip | Out-Null
+    # ★ 2026-11-02：重打失败必须报错（原来 | Out-Null 吞掉退出码，
+    #   接入版没被重打也会"打包成功"，Linux 解压出来是带反斜杠的坏文件名）
+    if ($LASTEXITCODE -ne 0) { throw "Python 重打失败: exit $LASTEXITCODE" }
     "已用 Python 重打（正斜杠 + UTF-8 文件名）"
 } else {
     Write-Warning "跳过重打：找不到 $py 或 $repack（包里的路径可能仍是反斜杠）"

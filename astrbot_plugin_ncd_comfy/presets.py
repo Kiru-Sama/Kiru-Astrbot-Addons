@@ -18,6 +18,16 @@ LoRA 特别注意：
 
 from __future__ import annotations
 
+# ★ 2026-11-02：_insert_upscale 里用了 logger，但本文件一直没导入 → 放大失败时会
+#   NameError（用户看到出图失败，日志里却什么都没有）。离线单测环境没有 astrbot，
+#   所以退回标准 logging。
+try:
+    from astrbot.api import logger
+except Exception:  # noqa: BLE001
+    import logging
+
+    logger = logging.getLogger('comfy.presets')
+
 import copy
 import json
 from pathlib import Path

@@ -15,14 +15,17 @@ import io
 import symtable
 import sys
 
-DEFAULT_FILES = [
-    r"F:\NapCatDesk\ASTRBOT\data\plugins\astrbot_plugin_ncd_comfy\main.py",
-    r"F:\NapCatDesk\ASTRBOT\data\plugins\astrbot_plugin_ncd_comfy\comfy_backend.py",
-    r"F:\NapCatDesk\ASTRBOT\data\plugins\astrbot_plugin_ncd_comfy\comfy_transport.py",
-    r"F:\NapCatDesk\ASTRBOT\data\plugins\astrbot_plugin_ncd_comfy\comfy_settings.py",
-    r"F:\NapCatDesk\ASTRBOT\data\plugins\astrbot_plugin_ncd_comfy\safety.py",
-    r"F:\NapCatDesk\ASTRBOT\data\plugins\astrbot_plugin_ncd_monitor\main.py",
-]
+DEFAULT_FILES = []
+
+# ★ 2026-11-02：原来是 6 个写死的文件，漏掉了 presets.py 这种
+#   「有 logger 调用但没导入」的模块。改成扫全部插件（排除 测试-*.py 与 __pycache__）。
+import glob as _glob
+
+_PLUGINS_ROOT = r'F:\\NapCatDesk\\ASTRBOT\\data\\plugins'
+for _p in _glob.glob(_PLUGINS_ROOT + '\\\\astrbot_plugin_ncd_*\\\\*.py'):
+    if '测试-' in _p or '__pycache__' in _p:
+        continue
+    DEFAULT_FILES.append(_p)
 
 BUILTIN = set(dir(builtins)) | {"__file__", "__name__", "__doc__", "__package__", "__spec__"}
 
