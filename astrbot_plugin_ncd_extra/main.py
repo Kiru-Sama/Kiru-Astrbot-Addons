@@ -1286,11 +1286,20 @@ class NcdExtraPlugin(star.Star):
         try:
             limit = max(200, min(12000, int(max_chars or 4000)))
             start = max(0, int(offset or 0))
-            if local and attach_files.Path(local).is_file():
-                path = attach_files.Path(local)
-            else:
-                path = attach_files.download(url, attach_files.temp_dir())
-            full = attach_files.extract(path, 10**9, 0)
+
+            def _read_file():
+                # ★ 2026-11-02：下载（urlopen timeout=30）与解析（pdf/docx，音视频还会
+                #   subprocess.run(ffmpeg, timeout=20)）全是同步 IO。以前直接在 async
+                #   工具里跑，一个 20MB PDF 就能让整个 AstrBot 事件循环停摆 30~50 秒，
+                #   期间所有会话不回复、面板不刷新。
+                p = (
+                    attach_files.Path(local)
+                    if local and attach_files.Path(local).is_file()
+                    else attach_files.download(url, attach_files.temp_dir())
+                )
+                return p, attach_files.extract(p, 10**9, 0)
+
+            path, full = await asyncio.to_thread(_read_file)
             text = full[start:start + limit]
         except attach_files.FileError as exc:
             return f"读文件失败：{exc}"
