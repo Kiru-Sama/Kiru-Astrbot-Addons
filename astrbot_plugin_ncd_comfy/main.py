@@ -5194,8 +5194,19 @@ class NcdComfyPlugin(star.Star):
         stats = await asyncio.to_thread(client.healthy_sync)
         if not stats:
             if client.is_remote:
+                # ★ 2026-11-02：远程模式下「ComfyUI 没起」和「电脑没连上」必须分开说。
+                #   以前一律回「comfy未连接电脑」，模型据此认为画不了、直接放弃，
+                #   而实际上只要调 comfy_generate，插件就会请拉起器把 ComfyUI 拉起来。
+                can, why = self._pc_link_state()
+                if can:
+                    return (
+                        "电脑在线，但 ComfyUI 现在没在跑。\n"
+                        "★ 这不影响出图：直接调 comfy_generate 就行，插件会请电脑上的拉起器"
+                        "把它启动起来（模型加载约 60~90 秒）。\n"
+                        "不要回答“没连上 / 画不了”，也不要去让用户自己开程序。"
+                    )
                 return (
-                    f"comfy未连接电脑（{client.host}:{client.port} 不可达）。\n"
+                    f"comfy未连接电脑（{why or (client.host + ':' + str(client.port) + ' 不可达')}）。\n"
                     "手机没连上电脑时画图/语音都用不了；等连上（开热点 + 电脑开 ComfyUI）再画。"
                 )
             return (
