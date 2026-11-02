@@ -43,6 +43,18 @@ class ComfyError(Exception):
     """ComfyUI 后端的可预期失败（要给人话，不是栈）。"""
 
 
+class ComfyUnreachable(ComfyError):
+    """连不上：热点/网络断了、电脑关机、端口不通。"""
+
+
+class ComfyTimeout(ComfyError):
+    """连上了但等结果超时：尺寸太大、步数太多、显存不够在换页。"""
+
+
+class ComfyExecutionError(ComfyError):
+    """ComfyUI 执行报错：工作流/参数/节点异常（带节点原因）。"""
+
+
 def _exit_text(code: int | None) -> str:
     """把 Windows 的 4294967295 归一成 -1，避免用户看到天文数字。"""
     if code is None:
@@ -771,7 +783,7 @@ class ComfyClient:
         except transport_mod.ProtocolError as exc:
             raise ComfyError(f"ComfyUI 拒绝了工作流：{exc}") from exc
         except transport_mod.TransportUnreachable as exc:
-            raise ComfyError(f"连不上 ComfyUI：{exc}") from exc
+            raise ComfyUnreachable(f"连不上 ComfyUI：{exc}") from exc
 
     async def _wait_history(self, prompt_id: str) -> dict:
         """等出图结果：委托 Transport（内含每 15 秒探活 + 连续 3 次失败中止）。"""
@@ -779,14 +791,14 @@ class ComfyClient:
         try:
             return await asyncio.to_thread(self.transport.wait, prompt_id, deadline)
         except transport_mod.TransportTimeout:
-            raise ComfyError(
+            raise ComfyTimeout(
                 f"等 ComfyUI 出图超过 {self.gen_timeout:.0f} 秒还没结果。"
                 "（第一次跑大模型会慢一些；还不行就看 comfy_timeout 配置和显存）"
             ) from None
         except transport_mod.TransportUnreachable as exc:
-            raise ComfyError(f"电脑断线（{exc}）") from exc
+            raise ComfyUnreachable(f"电脑断线（{exc}）") from exc
         except transport_mod.ExecutionError as exc:
-            raise ComfyError(f"ComfyUI 执行出错：{exc}") from exc
+            raise ComfyExecutionError(f"ComfyUI 执行出错：{exc}") from exc
 
     async def fetch_image(self, image: dict) -> bytes:
         """按 /view 取回图片字节。"""
@@ -797,6 +809,8 @@ class ComfyClient:
                 image.get("subfolder", ""),
                 image.get("type", "output"),
             )
+        except transport_mod.TransportUnreachable as exc:
+            raise ComfyUnreachable(f"取图失败（连不上）: {exc}") from exc
         except transport_mod.TransportError as exc:
             raise ComfyError(f"取图失败: {exc}") from exc
 

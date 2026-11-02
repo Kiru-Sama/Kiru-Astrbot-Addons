@@ -1431,6 +1431,29 @@ class NcdComfyPlugin(star.Star):
             self._client_key = key
         return self._client_obj
 
+    @staticmethod
+    def _comfy_error_hint(exc: Exception) -> str:
+        """把三类错误翻成用户能照着做的提示。"""
+        from comfy_backend import ComfyExecutionError, ComfyTimeout, ComfyUnreachable
+
+        nl = chr(10)
+        if isinstance(exc, ComfyUnreachable):
+            return (
+                "出图失败（连不上电脑）：" + str(exc) + nl
+                + "★ 看热点有没有断、电脑是否开机；常驻看护通常十几秒内会拉起 ComfyUI。"
+            )
+        if isinstance(exc, ComfyTimeout):
+            return (
+                "出图失败（等太久）：" + str(exc) + nl
+                + "★ 先把尺寸/步数调小试试；确定电脑没问题再调大 comfy_timeout。"
+            )
+        if isinstance(exc, ComfyExecutionError):
+            return (
+                "出图失败（ComfyUI 报错）：" + str(exc) + nl
+                + "★ 多是参数或显存问题，按上面的节点报错改；换小一点的分辨率通常就好了。"
+            )
+        return "出图失败：" + str(exc)
+
     def _save_audit_thumb(self, data: bytes) -> str:
         """被拦的图只留 96px 小图（不落原图），给面板核对用。"""
         try:
@@ -4158,7 +4181,7 @@ class NcdComfyPlugin(star.Star):
                         max_pixels,
                     )
                 except (presets.WorkflowError, ValueError) as exc:
-                    return f"出图失败：{exc}"
+                    return self._comfy_error_hint(exc)
                 warn_early = sizing.warn_side(max_side)
                 if not force and max(w_early, h_early) > warn_early:
                     return _canvas_reminder(w_early, h_early, warn_early)
@@ -4251,7 +4274,7 @@ class NcdComfyPlugin(star.Star):
             graph = presets.load_graph(preset_name)
             info = presets.summarize(graph)
         except presets.WorkflowError as exc:
-            return f"出图失败：{exc}"
+            return self._comfy_error_hint(exc)
 
         max_side = self._conf_int("comfy_max_side", 1920)
         max_pixels = int(self._conf_float("comfy_max_mp", 2.7648) * 1e6)
@@ -4308,7 +4331,7 @@ class NcdComfyPlugin(star.Star):
                 size, width, height, (info["width"], info["height"]), max_side, max_pixels
             )
         except ValueError as exc:
-            return f"出图失败：{exc}"
+            return self._comfy_error_hint(exc)
 
         # 前 3 名：出队快照里的画幅上限（1080）在这里钳；群聊/管理员不受影响。
         w, h = self._quota_clamp_size(event, w, h)
@@ -4363,7 +4386,7 @@ class NcdComfyPlugin(star.Star):
                 if not await asyncio.to_thread(_pre.healthy_sync):
                     await _pre.ensure_server()
             except ComfyError as exc:
-                return f"出图失败：{exc}"
+                return self._comfy_error_hint(exc)
 
         # 底模（只在当前预设的家族目录里找；跨族直接拒绝并给推荐）
         model_name = ""
@@ -4483,7 +4506,7 @@ class NcdComfyPlugin(star.Star):
                         {"name": resolved, "strength": max(0.0, min(2.0, strength))}
                     )
             except (ComfyError, ValueError) as exc:
-                return f"出图失败：{exc}" + TOOL_RETRY_HINT
+                return self._comfy_error_hint(exc) + TOOL_RETRY_HINT
 
         # 默认风格 LoRA（moss 专属）：只在用户没指定风格 LoRA 时叠加。
         # ★ 2026-11-01：跟「加速 LoRA」是两个槽位 —— comfy_default_lora 是 8 步蒸馏加速，
@@ -4712,7 +4735,7 @@ class NcdComfyPlugin(star.Star):
                 data = await client.fetch_image(image)
             except ComfyError as exc:
                 logger.warning(f"[comfy] 出图失败: {exc}")
-                return f"出图失败：{exc}" + TOOL_RETRY_HINT
+                return self._comfy_error_hint(exc) + TOOL_RETRY_HINT
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"[comfy] 出图异常: {exc}", exc_info=True)
                 return f"出图失败：{type(exc).__name__}: {exc}" + TOOL_RETRY_HINT
