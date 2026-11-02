@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import ipaddress
+import urllib.request
 import os
 import socket
 from pathlib import Path
@@ -110,3 +111,25 @@ def prune_files(
     except OSError:
         pass
     return removed, overflow
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """拒绝跟随 3xx（SSRF 校验只对首跳有效）。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def fetch_public(url: str, timeout: float = 15.0, max_bytes: int = 12 * 1024 * 1024) -> bytes:
+    """下载公网 URL：先校验地址，再禁重定向读取。"""
+    err = public_url_error(url)
+    if err:
+        raise ValueError(err)
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "Mozilla/5.0 (AstrBot ncd_comfy)"}
+    )
+    with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
+        return resp.read(max_bytes)

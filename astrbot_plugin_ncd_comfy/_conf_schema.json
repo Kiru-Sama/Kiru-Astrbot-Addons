@@ -45,6 +45,12 @@
     "hint": "★ 配合 comfy_host 使用：电脑上跑 comfy_launcher.py，这里填它的地址，\n例如 http://192.168.137.1:8200。\n\n填了之后，插件发现远程 ComfyUI 没在跑时，会先请电脑把它拉起来再出图——\n你就不用先开 ComfyUI 了，只要电脑开着。\n\n电脑端启动：python comfy_launcher.py --port 8200（建议开机自启）",
     "default": ""
   },
+  "comfy_manage_process": {
+    "type": "bool",
+    "description": "是否允许插件自己拉起 ComfyUI 进程",
+    "hint": "默认开。PC 上已有计划任务/看护在管进程时关掉它，避免两边抢 8199 端口。",
+    "default": true
+  },
   "comfy_extra_paths": {
     "type": "string",
     "description": "extra_model_paths.yaml 路径（留空 = <comfy_dir>\\ComfyUI\\extra_model_paths.yaml）",

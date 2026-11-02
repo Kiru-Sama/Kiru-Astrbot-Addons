@@ -55,6 +55,7 @@ class ComfySettings:
     idle_timeout: float = 1800.0
     startup_timeout: float = 240.0
     gen_timeout: float = 300.0
+    manage_process: bool = True
     extra_args: str = ""
     output_dir: str = ""
     temp_dir: str = ""
@@ -120,5 +121,6 @@ class ComfySettings:
             idle_timeout=float(i("comfy_idle_timeout", 1800)),
             startup_timeout=float(i("comfy_startup_timeout", 240)),
             gen_timeout=float(i("comfy_timeout", 300)),
+            manage_process=bool(conf.get("comfy_manage_process", True)),
             extra_args=s("comfy_extra_args"),
         )

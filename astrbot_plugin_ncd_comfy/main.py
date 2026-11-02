@@ -2615,16 +2615,9 @@ class NcdComfyPlugin(star.Star):
                 if err:
                     logger.warning(f"[comfy] 拒绝非公网取图（{err}）: {u[:80]}")
                     return None
-                import urllib.request
-
-                def _read():
-                    req = urllib.request.Request(
-                        u, headers={"User-Agent": "Mozilla/5.0 (AstrBot ncd_comfy)"}
-                    )
-                    with urllib.request.urlopen(req, timeout=15) as resp:
-                        return resp.read(12 * 1024 * 1024)
-
-                return await asyncio.to_thread(_read)
+                # ★ 2026-11-02：走 safety.fetch_public —— 先校验公网、禁止 3xx 跳转，
+                #   否则「只校验首跳」会被 302 绕过（盲审 P1-3）。
+                return await asyncio.to_thread(_safety.fetch_public, u, 15.0)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 读取历史参考图失败: {exc}")
         return None
@@ -5463,9 +5456,13 @@ class NcdComfyPlugin(star.Star):
             import urllib.request
             from urllib.parse import unquote, urlparse
 
-            try:
+            def _download() -> bytes:
                 with urllib.request.urlopen(raw, timeout=30) as resp:
-                    data = resp.read()
+                    return resp.read(32 * 1024 * 1024)
+
+            try:
+                # ★ 2026-11-02：下载放线程池（原来在 async 里同步跑，断网卡 30 秒）
+                data = await asyncio.to_thread(_download)
             except Exception as exc:  # noqa: BLE001
                 raise ComfyError(f"下载参考音频失败：{raw}（{exc}）") from exc
             name = unquote(os.path.basename(urlparse(raw).path)) or "参考音频.wav"

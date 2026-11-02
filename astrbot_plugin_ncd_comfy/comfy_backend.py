@@ -118,6 +118,7 @@ class ComfyClient:
             extra_args = settings.extra_args
             output_dir = settings.output_dir
             temp_dir = settings.temp_dir
+            self.manage_process = bool(getattr(settings, "manage_process", True))
         # ★ 最小便携版根目录（里面有 python_embeded 和 ComfyUI 两个子目录）
         self.comfy_dir = Path(str(comfy_dir or "").strip().strip('"'))
         # 留空 = <comfy_dir>\python_embeded\python.exe
@@ -164,6 +165,8 @@ class ComfyClient:
         self._busy = False  # 正在出图（空闲自退要跳过）
         self._starting = False  # 正在冷启动（同样不能杀）
         self._model_loaded = False  # 显存里有没有模型（决定该不该先卸模型）
+        if not hasattr(self, "manage_process"):
+            self.manage_process = True
 
     # ------------------------------------------------------------------
     #  路径
@@ -229,10 +232,8 @@ class ComfyClient:
           代价：拿不到文件大小（调用方自己处理 size_mb=0）。
         """
         try:
-            with urllib.request.urlopen(
-                f"{self.base}/object_info/{node}", timeout=timeout
-            ) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+            # ★ 2026-11-02：走 Transport（统一 token / no-redirect / 错误分类）
+            data = self.transport._request("GET", f"/object_info/{node}", None, timeout)
         except Exception:  # noqa: BLE001
             # 网络失败：有旧清单就继续用旧的（远程 ComfyUI 重启/抖动时别中断出图）
             old = self._obj_cache.get((node, field))
@@ -338,6 +339,12 @@ class ComfyClient:
                     "请确认：① 电脑已启动 ComfyUI 且用 --listen 0.0.0.0；"
                     "② 手机连的是电脑热点（本机 IP 应形如 192.168.137.x）；"
                     "③ 电脑防火墙已放行该端口。"
+                )
+            if not getattr(self, "manage_process", True):
+                raise ComfyUnreachable(
+                    f"本机 ComfyUI 没起来（{self.host}:{self.port}），"
+                    "且 comfy_manage_process=false —— 按配置不自己拉起，"
+                    "等 Windows 计划任务/看护把它带起来再试。"
                 )
             if await asyncio.to_thread(self._port_busy):
                 raise ComfyError(
@@ -721,9 +728,21 @@ class ComfyClient:
                 await emit(force=True)
             # ★ 必须和 /prompt 用同一个 clientId：ComfyUI 只把执行事件发给提交者
             # ★ 也跟着 self.host 走 —— 远程 ComfyUI 时 ws 也要连对方，否则拿不到进度
-            url = f"ws://{self.host}:{self.port}/ws?clientId={client_id or uuid.uuid4().hex}"
+            scheme = "wss" if self.base.startswith("https") else "ws"
+            url = f"{scheme}://{self.host}:{self.port}/ws?clientId={client_id or uuid.uuid4().hex}"
             deadline = time.time() + max(60.0, self.gen_timeout)
-            async with websockets.connect(url, max_size=8 * 1024 * 1024) as ws:
+            _tok = getattr(self.settings_connection, "auth_token", "")
+            _kw = {"max_size": 8 * 1024 * 1024}
+            ws = None
+            if _tok:
+                _hdr = {"Authorization": f"Bearer {_tok}"}
+                try:
+                    ws = await websockets.connect(url, additional_headers=_hdr, **_kw)
+                except TypeError:      # 旧版 websockets 用 extra_headers
+                    ws = await websockets.connect(url, extra_headers=_hdr, **_kw)
+            else:
+                ws = await websockets.connect(url, **_kw)
+            async with ws:
                 if ready is not None:
                     ready.set()
                 while time.time() < deadline:
@@ -867,14 +886,19 @@ class ComfyClient:
             f"\r\n--{boundary}--\r\n"
         ).encode("utf-8")
         body = head + data + tail
+        up_headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+        _tok = getattr(self.settings_connection, "auth_token", "")
+        if _tok:
+            up_headers["Authorization"] = f"Bearer {_tok}"
         req = urllib.request.Request(
             f"{self.base}/upload/image",
             data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            headers=up_headers,
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=60) as r:
+            # no-redirect + 统一 opener
+            with transport_mod._OPENER.open(req, timeout=60) as r:
                 raw = r.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             raise ComfyError(f"上传参考图失败：HTTP {exc.code}") from exc
