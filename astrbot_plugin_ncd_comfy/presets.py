@@ -471,8 +471,12 @@ def _insert_upscale(
         #   显存会先炸掉。所以先把输入压到 max_side / model_scale 以内再喂给模型。
         scale = float(model_scale or 4.0)
         if max_side and scale > 1.0 and width * scale > max_side:
-            pre_w = max(64, int(width * max_side / (width * scale)) // 8 * 8)
-            pre_h = max(64, int(height * max_side / (height * scale)) // 8 * 8)
+            # ★ 2026-11-02（盲审 P2-8）：按 max(width,height) 算统一比例。
+            #   原来 width*max_side/(width*scale) 恒等于 max_side/scale，
+            #   会把 720×960 先压成 640×640（方形）再送进 4x 模型，细节先失真。
+            ratio = max_side / (max(width, height) * scale)
+            pre_w = max(64, int(width * ratio) // 8 * 8)
+            pre_h = max(64, int(height * ratio) // 8 * 8)
             graph["upscale_preshrink"] = {
                 "class_type": "ImageScale",
                 "inputs": {

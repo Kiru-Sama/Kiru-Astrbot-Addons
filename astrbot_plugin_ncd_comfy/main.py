@@ -2821,7 +2821,7 @@ class NcdComfyPlugin(star.Star):
             except Exception:  # noqa: BLE001
                 model = "-"
             lora = self._conf_str("comfy_default_lora")
-            style_lora = (self._conf_str("comfy_default_style_lora") or "").strip()
+            (self._conf_str("comfy_default_style_lora") or "").strip()
             steps = self._conf_int("comfy_steps", 0)
             cfg = self._conf_float("comfy_cfg", 0.0)
             bits = [f"默认风格：{preset} 预设（{label}），底模 {model}"]
@@ -3092,6 +3092,11 @@ class NcdComfyPlugin(star.Star):
             sender_id = ""
         # 新任务覆盖旧失败提醒，避免上一张的“失败”串到这一张。
         self._pending_notes.pop(umo, None)
+        # ★ 2026-11-02（盲审 P2-16）：全局排队上限，防止一个活跃群无限堆积
+        pending = sum(len(v) for v in self._img_queues.values())
+        _cap = self._conf_int("comfy_queue_max_pending", 50)
+        if _cap > 0 and pending >= _cap:
+            return f"画图队列已满（{pending}/{_cap}），等前面画完再试。"
         self._img_seq += 1
         self._img_queues.setdefault(umo, []).append(
             {
@@ -3810,6 +3815,11 @@ class NcdComfyPlugin(star.Star):
         if cat in ("", "auto", "自动"):
             return (["sfw"] if self._is_group_chat(event) else ["sfw", "nsfw"]), None
         if cat in ("sfw", "nsfw", "all"):
+            # ★ 2026-11-02（盲审 P2-13）：群聊里显式传 nsfw/all 也要降级成 sfw，
+            #   否则「群聊只查 sfw」的安全承诺可以被一个参数绕过去。
+            if self._is_group_chat(event) and cat in ("nsfw", "all"):
+                logger.warning(f"[comfy] 群聊请求了 {cat} 法典，已降级为 sfw")
+                return ["sfw"], "群聊只查 sfw（已自动降级）"
             return (["sfw", "nsfw"] if cat == "all" else [cat]), None
         return ["sfw"], None
 
@@ -4873,7 +4883,7 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 生成图注失败（只丢文案，不影响出图）: {exc}")
             caption = ""
-        _send_umo = str(getattr(event, "unified_msg_origin", "") or "")
+        str(getattr(event, "unified_msg_origin", "") or "")
         # ★ 2026-11-01：按用户要求回退「风控限时」——不再有冷却、待发队列、自动补发。
         #   发送失败就按旧版处理：先试纯图，再失败就把错误回给模型（用户能看见原因）。
         # ★ 2026-11-01（按用户要求）：图 + 图注 放同一条消息链，**失败就直接报错，不做回退**。

@@ -553,5 +553,11 @@
     "description": "计数上限（超过不再累加，防止无限增长）",
     "hint": "默认 70。和封禁阈值（ban_after）一致即可。",
     "default": 70
+  },
+  "comfy_queue_max_pending": {
+    "type": "int",
+    "description": "排队上限（张）",
+    "hint": "全局待画任务超过这个数就拒绝新请求，默认 50；填 0 = 不限。",
+    "default": 50
   }
 }
