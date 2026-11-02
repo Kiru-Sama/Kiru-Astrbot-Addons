@@ -876,16 +876,6 @@ class ComfyClient:
         except json.JSONDecodeError as exc:
             raise ComfyError(f"上传参考图返回的不是 JSON: {raw[:200]!r}") from exc
 
-    def _fetch_sync(self, query: str) -> bytes:
-        try:
-            with urllib.request.urlopen(f"{self.base}/view?{query}", timeout=60) as r:
-                data = r.read()
-        except Exception as exc:  # noqa: BLE001
-            raise ComfyError(f"取图失败: {exc}") from exc
-        if not data:
-            raise ComfyError("ComfyUI 返回了空图片")
-        return data
-
     async def queue_status(self) -> dict:
         """队列里还有几个在跑（给状态工具用，连不上就返回空）。"""
         try:
@@ -958,28 +948,3 @@ class ComfyClient:
         """显存里现在是不是还压着模型（给状态工具看）。"""
         return self._model_loaded
 
-
-def _fmt_node_errors(node_errors: dict) -> str:
-    parts = []
-    for node_id, info in (node_errors or {}).items():
-        if not isinstance(info, dict):
-            parts.append(f"{node_id}: {info}")
-            continue
-        cls = info.get("class_type") or ""
-        errs = info.get("errors") or []
-        for e in errs:
-            msg = e.get("message") or ""
-            det = e.get("details") or ""
-            parts.append(f"节点 {node_id}({cls}) {msg} {det}".strip())
-    return "；".join(parts) or "（没有详细信息）"
-
-
-def _fmt_status_messages(status: dict) -> str:
-    parts = []
-    for msg in status.get("messages") or []:
-        if isinstance(msg, (list, tuple)) and len(msg) >= 2 and msg[0] == "execution_error":
-            info = msg[1] or {}
-            node = info.get("node_type") or info.get("node_id") or ""
-            text = info.get("exception_message") or info.get("exception_type") or ""
-            parts.append(f"{node}: {text}".strip(": "))
-    return "；".join(parts) or "（ComfyUI 没给出原因，看日志）"
