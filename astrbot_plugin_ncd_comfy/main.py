@@ -17,6 +17,19 @@
 from __future__ import annotations
 
 import asyncio
+# ★ 2026-11-02：安全护栏抽到同目录 safety.py（纯函数），
+#   好处是离线测试能直接 import 断言行为，而不是只断言源码里有这个字符串。
+import os as _os_path
+import sys as _sys_path
+
+_PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.path.abspath(__file__))
+if _PLUGIN_DIR_PATH not in _sys_path.path:
+    _sys_path.path.insert(0, _PLUGIN_DIR_PATH)
+try:
+    import safety as _safety
+except Exception:  # noqa: BLE001
+    _safety = None
+
 import base64
 import contextvars
 import difflib
@@ -2528,52 +2541,17 @@ class NcdComfyPlugin(star.Star):
         return [r for r in roots if r]
 
     def _path_allowed(self, p, umo: str = "") -> bool:
-        """realpath 后必须落在允许的根目录内（防 ../ 逃逸与符号链接）。"""
-        try:
-            rp = os.path.realpath(str(p))
-        except Exception:  # noqa: BLE001
+        """realpath 后必须落在允许的根目录内（实现在 safety.path_allowed）。"""
+        if _safety is None:
             return False
-        for root in self._allowed_roots(umo):
-            if rp == root or rp.startswith(root + os.sep):
-                return True
-        return False
+        return _safety.path_allowed(p, self._allowed_roots(umo))
 
     @staticmethod
     def _public_url_error(url: str) -> str:
-        """http(s) 取图前的 SSRF 兜底：拒环回/内网/链路本地/保留地址。"""
-        import ipaddress
-        import socket
-        from urllib.parse import urlparse
-
-        try:
-            host = (urlparse(str(url)).hostname or "").strip()
-        except Exception:  # noqa: BLE001
-            return "地址解析失败"
-        if not host:
-            return "地址为空"
-        candidates = [host]
-        try:
-            ipaddress.ip_address(host)
-        except ValueError:
-            try:
-                candidates = [socket.gethostbyname(host)]
-            except Exception:  # noqa: BLE001
-                return "域名解析失败"
-        for cand in candidates:
-            try:
-                ip = ipaddress.ip_address(cand)
-            except ValueError:
-                continue
-            if (
-                ip.is_private
-                or ip.is_loopback
-                or ip.is_link_local
-                or ip.is_reserved
-                or ip.is_multicast
-                or ip.is_unspecified
-            ):
-                return "只允许公网地址（拒绝内网/本机）"
-        return ""
+        """http(s) 取图前的 SSRF 兜底（实现在 safety.public_url_error）。"""
+        if _safety is None:
+            return "安全模块未加载"
+        return _safety.public_url_error(url)
 
     async def _image_url_bytes(self, url: str, umo: str = "") -> bytes | None:
         """把历史里的 image_url（data URL / 本地路径 / http）变成字节。"""
@@ -5804,29 +5782,12 @@ class NcdComfyPlugin(star.Star):
             self._history_write(umo, kept)
             return kept
 
-        removed = 0
-        MAX_DELETE = 20
-        overflow = 0
-        try:
-            for fp in folder.iterdir():
-                if not fp.is_file() or fp.name == HISTORY_FILE:
-                    continue
-                if fp.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
-                    continue
-                if fp.name in keep_names:
-                    continue
-                try:
-                    if fp.stat().st_mtime >= cutoff:
-                        continue          # 文件本身还新：不动
-                except OSError:
-                    continue
-                if removed >= MAX_DELETE:
-                    overflow += 1
-                    continue
-                fp.unlink(missing_ok=True)
-                removed += 1
-        except OSError:
-            pass
+        if _safety is None:
+            self._history_write(umo, kept)
+            return kept
+        removed, overflow = _safety.prune_files(
+            folder, keep_names, cutoff, skip_names=(HISTORY_FILE,), max_delete=20
+        )
         if overflow:
             logger.warning(
                 f"[comfy] 历史裁剪一次要删 {removed + overflow} 张，超过单次上限 "
