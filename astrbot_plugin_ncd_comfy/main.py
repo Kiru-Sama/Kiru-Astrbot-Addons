@@ -1459,7 +1459,7 @@ class NcdComfyPlugin(star.Star):
         #   不能只比主机与路径（否则改了配置要重载插件才生效）。
         key = settings
         if self._client_obj is not None and self._client_key != key:
-            self._client_obj.stop()
+            self._client_obj.stop()  # 同步函数里（stop 内部等待已降到 2 秒）
             self._client_obj = None
         if self._client_obj is None:
             self._client_obj = ComfyClient(settings=settings, log_path=self._log_path())
@@ -5916,7 +5916,7 @@ class NcdComfyPlugin(star.Star):
                     "我不会去动别人的进程）。"
                 )
                 return
-            client.stop()
+            await asyncio.to_thread(client.stop)
             logger.info("[comfy] 用户执行 /comfyui off，已停止 ComfyUI")
             yield event.plain_result("已关闭 ComfyUI。下次出图或发语音时会自动重新拉起。")
             return
@@ -6068,7 +6068,7 @@ class NcdComfyPlugin(star.Star):
         self._img_worker = None
         try:
             if self._client_obj is not None:
-                self._client_obj.stop()
+                await asyncio.to_thread(self._client_obj.stop)
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 停止 ComfyUI 失败（忽略）: {exc}")
         self._client_obj = None

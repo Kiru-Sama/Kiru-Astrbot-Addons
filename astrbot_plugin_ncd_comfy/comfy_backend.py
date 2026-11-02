@@ -487,7 +487,7 @@ class ComfyClient:
                 return
             if self._should_stop_idle():
                 logger.info(f"[comfy] 空闲超过 {self.idle_timeout:.0f} 秒，关掉 ComfyUI 进程")
-                self.stop()
+                await asyncio.to_thread(self.stop)
                 return
             if self._should_unload_models():
                 logger.info(f"[comfy] 空闲超过 {self.unload_timeout:.0f} 秒，卸载模型（进程留着）")
@@ -962,7 +962,9 @@ class ComfyClient:
             try:
                 proc.terminate()
                 try:
-                    proc.wait(timeout=8)
+                    # ★ 2026-11-02（盲审 P1-4）：8 秒太长——即使有同步调用点，
+                    #   也别把事件循环按在那儿 8 秒。
+                    proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     proc.kill()
             except Exception as exc:  # noqa: BLE001
