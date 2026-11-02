@@ -2330,13 +2330,19 @@ class NcdComfyPlugin(star.Star):
             logger.warning(f"[comfy] 卸载本地模型失败（继续出图）: {exc}")
 
     def _has_pending_jobs(self) -> bool:
-        """队列里还有没有活（决定要不要立刻释放 ComfyUI 显存）。"""
+        """队列里还有没有别的话（决定要不要立刻释放 ComfyUI 显存）。
+
+        ★ 2026-11-02 自查：不能用 _gen_waiting —— 它包含【当前任务自己】，
+          而 +1 在进槽时、-1 在最外层 finally（晚于本判断），
+          用它会让本方法恒为 True → 模型永远不卸。
+          所以看「别的会话还有排队」或「除自己之外还有人在等」（>1）。
+        """
         try:
             if any(self._img_queues.values()):
                 return True
         except Exception:  # noqa: BLE001
             pass
-        return bool(getattr(self, "_gen_waiting", 0))
+        return int(getattr(self, "_gen_waiting", 0) or 0) > 1
 
     async def _free_comfy(self) -> None:
         """生成结束就释放 ComfyUI 显存，好让 LM Studio 下次自动重载。"""
