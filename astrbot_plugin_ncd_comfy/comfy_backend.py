@@ -324,7 +324,7 @@ class ComfyClient:
                     if self.launcher
                     else "（可配 comfy_launcher 让电脑自动启动 ComfyUI）"
                 )
-                raise ComfyError(
+                raise ComfyUnreachable(
                     f"远程 ComfyUI 不可达：{self.host}:{self.port}。{hint}"
                     "请确认：① 电脑已启动 ComfyUI 且用 --listen 0.0.0.0；"
                     "② 手机连的是电脑热点（本机 IP 应形如 192.168.137.x）；"
