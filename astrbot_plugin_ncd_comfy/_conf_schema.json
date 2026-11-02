@@ -530,5 +530,16 @@
     "type": "float",
     "default": 0.8,
     "hint": "0.6~0.9 比较稳；1.0 容易把别的风格压掉。"
+  },
+  "ncd_primary_admin": {
+    "type": "string",
+    "description": "主管理员 QQ（留空 = 不启用管理员功能）",
+    "hint": "填了之后，这个号在群里/私聊里执行管理命令会被当作管理员。",
+    "default": ""
+  },
+  "ncd_deputy_admin": {
+    "type": "string",
+    "description": "副管理员 QQ（仅当主管理员不在本群时才生效，留空 = 不启用）",
+    "default": ""
   }
 }

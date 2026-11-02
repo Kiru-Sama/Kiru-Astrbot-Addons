@@ -37,6 +37,9 @@ class NcdFeedbackPlugin(star.Star):
         super().__init__(context, config)
         self.context = context
         self._conf: dict[str, Any] = config or {}
+        # 管理员 QQ 从配置读（源码/发布包里不再出现私人 QQ 号）
+        self._PRIMARY_ADMIN = str(self._conf.get('ncd_primary_admin') or '').strip()
+        self._DEPUTY_ADMIN = str(self._conf.get('ncd_deputy_admin') or '').strip()
         self._items: list[dict] | None = None
         self._register_web()
 
@@ -155,8 +158,10 @@ class NcdFeedbackPlugin(star.Star):
         except Exception:  # noqa: BLE001
             return ""
 
-    _PRIMARY_ADMIN = "3384998797"
-    _DEPUTY_ADMIN = "3028227446"
+    # ★ 2026-11-02：管理员 QQ 不再写死在代码里（发布包会带 PII）。
+    #   值从配置读：ncd_primary_admin / ncd_deputy_admin（见 _conf_schema.json）。
+    _PRIMARY_ADMIN = ""
+    _DEPUTY_ADMIN = ""
 
     def _deputy_allowed(self, event) -> bool:
         """副管理员：只在「主管理员不在当前群」时按管理员对待。

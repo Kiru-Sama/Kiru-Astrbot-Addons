@@ -22,5 +22,16 @@
     "description": "分类（逗号分隔）",
     "hint": "/反馈 画风 想要像素风…… 第一段要是这些词之一，否则归到「其他」。",
     "default": "画风,底模,功能,bug,其他"
+  },
+  "ncd_primary_admin": {
+    "type": "string",
+    "description": "主管理员 QQ（留空 = 不启用管理员功能）",
+    "hint": "填了之后，这个号在群里/私聊里执行管理命令会被当作管理员。",
+    "default": ""
+  },
+  "ncd_deputy_admin": {
+    "type": "string",
+    "description": "副管理员 QQ（仅当主管理员不在本群时才生效，留空 = 不启用）",
+    "default": ""
   }
 }
