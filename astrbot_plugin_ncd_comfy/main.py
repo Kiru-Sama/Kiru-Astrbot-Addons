@@ -76,7 +76,13 @@ except ImportError:  # 离线单测
     import quota_store
     import sizing
     import tts
-    from comfy_backend import ComfyClient, ComfyError
+    from comfy_backend import (
+    ComfyClient,
+    ComfyError,
+    ComfyExecutionError,
+    ComfyTimeout,
+    ComfyUnreachable,
+)
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DIR_NAME = os.path.basename(PLUGIN_DIR)
@@ -1434,8 +1440,6 @@ class NcdComfyPlugin(star.Star):
     @staticmethod
     def _comfy_error_hint(exc: Exception) -> str:
         """把三类错误翻成用户能照着做的提示。"""
-        from comfy_backend import ComfyExecutionError, ComfyTimeout, ComfyUnreachable
-
         nl = chr(10)
         if isinstance(exc, ComfyUnreachable):
             return (
