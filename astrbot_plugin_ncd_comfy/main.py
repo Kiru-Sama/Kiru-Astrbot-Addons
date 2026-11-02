@@ -183,7 +183,8 @@ QUOTA_CONFIG_BOUNDS = {
 #   现在不写具体名字，一律以 comfy_tools 现报的配置为准。
 RECOMMENDED_HINT = (
     "\n★ 非用户特别要求，直接用默认预设（底模/步数/CFG 都已配好），不要手动换底模；"
-    "少步数（4~14 步）会自动叠加速 LoRA；想加风格用 lora 参数叠加即可。"
+    "少步数（4~14 步）会自动叠加速 LoRA（仅当配置了默认 LoRA 或 moss 预设）；"
+    "想加风格用 lora 参数叠加即可。"
 )
 
 LORA_NOISE = ("年轻", "年幼", "幼", "成年", "年上", "大", "小", "v1", "v2", "v3",
@@ -2328,6 +2329,15 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 卸载本地模型失败（继续出图）: {exc}")
 
+    def _has_pending_jobs(self) -> bool:
+        """队列里还有没有活（决定要不要立刻释放 ComfyUI 显存）。"""
+        try:
+            if any(self._img_queues.values()):
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        return bool(getattr(self, "_gen_waiting", 0))
+
     async def _free_comfy(self) -> None:
         """生成结束就释放 ComfyUI 显存，好让 LM Studio 下次自动重载。"""
         if not self._conf_bool("comfy_handoff", True):
@@ -2370,8 +2380,10 @@ class NcdComfyPlugin(star.Star):
                         self._last_job = dict(self._job)
                     self._job = {}
                     self._publish_state(force=True)
-                    if handoff:
+                    if handoff and not self._has_pending_jobs():
                         # 生成完释放显存，本地模型下次请求会自动重载
+                        # ★ 2026-11-02（盲审 P2-1）：队列里还有任务就别卸——
+                        #   否则每张图都要重新加载模型（20~90 秒）。
                         await self._free_comfy()
         finally:
             self._gen_waiting = max(0, self._gen_waiting - 1)
@@ -3162,6 +3174,13 @@ class NcdComfyPlugin(star.Star):
 
         job = queues[user].pop(0)
         if not queues[user]:
+            # ★ 2026-11-02（盲审 P3-6）：没有任务的会话从轮转表里摘掉，
+            #   否则 _img_user_order 只增不减，长期运行会缓慢膨胀。
+            try:
+                if user in self._img_user_order:
+                    self._img_user_order.remove(user)
+            except Exception:  # noqa: BLE001
+                pass
             queues.pop(user, None)
         if user == last:
             self._img_consecutive = consecutive + 1
@@ -3923,7 +3942,8 @@ class NcdComfyPlugin(star.Star):
             f"{self._history_days()} 天 / {self._history_limit()} 张，不会串到别的会话。",
             "超时兜底：comfy_output() 可以把已经画好的图直接发出来，不用重画。",
             self._default_style_line(),
-            "★ 步数 4~14 = 加速档：自动叠加速 LoRA（强度 1.0）+ CFG 1；"
+            "★ 步数 4~14 = 加速档：会自动叠加速 LoRA（强度按配置，默认 0.8）；"
+            "**CFG 压到 1 只在 moss 预设生效**，其他预设 CFG 仍是默认值。"
             "要风格就再用 lora 参数叠一个，会串在加速 LoRA 后面，**不会替换它**。",
             "非用户特别要求，别手动指定 model；4~14 步时也别把加速 LoRA 换掉。",
             "",

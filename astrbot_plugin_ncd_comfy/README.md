@@ -10,7 +10,7 @@ ComfyUI 按需拉起、空闲先卸模型再关进程。
 
 | preset | 说明 | 底模 | 默认参数 | 正常耗时 |
 |---|---|---|---|---|
-| `sdxl` | SDXL 单文件底模，最快 | `SDXL\novaAnimeXL_ilV140` | 720×960 · 30 步 · CFG 5.5 · euler/simple | ~25 s |
+| `sdxl` | SDXL 单文件底模，最快 | `SDXL\novaAnimeXL_ilV140` | 720×960 · 28 步 · CFG 6.0 · euler/simple | ~25 s |
 | `krea2` | KREA2（UNET + qwen3vl） | `Krea2-MuseByStable_v30Turbo_fp8` | 720×960 · 10 步 · CFG 1.0 | ~30 s |
 | `anima` | Anima（UNET + Qwen3-0.6B） | `anima\novaAnimeAM_v6029B` | 720×960 · 22 步 · CFG 5.5 | ~40 s |
 | `moss` | MOSS-Image（带 SkipLayerGuidance） | `MOSS\mossImage_sft_pruned_int8` | 720×960 · 50 步 · CFG 4.5 · er_sde | ~60 s |
@@ -54,7 +54,7 @@ preset 并在结果里提示（2.6.18+）；找不到或多族都有，则明确
 | `comfy_output` | 把本会话画过的图直接发出来（`index` / `file`） |
 | `comfy_gallery` | 按提示词/时间翻本会话历史图 |
 
-没先调 `comfy_tools` 就直接调其它工具 → 返回错误并指正。
+没先调 `comfy_tools` 就直接调 `comfy_generate` / `comfy_models` / `comfy_status` → 返回错误并指正（`comfy_output` / `comfy_gallery` / `comfy_say` / `comfy_tag_lookup` / `comfy_prompt_help` 不受门禁限制）。
 
 ## 云端 API 异步出图
 

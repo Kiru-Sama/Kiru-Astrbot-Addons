@@ -4,3 +4,4 @@ desc: 五个通用小命令：/compact、/tooldisplay、/token、/get time、/�
 author: 本地自用
 version: 1.4.4
 repo: ""
+astrbot_version: ">=4.28.0,<4.31"

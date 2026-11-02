@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import os
+
 import json
 import os
 import pickle
@@ -40,9 +42,9 @@ def default_tag_root() -> Path | None:
     env = os.environ.get("PROMPT_LIB_DIR", "").strip()
     if env:
         return Path(env)
-    candidates = [
-        Path(r"F:\Deepseek Harness WorkTable\本地提示词库\本地提示词库查询项目"),
-    ]
+    env2 = os.environ.get("NCD_PROMPT_LIB", "").strip()
+    # ★ 2026-11-02：空字符串不能 Path("")——那是 Path(".")，会在当前目录误找词库
+    candidates = [Path(env2)] if env2 else []
     for path in candidates:
         if (path / "词库" / "idx2.pkl").is_file():
             return path

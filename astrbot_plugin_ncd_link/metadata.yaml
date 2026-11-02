@@ -4,3 +4,4 @@ desc: 盯 QQ 是否在线（OneBot get_status），断线恢复后主动提示�
 version: 1.0.5
 author: Kiru
 repo: https://github.com/Kiru-Sama/Kiru-Astrbot-Addons
+astrbot_version: ">=4.28.0,<4.31"

@@ -4,3 +4,4 @@ desc: 端到端链路监控。把 QQ(SnowLuma) / AstrBot / LM Studio / 宿主机
 author: 本地自用
 version: 1.7.36
 repo: ""
+astrbot_version: ">=4.28.0,<4.31"

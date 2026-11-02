@@ -4,3 +4,4 @@ desc: 收集「想画的风格没 LoRA / 缺底模 / 奇怪的小要求」，落
 version: 1.0.3
 author: 本地自用
 repo: ""
+astrbot_version: ">=4.28.0,<4.31"
