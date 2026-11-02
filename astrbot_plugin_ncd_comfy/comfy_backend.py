@@ -139,7 +139,10 @@ class ComfyClient:
         self.log_path = Path(log_path) if log_path else None
         self.base = f"http://{self.host}:{self.port}"
         self.transport = transport_mod.Transport(
-            self.base, timeout=10.0, client_id="ncd-comfy"
+            self.base,
+            timeout=10.0,
+            client_id="ncd-comfy",
+            auth_token=getattr(settings, "auth_token", "") if settings else "",
         )
 
         self._proc: subprocess.Popen | None = None

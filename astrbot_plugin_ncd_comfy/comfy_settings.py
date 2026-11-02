@@ -23,8 +23,10 @@ LOCAL_HOSTS = ("", "127.0.0.1", "localhost", "::1", "0.0.0.0")
 class ComfySettings:
     comfy_dir: str = ""
     python: str = ""
+    scheme: str = "http"
     port: int = 8199
     host: str = "127.0.0.1"
+    auth_token: str = ""
     launcher: str = ""
     unload_timeout: float = 300.0
     idle_timeout: float = 1800.0
@@ -36,7 +38,10 @@ class ComfySettings:
 
     @property
     def base_url(self) -> str:
-        return f"http://{self.host}:{self.port}"
+        scheme = (self.scheme or "http").strip().lower()
+        if scheme not in ("http", "https"):
+            scheme = "http"
+        return f"{scheme}://{self.host}:{self.port}"
 
     @property
     def is_remote(self) -> bool:
@@ -68,10 +73,13 @@ class ComfySettings:
             except (TypeError, ValueError):
                 return default
 
+        scheme = s("comfy_scheme", "http").lower()
         return cls(
             comfy_dir=s("comfy_dir"),
             python=s("comfy_python"),
+            scheme=scheme if scheme in ("http", "https") else "http",
             port=i("comfy_port", 8199),
+            auth_token=s("comfy_token"),
             host=s("comfy_host") or "127.0.0.1",
             launcher=s("comfy_launcher"),
             unload_timeout=float(i("comfy_unload_timeout", 300)),

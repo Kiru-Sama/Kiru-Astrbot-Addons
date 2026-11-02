@@ -74,10 +74,12 @@ class Transport:
         base_url: str,
         timeout: float = DEFAULT_TIMEOUT,
         client_id: str = "ncd-comfy",
+        auth_token: str = "",
     ) -> None:
         self.base_url = str(base_url or "").rstrip("/")
         self.timeout = float(timeout or DEFAULT_TIMEOUT)
         self.client_id = client_id
+        self.auth_token = str(auth_token or "").strip()
 
     # ── 底层 ──────────────────────────────────────────────────────
     def _request(
@@ -90,6 +92,8 @@ class Transport:
         url = self.base_url + path
         data = None
         headers = {"User-Agent": f"Mozilla/5.0 ({self.client_id})"}
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
         if payload is not None:
             data = json.dumps(payload).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -234,8 +238,12 @@ class Transport:
             {"filename": filename, "subfolder": subfolder, "type": type_}
         )
         url = self.base_url + "/view?" + q
+        headers = {}
+        if self.auth_token:
+            headers["Authorization"] = f"Bearer {self.auth_token}"
+        req = urllib.request.Request(url, headers=headers)
         try:
-            with _OPENER.open(url, timeout=30.0) as resp:
+            with _OPENER.open(req, timeout=30.0) as resp:
                 data = resp.read()
         except urllib.error.HTTPError as exc:
             raise ProtocolError(f"取图 HTTP {exc.code}") from None
