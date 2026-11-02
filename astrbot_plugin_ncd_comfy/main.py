@@ -4179,6 +4179,18 @@ class NcdComfyPlugin(star.Star):
         else:
             logger.info("[comfy] 前台参数解析开始")
 
+        # ★ 2026-11-02（盲审 P2-3）：先把清单预热进线程池。
+        #   后面十几处 _scan / _scan_loras / _presets_with_model 都是同步调用，
+        #   远程模式下每次都是 8 秒 HTTP；预热后命中的是 60 秒缓存（微秒级），
+        #   事件循环不会再被卡住几十秒。
+        try:
+            _preset0 = self._preset("")
+            await asyncio.to_thread(self._scan, _preset0)
+            await asyncio.to_thread(self._scan_loras, _preset0)
+        except Exception:  # noqa: BLE001
+            pass
+
+
         # ★ 云端 API：把整张图丢到后台，先把聊天放出去。
         #   本地模型必须同步 —— 它和 ComfyUI 抢显存。
         #   带“消息里的图”做参考时也走同步：临时图可能在事件结束后被清掉。
@@ -4201,8 +4213,8 @@ class NcdComfyPlugin(star.Star):
                     f"出图失败：没有工作流「{preset}」。可选："
                     + "、".join(presets.PRESETS)
                 )
-            preset_early, _ = self._auto_preset_for_model(
-                model, self._preset(want_early)
+            preset_early, _ = await asyncio.to_thread(
+                self._auto_preset_for_model, model, self._preset(want_early)
             )
             # ★ 控制类型必须在这里就校验：入队后再报错，模型已经对用户说了
             #   “在画了”，用户会先看到失败再看到一句假装在画的话。
@@ -4722,7 +4734,9 @@ class NcdComfyPlugin(star.Star):
                         ctrl_bytes, f"ctrl_{uuid.uuid4().hex[:8]}.png"
                     )
                 # ▲ 可选放大（超分）：四个精简工作流本身没有超分节点，动态接在 VAEDecode 之后
-                up_model, up_factor = self._parse_upscale(upscale)
+                up_model, up_factor = await asyncio.to_thread(
+                    self._parse_upscale, upscale
+                )
                 # 0 原本表示「不限」，但配合 4x 模型很容易把显存打爆 → 兜底 2560
                 up_max_side = self._conf_int("comfy_upscale_max_side", 2560) or 2560
                 # 控制 LoRA：按 basename 在当前族里解析（库结构变了也不会断）
@@ -5194,6 +5208,12 @@ class NcdComfyPlugin(star.Star):
         gate = self._gate(event, "comfy_models")
         if gate:
             return gate
+        # ★ 2026-11-02（盲审 P2-3）：先预热清单（线程池），避免下面同步扫描卡住事件循环
+        try:
+            await asyncio.to_thread(self._scan_loras, self._preset(preset) if preset else None)
+        except Exception:  # noqa: BLE001
+            pass
+
         want = (kind or "model").strip().lower()
         if want in ("upscale", "upscaler", "放大", "超分"):
             try:
@@ -5219,7 +5239,9 @@ class NcdComfyPlugin(star.Star):
         if want in ("lora", "loras", "lo"):
             # ★ 支持按预设过滤 + 关键词搜索：库里 79 个，固定截断会让模型找不到目标
             #   （实际踩过：bot 说「anima 的清单里没有 DeepSeek」，其实是被切掉了）
-            scoped = self._scan_loras(self._preset(preset) if preset else None)
+            scoped = await asyncio.to_thread(
+                self._scan_loras, self._preset(preset) if preset else None
+            )
             items = scoped
             kw = str(q or "").strip().lower()
             if kw:
