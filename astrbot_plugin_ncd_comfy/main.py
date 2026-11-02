@@ -577,8 +577,18 @@ class NcdComfyPlugin(star.Star):
                     raise ValueError(f"{short} 必须是整数") from None
                 low, high = QUOTA_CONFIG_BOUNDS[short]
                 candidate[key] = max(low, min(high, num))
-        # ★ 只写自己的 override 文件；不再写框架配置、不再替换 self._conf
-        self._save_quota_override(candidate)
+        # ★ 2026-11-02（盲审 P1-3）：只固化「本次真的改到」的键。
+        #   原来把合并视图的全部 15 个键都写进 override，导致之后在配置页
+        #   改这些值永远被 override 压住（面板锁死框架）。
+        touched = {
+            QUOTA_CONFIG_SPEC[short][0]
+            for short in values
+            if short in QUOTA_CONFIG_SPEC
+        }
+        merged = dict(self._quota_override())
+        for key in touched:
+            merged[key] = candidate[key]
+        self._save_quota_override(merged)
         eng = getattr(self, "_quota_engine_obj", None)
         if eng is not None:
             eng.config = self._quota_config()
@@ -2521,7 +2531,7 @@ class NcdComfyPlugin(star.Star):
             logger.warning(f"[comfy] 冻结参考图失败: {exc}")
             return ""
 
-    def _stabilize_reference(self, reference: str) -> str:
+    def _stabilize_reference(self, reference: str, umo: str = "") -> str:
         """异步入队前把 temp 参考图复制成稳定副本，避免 worker 启动时已被清理。"""
         ref = str(reference or "").strip()
         if not ref:
@@ -2549,6 +2559,12 @@ class NcdComfyPlugin(star.Star):
         try:
             path = Path(ref)
             if not path.is_file():
+                return ref
+            # ★ 2026-11-02（盲审 P1-2）：先过白名单再复制。
+            #   否则模型把 reference 写成 .../temp/任意文件，就能借 ref_cache
+            #   这个「合法目录」把内容送进 ComfyUI 的 input。
+            if not self._path_allowed(path, umo):
+                logger.warning(f"[comfy] 拒绝复制白名单外的参考图: {path}")
                 return ref
             if "temp" not in [part.lower() for part in path.parts]:
                 return ref
@@ -4176,8 +4192,10 @@ class NcdComfyPlugin(star.Star):
                     )
                 control = frozen_ctrl
             # temp 图可能在异步入队后才被清理；入队前先固定成稳定副本。
-            reference = self._stabilize_reference(reference)
-            control = self._stabilize_reference(control)
+            # ★ 注意：这里不能用 umo_ev —— 它在本函数更靠后才赋值（会 UnboundLocalError）
+            _ref_umo = str(getattr(event, "unified_msg_origin", "") or "")
+            reference = self._stabilize_reference(reference, _ref_umo)
+            control = self._stabilize_reference(control, _ref_umo)
             # ★ 画幅提醒必须在这里就拦住。入队后再返回提醒，这一轮模型看不到，
             #   用户只收到半句话、图也永远不出（Kirusama 1152x1536 连卡五次）。
             if size or width or height:
