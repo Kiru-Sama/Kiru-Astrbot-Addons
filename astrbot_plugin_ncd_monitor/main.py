@@ -544,7 +544,7 @@ def _is_private_session(umo: Any) -> bool:
 import importlib.util as _ilu
 import os as _os_path
 
-_PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.abspath(__file__))
+_PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.path.abspath(__file__))
 _TEXT_UTILS_PATH = _os_path.path.join(_PLUGIN_DIR_PATH, 'text_utils.py')
 _spec = _ilu.spec_from_file_location('ncd_monitor_text_utils', _TEXT_UTILS_PATH)
 _text_utils = _ilu.module_from_spec(_spec)
