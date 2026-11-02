@@ -409,6 +409,17 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 初始化面板状态失败（忽略）: {exc}")
         self._register_quota_api()
+        # ★ 2026-11-02：重启/重载后，如果 24h 内有群 @ 过 bot，
+        #   主动发言循环要自己恢复（否则要等下一次 @ 才启动）。
+        try:
+            self._proactive_load()
+            if self._proactive_mentions and self._proactive_task is None:
+                self._proactive_task = asyncio.create_task(self._proactive_loop())
+                logger.info(
+                    f"[comfy] 主动发言循环已恢复（{len(self._proactive_mentions)} 个群）"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 主动发言循环启动失败（忽略）: {exc}")
 
     # ------------------------------------------------------------------
     #  配置
@@ -1080,6 +1091,41 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 发言统计失败（忽略）: {exc}")
 
+    async def api_proactive(self):
+        """只读：各群「最后被 @ 时间 / 最后主动发言时间」（排障用）。"""
+        try:
+            self._proactive_load_if_needed()
+            if self._proactive_mentions and (
+                self._proactive_task is None or self._proactive_task.done()
+            ):
+                self._proactive_task = asyncio.create_task(self._proactive_loop())
+                logger.info("[comfy] 主动发言循环已启动（接口触发）")
+            now = time.time()
+            rows = []
+            for umo, ts in sorted(self._proactive_mentions.items()):
+                rows.append(
+                    {
+                        "umo": umo,
+                        "mention_ago_min": round((now - float(ts)) / 60.0, 1),
+                        "sent_ago_min": round((now - float(self._proactive_sent.get(umo, 0.0))) / 60.0, 1)
+                        if self._proactive_sent.get(umo)
+                        else None,
+                        "interval_min": int(proactive.interval_for(float(ts), now) // 60),
+                    }
+                )
+            return {
+                "enabled": self._conf_bool("comfy_proactive_enabled", True),
+                "quiet": [
+                    self._conf_int("comfy_proactive_quiet_start", 2),
+                    self._conf_int("comfy_proactive_quiet_end", 7),
+                ],
+                "loop_running": bool(self._proactive_task and not self._proactive_task.done()),
+                "groups": rows,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"[comfy] 读取主动发言状态失败: {exc}", exc_info=True)
+            return {"error": f"{type(exc).__name__}: {exc}"}
+
     def _register_quota_api(self) -> None:
         try:
             self.context.register_web_api(
@@ -1105,6 +1151,12 @@ class NcdComfyPlugin(star.Star):
                 self.api_quota_sponsor,
                 ["POST"],
                 "设置赞助者单独额度",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/proactive",
+                self.api_proactive,
+                ["GET"],
+                "群聊主动发言状态（调试用）",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 注册额度面板 API 失败: {exc}")
@@ -3788,6 +3840,7 @@ class NcdComfyPlugin(star.Star):
                 self._proactive_load_if_needed()
             self._proactive_mentions[umo] = time.time()
             self._proactive_save()
+            logger.info(f"[comfy] 群活跃记录（被 @）：{umo}")
             if self._proactive_task is None or self._proactive_task.done():
                 self._proactive_task = asyncio.create_task(self._proactive_loop())
         except Exception as exc:  # noqa: BLE001
