@@ -109,8 +109,10 @@ def fit_within(width: int, height: int, max_side: int, max_pixels: int) -> tuple
     """
     w, h = max(1, int(width)), max(1, int(height))
     scale = min(1.0, max_side / max(w, h), (max_pixels / (w * h)) ** 0.5)
-    w2 = max(SIZE_MIN_SIDE, int(w * scale) // 8 * 8)
-    h2 = max(SIZE_MIN_SIDE, int(h * scale) // 8 * 8)
+    # ★ 2026-11-02（盲审 P3-3）：下界不能超过原图，否则 100×100 的参考图
+    #   会被"放大"成 256×256；这里取 min(最小边, 原图对齐值) 作下界。
+    w2 = max(min(SIZE_MIN_SIDE, (w // 8) * 8), int(w * scale) // 8 * 8)
+    h2 = max(min(SIZE_MIN_SIDE, (h // 8) * 8), int(h * scale) // 8 * 8)
     return w2, h2
 
 

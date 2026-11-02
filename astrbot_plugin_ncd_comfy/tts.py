@@ -82,7 +82,7 @@ def normalize_pauses(text: str, seconds: float = 1.0) -> str:
     #   塞在句子中间会被当成普通文字念出来；而且节点会裁掉每段尾部静音，
     #   所以标记值要比“想要的静音”大 1 秒左右（2.5s 标记 ≈ 1.1s 可感停顿）。
     spaced = _ELLIPSIS.sub(f"\\n{marker}\\n", raw)
-    return re.sub(r"\\n{2,}", "\\n", spaced).strip()
+    return re.sub(r"\n{2,}", "\n", spaced).strip()
 
 
 def normalize_emotion(name: str) -> str:

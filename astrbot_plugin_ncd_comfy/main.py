@@ -524,34 +524,6 @@ class NcdComfyPlugin(star.Star):
                 values[short] = int(value)
         return values
 
-    def _write_comfy_config(self, data: dict) -> None:
-        """原子写插件配置文件；保留文件里其他非额度字段。"""
-        current: dict = {}
-        try:
-            if COMFY_CONFIG.is_file():
-                current = json.loads(
-                    COMFY_CONFIG.read_text(encoding="utf-8-sig")
-                )
-                if not isinstance(current, dict):
-                    current = {}
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(f"[comfy] 读配置文件失败，按当前内存合并: {exc}")
-        current.update(data)
-        COMFY_CONFIG.parent.mkdir(parents=True, exist_ok=True)
-        tmp = COMFY_CONFIG.with_name(COMFY_CONFIG.name + ".tmp")
-        try:
-            tmp.write_text(
-                json.dumps(current, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            os.replace(tmp, COMFY_CONFIG)
-        except Exception:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-            raise
-
     def _quota_config_update(self, values: dict) -> dict:
         if not isinstance(values, dict):
             raise ValueError("config 必须是对象")
@@ -4002,7 +3974,7 @@ class NcdComfyPlugin(star.Star):
         # ★ 2026-10-30：这里原来把当前预设的底模**全列出来**（最多 20 条），
         #   一次工具返回就几百字，模型上下文被模型清单挤满，而且每次调用都重复。
         #   改成只报一句「有几个」，真要清单让模型按需调 comfy_models。
-        models = self._scan(default)
+        models = await asyncio.to_thread(self._scan, default)
         if models:
             lines += [
                 "",
@@ -4426,11 +4398,13 @@ class NcdComfyPlugin(star.Star):
         model_name = ""
         if (model or "").strip():
             try:
-                model_name = self._resolve_name(model, self._scan(preset_name), "底模")
+                # ★ 2026-11-02（盲审 P1-4）：远程拉清单是同步 HTTP（8 秒），走线程池
+                _models = await asyncio.to_thread(self._scan, preset_name)
+                model_name = self._resolve_name(model, _models, "底模")
             except ComfyError:
                 meta = presets.PRESETS[preset_name]
                 # 清单整个是空的时候，别硬说「模型不属于这族」——多半是清单没拉到
-                if not self._scan(preset_name) and getattr(self._client(), "is_remote", False):
+                if not _models and getattr(self._client(), "is_remote", False):
                     _c = self._client()
                     return (
                         f"出图失败：拿不到 ComfyUI 的底模清单（{_c.host}:{_c.port}）。\n"
@@ -5207,7 +5181,7 @@ class NcdComfyPlugin(star.Star):
             return "\n".join(lines)
 
         preset_name = self._preset(preset)
-        items = self._scan(preset_name)
+        items = await asyncio.to_thread(self._scan, preset_name)
         label = presets.PRESETS[preset_name]["label"]
         if not items:
             _cli = self._client()

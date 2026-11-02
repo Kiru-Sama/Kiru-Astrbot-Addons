@@ -394,6 +394,13 @@ class ComfyClient:
         try:
             if self.log_path:
                 self.log_path.parent.mkdir(parents=True, exist_ok=True)
+                # ★ 2026-11-02：超过 20MB 先轮转一次（原来只 append，手机端已 8MB
+                #   且日志里含用户完整提示词，随目录分发是隐私风险）
+                try:
+                    if self.log_path.is_file() and self.log_path.stat().st_size > 20 * 1024 * 1024:
+                        os.replace(self.log_path, self.log_path.with_name(self.log_path.name + ".1"))
+                except OSError:
+                    pass
                 opened = open(self.log_path, "ab")  # noqa: SIM115 —— 交给子进程持有
                 out = opened
             else:
