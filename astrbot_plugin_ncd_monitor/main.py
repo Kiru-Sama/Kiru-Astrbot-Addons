@@ -560,6 +560,15 @@ _is_think_part = _text_utils.is_think_part
 _plugin_content_text = _text_utils.plugin_content_text
 _strip_think_parts = _text_utils.strip_think_parts
 
+_CONTENT_PARSE_PATH = _os_path.path.join(_PLUGIN_DIR_PATH, 'content_parse.py')
+_cp_spec = _ilu.spec_from_file_location('ncd_monitor_content_parse', _CONTENT_PARSE_PATH)
+_content_parse = _ilu.module_from_spec(_cp_spec)
+_cp_spec.loader.exec_module(_content_parse)
+_IMG_ATTACH_RE = _content_parse.IMG_ATTACH_RE
+_QUOTED_IMG_RE = _content_parse.QUOTED_IMG_RE
+_SYS_REMINDER_RE = _content_parse.SYS_REMINDER_RE
+
+
 class _StreamSummary:
     """流结束时【没等到完整结果】的兜底载体。
 
@@ -1485,129 +1494,21 @@ class Main(star.Star):
     #   [图片]
     #   [Image Attachment: path F:\...\media_image_20261011103041287_38a1.jpg]
     # 第二个含完整路径 —— 那既是噪音，也是【定位原图的线索】，所以留捕获组
-    _IMG_ATTACH_RE = re.compile(r"\[Image Attachment:\s*path\s*([^\]]*)\]")
-    # ★ 引用消息里的图【是另一套写法】，上面那个正则匹配不到：
-    #     [Image Attachment in quoted message: path F:\...\media_image_xxx.jpg]
-    #   （astr_main_agent.py:746）
-    #   注意 "Image Attachment" 后面是 " in quoted message:" 而不是 ":"，
-    #   所以两个正则不会互相误伤。
-    #
-    #   ★ 这段标记文本【只在图片真的进了 req.image_urls 之后】才会被追加
-    #     （astr_main_agent.py:1446-1458 直连路径 / :1509-1514 兜底路径），
-    #     失败时写的是 "[Image unavailable]"（:1443）。
-    #     而 openai_source.assemble_context:1404-1408 会把 req.image_urls
-    #     逐个变成 {"type":"image_url"} 内容块。
-    #     => 看到这段标记 == 模型确实收到了这张图。
-    #     所以这里把它当图片处理（给缩略图），而不是留在正文里当噪音。
-    _QUOTED_IMG_RE = re.compile(
-        r"\[Image Attachment in quoted message:\s*path\s*([^\]]*)\]"
-    )
-    # 系统提醒块，形如 <system_reminder>User ID: ..., Nickname: ...</system_reminder>
-    _SYS_REMINDER_RE = re.compile(r"<system_reminder>(.*?)</system_reminder>", re.S)
-
+    # 正则与解析实现都在 content_parse.py（可离线测）
     @classmethod
     def _extract_images(cls, raw: str) -> tuple[str, list[dict[str, str]]]:
-        """从一段文本里挖出图片标记、把它们摘掉，返回 (清洗后文本, 图片列表)。
-
-        两种标记（互不误伤）：
-            [Image Attachment: path <p>]                     ← 直接发的图
-            [Image Attachment in quoted message: path <p>]   ← 引用的图
-
-        ★★ 为什么必须做成共用 helper（踩出来的）：
-          图片标记【两个地方】都有：
-            · 消息 content 里（历史轮次带着的）
-            · extra_user_content_parts 里（本轮的）
-          而 astr_main_agent.py 里产生标记的两处，写的都是 extra parts：
-            :1402-1404  直接发的图 → extra_user_content_parts
-            :744-747    引用的图   → extra_user_content_parts
-          （:1388 / :1446 / :1512 才是把路径塞进 req.image_urls 的地方。）
-
-          先前只在 content 那条路上找标记，于是【本轮新发的图、以及引用的图】
-          在面板上既没有缩略图、也不计数 —— 用户看到的就是"引用图没送到模型"。
-          其实模型收到了（图在 req.image_urls 里），是【面板没显示】。
-          两条路都过一遍这个 helper，就不再依赖"标记到底躺在哪儿"这个版本细节。
-        """
-        if not raw:
-            return "", []
-        images: list[dict[str, str]] = []
-        for path, quoted in [
-            (p, False) for p in cls._IMG_ATTACH_RE.findall(raw)
-        ] + [(p, True) for p in cls._QUOTED_IMG_RE.findall(raw)]:
-            p = path.strip()
-            if not p:
-                continue
-            k = hashlib.sha1(p.encode("utf-8", "ignore")).hexdigest()[:16]
-            if any(im["k"] == k for im in images):
-                continue
-            images.append(
-                {
-                    "k": k,
-                    "n": os.path.basename(p),
-                    "p": p,  # 后端内部用来找原图；发给前端时会被去掉
-                    "q": quoted,
-                }
-            )
-        text = cls._IMG_ATTACH_RE.sub("", raw)
-        text = cls._QUOTED_IMG_RE.sub("", text)
-        return text, images
+        """实现在 content_parse.extract_images（可离线测）。"""
+        return _content_parse.extract_images(raw)
 
     @classmethod
     def _split_content(cls, raw: str) -> tuple[str, str, list[dict[str, str]]]:
-        """把一条消息拆成三个独立部分：正文 / 系统提醒 / 图片列表。
-
-        为什么要拆：实测一条带图消息在上下文里长这样 ——
-            [0] text        "[图片]"
-            [1] text        "[Image Attachment: path F:\\...\\media_image_xxx.jpg]"
-            [2] text        "<system_reminder>User ID: 100000001, ...</system_reminder>"
-            [3] image_url   "data:image/jpeg;base64,..."
-
-        全塞进正文的话，气泡里就是 185 字符的一坨路径 + 提醒文字，
-        又难看又占地方。拆开之后：
-            正文   -> 正常气泡文字
-            提醒   -> 小字一行，灰色
-            图片   -> 缩略图（靠路径去找原图）
-
-        Returns:
-            (正文, 系统提醒,
-             [{"k": 缩略图缓存键, "n": 文件名, "q": 是否来自引用消息}, ...])
-        """
-        if not raw:
-            return "", "", []
-
-        # 图片标记先摘掉（直接发的 + 引用消息里的，都算模型收到的图）。
-        # quoted 标记留给前端区分显示（引用图加个边框），同一路径只登记一次。
-        text, images = cls._extract_images(raw)
-
-        reminders = [r.strip() for r in cls._SYS_REMINDER_RE.findall(raw) if r.strip()]
-
-        text = cls._SYS_REMINDER_RE.sub("", text)
-        text = text.replace("[图片]", "").replace("🖼", "")
-        # 压掉连续空行、行尾空格、首尾空白
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = "\n".join(line.rstrip() for line in text.split("\n"))
-        text = text.strip()
-        # 正文全是空白行的话就当没有
-        if not text.strip("\n \t"):
-            text = ""
-
-        return text, "\n".join(reminders), images
+        """实现在 content_parse.split_content（可离线测）。"""
+        return _content_parse.split_content(raw)
 
     @classmethod
     def _tidy_text(cls, text: str) -> str:
-        """就地清洗纯文本（保留图片占位、去掉提醒块）。
-
-        用在 system_prompt 和 prompt 上 —— 它们没有图片/提醒结构，
-        只是要压掉开头那几行空白（实测 system_prompt 以 '\\n' 开头，
-        配上 pre-wrap 会让截断区域一片空白）。
-        """
-        if not text:
-            return ""
-        text = cls._SYS_REMINDER_RE.sub(
-            lambda m: "\n📋 " + m.group(1).strip() + "\n", text
-        )
-        text = re.sub(r"\n{3,}", "\n\n", text)
-        text = "\n".join(line.rstrip() for line in text.split("\n"))
-        return text.strip()
+        """实现在 content_parse.tidy_text。"""
+        return _content_parse.tidy_text(text)
 
     @classmethod
     def _split_extra_parts(
