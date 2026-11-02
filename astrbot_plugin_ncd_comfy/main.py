@@ -480,7 +480,7 @@ class NcdComfyPlugin(star.Star):
         else:
             bypass = tuple(str(x) for x in raw)
         return quota.QuotaConfig(
-            window_hour=gi("comfy_quota_window_hour", 8),
+            window_hour=max(0, min(23, gi("comfy_quota_window_hour", 8))),
             global_enabled=gb("comfy_quota_global_enabled", True),
             global_limit=gi("comfy_quota_global_limit", 30),
             throttle_top=gi("comfy_quota_throttle_top", 5),
@@ -2822,7 +2822,7 @@ class NcdComfyPlugin(star.Star):
             cfg = self._conf_float("comfy_cfg", 0.0)
             bits = [f"默认风格：{preset} 预设（{label}），底模 {model}"]
             if lora:
-                strength = self._conf_float("comfy_default_lora_strength", 1.0)
+                strength = self._conf_float("comfy_default_lora_strength", 0.8)
                 bits.append(
                     f"★ 加速 LoRA {os.path.basename(lora)}（强度 {strength:g}）"
                     " —— 步数 4~14 时插件会自动插到最前面，"
@@ -4933,7 +4933,7 @@ class NcdComfyPlugin(star.Star):
                 parts.append(f"{base}:{l['strength']:g}{tag}")
             used.append("LoRA " + "、".join(parts))
             if accel_base and 4 <= int(steps_val) <= 14:
-                used.append(f"4~14 步加速档：已叠加加速 LoRA（强度 {self._conf_float('comfy_default_lora_strength', 1.0):g}）")
+                used.append(f"4~14 步加速档：已叠加加速 LoRA（强度 {self._conf_float('comfy_default_lora_strength', 0.8):g}）")
         if ref_name:
             used.append(f"图生图（普通降噪，denoise {denoise_val:g}）")
         if ctrl_name:

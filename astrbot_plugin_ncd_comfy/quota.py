@@ -98,7 +98,7 @@ class QuotaConfig:
     ban_after: int = 70
     ban_hours: int = 36
     bypass_ids: tuple[str, ...] = ()
-    counted_jobs_limit: int = 2000
+    counted_jobs_limit: int = 70
 
     def __post_init__(self) -> None:
         raw = self.bypass_ids or ()

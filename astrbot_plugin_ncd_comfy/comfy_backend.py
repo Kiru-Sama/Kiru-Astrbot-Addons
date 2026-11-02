@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shlex
@@ -863,9 +864,17 @@ class ComfyClient:
 
         ★ 走 /upload/image（multipart）而不是直接往磁盘写：这样插件拉起的
           服务和你自己开的服务都能用，也不用知道对方的 input 目录在哪。
+        ★ 2026-11-02（盲审 P1-5）：文件名改成【内容哈希】——
+          原来每次 uuid 命名，同一张参考图反复用也会在对方 input 里越堆越多，
+          而 ComfyUI 不会自己清。内容哈希让同图只占一个文件。
         """
         await self.ensure_server()
-        info = await asyncio.to_thread(self._upload_sync, data, filename)
+        digest = hashlib.sha1(data or b"").hexdigest()[:12]
+        ext = os.path.splitext(str(filename or ""))[1].lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".webp", ".wav", ".mp3", ".flac"):
+            ext = ".png"
+        safe_name = f"ncd_{digest}{ext}"
+        info = await asyncio.to_thread(self._upload_sync, data, safe_name)
         name = str(info.get("name") or "")
         if not name:
             raise ComfyError(f"上传参考图失败：{info!r}")

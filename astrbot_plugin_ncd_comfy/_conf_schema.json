@@ -333,12 +333,6 @@
     "hint": "开（默认）：后台审核没过时，合成一条系统通知重新走一轮，让模型自己说“没发，要改描述还是取消”。\n★ 这条通知会作为用户消息进会话历史；每会话 10 分钟最多拉起一次，防止循环。\n关：只发一句固定提示，模型等你下一条消息时才知道。",
     "default": true
   },
-  "comfy_send_block_minutes": {
-    "description": "发图被风控后，该会话冷却多少分钟",
-    "type": "int",
-    "default": 0,
-    "hint": "0 = 关闭（默认）；>0 才会冷却并自动补发。"
-  },
   "comfy_failure_nudge": {
     "type": "bool",
     "description": "出图失败时拉起模型来解释",
@@ -519,12 +513,6 @@
     "hint": "默认 8，即 08:00–次日 08:00；中国时区固定 +8。",
     "default": 8
   },
-  "comfy_send_gap_sec": {
-    "description": "同一会话两次发图的最小间隔（秒）",
-    "type": "int",
-    "default": 0,
-    "hint": "0 = 不限间隔（默认）。"
-  },
   "comfy_default_style_lora": {
     "description": "moss 默认风格 LoRA（用户没指定 LoRA 时自动叠）",
     "type": "string",
@@ -547,5 +535,23 @@
     "type": "string",
     "description": "副管理员 QQ（仅当主管理员不在本群时才生效，留空 = 不启用）",
     "default": ""
+  },
+  "comfy_linkd": {
+    "type": "string",
+    "description": "电脑侧 linkd 的地址（可选）",
+    "hint": "留空 = 自动用 http://<comfy_host>:8201/link/state。linkd 能区分「网络断了」和「ComfyUI 没起」。",
+    "default": ""
+  },
+  "comfy_notify_group": {
+    "type": "string",
+    "description": "出错/告警要发到哪个群（可选）",
+    "hint": "填群号。留空 = 不发到群，只写日志与面板。",
+    "default": ""
+  },
+  "comfy_quota_counted_jobs_limit": {
+    "type": "int",
+    "description": "计数上限（超过不再累加，防止无限增长）",
+    "hint": "默认 70。和封禁阈值（ban_after）一致即可。",
+    "default": 70
   }
 }
