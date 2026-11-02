@@ -71,118 +71,29 @@ ASTRBOT_ROOT = os.path.dirname(
 
 
 def _detect_snowluma_root() -> str:
-    """在 AstrBot 安装目录附近找 SnowLuma，找不到返回空串。
-
-    ★ 只试【固定几个候选位置】，绝不全盘遍历 —— 全盘搜会把事件循环拖死，
-      而且用户自己填一下配置比等它扫盘快得多。
-
-    覆盖的常见布局（以 NapCat 桌面版为例，AstrBot 和 DATA 是同级）：
-        <base>\\ASTRBOT                       ← AstrBot 根
-        <base>\\DATA\\components\\SnowLuma     ← 就是它
-    """
-    base = os.path.dirname(ASTRBOT_ROOT)
-    candidates = [
-        os.path.join(base, "DATA", "components", "SnowLuma"),
-        os.path.join(base, "SnowLuma"),
-        os.path.join(ASTRBOT_ROOT, "DATA", "components", "SnowLuma"),
-        os.path.join(os.path.dirname(base), "DATA", "components", "SnowLuma"),
-    ]
-    for path in candidates:
-        if os.path.isdir(path):
-            return path
-    return ""
+    """实现在 paths.detect_snowluma_root（root 参数化，可在 tmp 树上测）。"""
+    return _paths.detect_snowluma_root(ASTRBOT_ROOT)
 
 
 def _is_lm_unavailable(text: str) -> bool:
-    """这句是不是 AstrBot 的「无模型可用」兜底文案。
-
-    ★ 精确匹配 tool_loop_agent_runner.py:649 的原文。单独抽成函数是为了能测：
-      包装器本身是 async generator、闭包着原函数，不方便在测试里驱动。
-      而"认不认得出这句话"正是包装器唯一需要判断的东西。
-
-    注意别和另一个分支混了（tool_loop_agent_runner.py:642）：
-        "All chat models failed: <类型>: <消息>"   ← 这个带真异常，不需要记
-    """
-    return "available chat models are unavailable" in (text or "")
+    """实现在 paths.is_lm_unavailable。"""
+    return _paths.is_lm_unavailable(text)
 
 
 def _first_match(directory: str, pattern: str) -> str:
-    """在目录里按 pattern 找第一个匹配的文件，找不到返回空串。
-
-    为什么要"找"而不是写死文件名：不同人的 QQ 号不一样，
-    OneBot 配置文件叫 `onebot_<QQ号>.json`、身份库在 `data\\<QQ号>\\` 下。
-    """
-    try:
-        import glob
-
-        hits = sorted(glob.glob(os.path.join(directory, pattern)))
-        return hits[0] if hits else ""
-    except Exception:  # noqa: BLE001
-        return ""
+    """实现在 paths.first_match。"""
+    return _paths.first_match(directory, pattern)
 
 
 def _find_identity_db(sl_dir: str) -> str:
-    """在 SnowLuma 的 data\\<账号>\\ 下挑身份库，挑【最新改动的那个】。
-
-    ★ 实测踩过（2026-10-14）：原来用的是 `_first_match(data\\*, snowluma_identity.db)`，
-      而 `_first_match` 是 `sorted()[0]` —— 于是换号之后**永远读到旧账号那个库**
-      （旧号登出后就不再更新，里面只有 13 个群），新账号进的群一个都查不到名字，
-      面板上就只剩下「群 <群号>」。
-
-      活跃账号的身份库一直在写，所以"最新改动的那个"就是当前账号的。
-      想完全确定，可以在插件配置里填 `snowluma_identity_db` 显式指定。
-    """
-    try:
-        import glob
-
-        hits = glob.glob(os.path.join(sl_dir, "data", "*", "snowluma_identity.db"))
-        best = ""
-        best_mtime = -1.0
-        for path in hits:
-            try:
-                mtime = os.path.getmtime(path)
-            except OSError:
-                continue
-            if mtime > best_mtime:
-                best, best_mtime = path, mtime
-        return best
-    except Exception:  # noqa: BLE001
-        return ""
+    """实现在 paths.find_identity_db（挑最新改动的那份）。"""
+    return _paths.find_identity_db(sl_dir)
 
 
 def _find_onebot_config(sl_dir: str) -> str:
-    """在 SnowLuma 的 config\\ 下挑 OneBot 配置，挑【最新改动的那个】。
+    """实现在 paths.find_onebot_config（挑最新改动的那份）。"""
+    return _paths.find_onebot_config(sl_dir)
 
-    ★ 和 `_find_identity_db` 是同一个坑，这里当时漏改了（2026-10-17 实测复现）：
-      原来用 `_first_match(config, "onebot_*.json")`，它是 `sorted()[0]`，
-      而文件名是 `onebot_<QQ号>.json` —— 号小的那个（也就是换号前的旧账号）
-      永远排在前面，于是换号之后面板一直展示【旧账号】的 OneBot 端点：
-
-        · has_token 说有   （旧号配了 token，新号是空的）
-        · host 显示 127.0.0.1（新号是 0.0.0.0）
-        · ws_clients 显示 0 （新号明明有 1 条 AstrBot 的连接）
-
-      三个数全错，排查连接问题时会被它带偏。活跃账号的配置会随设置变动而更新，
-      所以"最新改动的那个"就是当前账号的。要完全确定，
-      可以在插件配置里填 `snowluma_onebot_config` 显式指定。
-    """
-    try:
-        import glob
-
-        hits = glob.glob(os.path.join(sl_dir, "config", "onebot_*.json"))
-        best = ""
-        best_mtime = -1.0
-        for path in hits:
-            try:
-                mtime = os.path.getmtime(path)
-            except OSError:
-                continue
-            if mtime > best_mtime:
-                best, best_mtime = path, mtime
-        # 一个都没写成功时退回老逻辑，总比空着强
-        return best or _first_match(os.path.join(sl_dir, "config"), "onebot_*.json")
-    except Exception:  # noqa: BLE001
-        return ""
 
 # 插件目录名。前端桥接 SDK 拼出来的请求路径是
 #     /api/v1/plugins/extensions/<插件目录名>/<endpoint>
@@ -567,6 +478,12 @@ _cp_spec.loader.exec_module(_content_parse)
 _IMG_ATTACH_RE = _content_parse.IMG_ATTACH_RE
 _QUOTED_IMG_RE = _content_parse.QUOTED_IMG_RE
 _SYS_REMINDER_RE = _content_parse.SYS_REMINDER_RE
+
+_PATHS_PATH = _os_path.path.join(_PLUGIN_DIR_PATH, 'paths.py')
+_paths_spec = _ilu.spec_from_file_location('ncd_monitor_paths', _PATHS_PATH)
+_paths = _ilu.module_from_spec(_paths_spec)
+_paths_spec.loader.exec_module(_paths)
+
 
 
 class _StreamSummary:
