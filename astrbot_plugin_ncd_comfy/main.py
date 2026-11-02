@@ -1440,13 +1440,9 @@ class NcdComfyPlugin(star.Star):
         out_dir, tmp_dir = self._io_dirs()
         base = settings_mod.ComfySettings.from_conf(self._conf)
         settings = dataclasses.replace(base, output_dir=out_dir, temp_dir=tmp_dir)
-        key = (
-            settings.comfy_dir,
-            settings.python,
-            settings.port,
-            settings.host,
-            settings.launcher,
-        )
+        # ★ 2026-11-02：整个 settings 当键——改 timeout/idle/extra_args 也要重建 client，
+        #   不能只比主机与路径（否则改了配置要重载插件才生效）。
+        key = settings
         if self._client_obj is not None and self._client_key != key:
             self._client_obj.stop()
             self._client_obj = None

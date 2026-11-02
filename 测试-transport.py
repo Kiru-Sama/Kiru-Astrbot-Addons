@@ -219,6 +219,43 @@ def main() -> int:
 
     check("连不上抛 TransportUnreachable", t_unreachable)
 
+    def t_probe_hook():
+        """本机模式：probe_hook 报「进程退了」要立刻中止，不能等 45 秒。"""
+        reset(completed_at=999)
+        t = ct.Transport(base, timeout=5.0)
+        calls = {"n": 0}
+
+        def hook():
+            calls["n"] += 1
+            return "出图过程中 ComfyUI 退出了（exit=1）" if calls["n"] >= 2 else ""
+
+        try:
+            t.wait(
+                "p1", deadline=time.time() + 10,
+                poll_interval=0.05, probe_every=0.05, probe_hook=hook,
+            )
+        except ct.TransportUnreachable as exc:
+            assert "exit=1" in str(exc), exc
+            return f"第 {calls['n']} 次探活中止（带进程退出原因）"
+        raise AssertionError("没有中止")
+
+    check("probe_hook 能中止等待（本机进程退出）", t_probe_hook)
+
+    def t_no_abort():
+        """abort_after_fails=0：探活失败也不中止，只按 deadline 超时（本机长任务）。"""
+        reset(completed_at=999, mode="down")
+        t = ct.Transport(base, timeout=2.0)
+        try:
+            t.wait(
+                "p1", deadline=time.time() + 1.0,
+                poll_interval=0.05, probe_every=0.05, abort_after_fails=0,
+            )
+        except ct.TransportTimeout:
+            return "探活失败但不中止，1 秒后按 deadline 超时"
+        raise AssertionError("没有按 deadline 超时")
+
+    check("abort_after_fails=0 时不因探活中止", t_no_abort)
+
     srv.shutdown()
     ok = sum(1 for _, p, _ in results if p)
     bad = [r for r in results if not r[1]]

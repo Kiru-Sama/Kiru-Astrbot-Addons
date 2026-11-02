@@ -786,11 +786,33 @@ class ComfyClient:
         except transport_mod.TransportUnreachable as exc:
             raise ComfyUnreachable(f"连不上 ComfyUI：{exc}") from exc
 
+    def _wait_probe_local(self) -> str:
+        """等图期间检查本机 ComfyUI 子进程；退出且端口也不通时返回原因。"""
+        proc = self._proc
+        if proc is None or proc.poll() is None:
+            return ""
+        stats = self._health_sync(1.0)
+        if stats is not None:
+            logger.warning("[comfy] 旧进程句柄已退出但服务在线，接管后继续等待")
+            self._drop_stale_proc()
+            return ""
+        return (
+            f"出图过程中 ComfyUI 退出了（exit={_exit_text(proc.returncode)}）。"
+            f"日志尾部：{_log_tail(self.log_path) or '（空）'}"
+        )
+
     async def _wait_history(self, prompt_id: str) -> dict:
         """等出图结果：委托 Transport（内含每 15 秒探活 + 连续 3 次失败中止）。"""
         deadline = time.time() + self.gen_timeout
         try:
-            return await asyncio.to_thread(self.transport.wait, prompt_id, deadline)
+            # ★ 2026-11-02：本机模式要盯着自己拉起的进程；远程模式探活失败才中止。
+            return await asyncio.to_thread(
+                self.transport.wait,
+                prompt_id,
+                deadline,
+                probe_hook=self._wait_probe_local,
+                abort_after_fails=3 if self.is_remote else 0,
+            )
         except transport_mod.TransportTimeout:
             raise ComfyTimeout(
                 f"等 ComfyUI 出图超过 {self.gen_timeout:.0f} 秒还没结果。"
@@ -800,6 +822,10 @@ class ComfyClient:
             raise ComfyUnreachable(f"电脑断线（{exc}）") from exc
         except transport_mod.ExecutionError as exc:
             raise ComfyExecutionError(f"ComfyUI 执行出错：{exc}") from exc
+        except transport_mod.TransportError as exc:
+            # 兜底：ProtocolError（/history 4xx、返回不是 JSON）等也要变成 ComfyError，
+            # 否则会落到上层通用 except，用户看到 "出图失败：ProtocolError: ..."
+            raise ComfyError(f"等出图结果时出错：{exc}") from exc
 
     async def fetch_image(self, image: dict) -> bytes:
         """按 /view 取回图片字节。"""

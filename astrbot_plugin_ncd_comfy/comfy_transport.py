@@ -123,19 +123,38 @@ class Transport:
         poll_interval: float = 0.6,
         probe_every: float = 15.0,
         on_progress=None,
+        probe_hook=None,
+        abort_after_fails: int = 3,
     ) -> dict:
-        """轮询 /history 直到完成；期间定期探活，连续 3 次失败判为断线。"""
+        """轮询 /history 直到完成；期间定期探活。
+
+        probe_hook: 每 probe_every 秒调用一次，返回非空字符串就立刻中止
+                    （本机模式用它检查 ComfyUI 子进程是否退出）。
+        abort_after_fails: 探活连续失败几次中止；<=0 表示不因探活中止
+                    （本机长任务里 /system_stats 偶尔慢，不该误杀）。
+        """
+        started = time.time()
         last_probe = 0.0
         fails = 0
         while time.time() < deadline:
             if time.time() - last_probe >= probe_every:
                 last_probe = time.time()
-                if self.health() is None:
-                    fails += 1
-                    if fails >= 3:
-                        raise TransportUnreachable("连续 3 次探活失败，电脑可能断线了")
-                else:
-                    fails = 0
+                if probe_hook is not None:
+                    try:
+                        why = probe_hook()
+                    except Exception:  # noqa: BLE001
+                        why = ""
+                    if why:
+                        raise TransportUnreachable(str(why))
+                if abort_after_fails > 0:
+                    if self.health() is None:
+                        fails += 1
+                        if fails >= abort_after_fails:
+                            raise TransportUnreachable(
+                                f"连续 {abort_after_fails} 次探活失败，电脑可能断线了"
+                            )
+                    else:
+                        fails = 0
             try:
                 hist = self._request(
                     "GET", f"/history/{urllib.parse.quote(prompt_id)}", timeout=10.0
@@ -155,7 +174,8 @@ class Transport:
                     except Exception:  # noqa: BLE001
                         pass
             time.sleep(max(0.1, poll_interval))
-        raise TransportTimeout(f"等 {prompt_id[:8]} 超过 {max(0.0, deadline - time.time() + 0.0):.0f}s")
+        waited = max(0.0, time.time() - started)
+        raise TransportTimeout(f"等 {prompt_id[:8]} 超过 {waited:.0f}s 还没结果")
 
     def cancel(self, prompt_id: str) -> None:
         """先 interrupt，再从队列删掉；两步都失败只抛最后一类错误。"""
@@ -201,11 +221,19 @@ class Transport:
         url = self.base_url + "/view?" + q
         try:
             with urllib.request.urlopen(url, timeout=30.0) as resp:
-                return resp.read()
+                data = resp.read()
         except urllib.error.HTTPError as exc:
             raise ProtocolError(f"取图 HTTP {exc.code}") from None
-        except (urllib.error.URLError, socket.timeout, TimeoutError) as exc:
+        except (
+            urllib.error.URLError,
+            socket.timeout,
+            TimeoutError,
+            ConnectionError,
+        ) as exc:
             raise TransportUnreachable(f"取图失败（{type(exc).__name__}）") from None
+        if not data:
+            raise ProtocolError("ComfyUI 返回了空图片")
+        return data
 
     def queue(self) -> dict:
         data = self._request("GET", "/queue", timeout=8.0) or {}
