@@ -155,6 +155,69 @@ class NcdFeedbackPlugin(star.Star):
         except Exception:  # noqa: BLE001
             return ""
 
+    _PRIMARY_ADMIN = "3384998797"
+    _DEPUTY_ADMIN = "3028227446"
+
+    def _deputy_allowed(self, event) -> bool:
+        """副管理员：只在「主管理员不在当前群」时按管理员对待。
+
+        ★ 2026-11-02：AstrBot 的 admins_id 是全局配置，没法按群条件化；
+          所以副管理员只在插件自己的权限判定里生效（名单式、可控）。
+        """
+        try:
+            sender = str(event.get_sender_id() or "")
+            if sender != self._DEPUTY_ADMIN:
+                return False
+            gid = str(event.get_group_id() or "")
+            if not gid:
+                return False          # 私聊不生效
+            state = getattr(self, "_deputy_state", None) or {}
+            hit = state.get(gid)
+            if hit and time.time() - hit[0] < 60.0:
+                return not hit[1]
+            try:
+                import asyncio as _aio
+
+                _aio.create_task(self._refresh_deputy_state(gid))
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _refresh_deputy_state(self, gid: str) -> None:
+        """查主管理员是否在这个群里；结果缓存 60 秒。"""
+        try:
+            import asyncio as _aio
+
+            inst = None
+            for cand in self.context.platform_manager.get_insts():
+                if hasattr(cand, "bot") and hasattr(cand.bot, "call_action"):
+                    inst = cand
+                    break
+            if inst is None:
+                return
+            in_group = False
+            try:
+                res = await _aio.wait_for(
+                    inst.bot.call_action(
+                        "get_group_member_info",
+                        group_id=int(gid),
+                        user_id=int(self._PRIMARY_ADMIN),
+                        no_cache=True,
+                    ),
+                    timeout=6.0,
+                )
+                in_group = bool(res and str(res.get("user_id") or "") == self._PRIMARY_ADMIN)
+            except Exception:  # noqa: BLE001
+                in_group = False   # 不在群或查询失败 → 视为不在
+            if not hasattr(self, "_deputy_state"):
+                self._deputy_state = {}
+            self._deputy_state[gid] = (time.time(), in_group)
+            logger.info(f"[副管理员] 群 {gid} 主管理员在群={in_group}")
+        except Exception:  # noqa: BLE001
+            pass
+
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         try:
             if event.is_admin():
@@ -163,7 +226,9 @@ class NcdFeedbackPlugin(star.Star):
             pass
         try:
             cfg = self.context.get_config(umo=event.unified_msg_origin)
-            return str(event.get_sender_id()) in {str(x) for x in (cfg.get("admins_id") or [])}
+            if str(event.get_sender_id()) in {str(x) for x in (cfg.get("admins_id") or [])}:
+                return True
+            return self._deputy_allowed(event)
         except Exception:  # noqa: BLE001
             return False
 
