@@ -249,6 +249,20 @@ python 测试-出图.py --preset all --fast --img2img --free-test
 > 为什么不做成"每条回复都配语音"：一次合成要 6 秒（束搜索 3 时 80 秒），
 > 挂在回复链路上会把聊天拖慢。要做全量语音，建议用系统自带的 Edge TTS（1~2 秒）。
 
+## 外部数据依赖（可选）
+
+本插件**可以独立运行**：不 import 任何其他 ncd 插件，出图只需要一个能连上的 ComfyUI。
+但下面三样是「有更好、没有也能跑」的外部依赖，换机器时按需补：
+
+| 依赖 | 用途 | 没有时的表现 | 怎么配 |
+|---|---|---|---|
+| **ComfyUI**（必需） | 真正出图 | 出图失败并提示「连不上电脑」 | 插件配置 comfy_host / comfy_port；可配 comfy_scheme/comfy_token 走反代 |
+| **标签库 / 提示词法典**（可选） | comfy_tag_lookup / comfy_prompt_help | 工具返回「未配置标签库/法典」，出图本身不受影响 | 填 comfy_prompt_lib_dir（标签库目录）与 comfy_codex_dir（法典目录）；本包**不携带**这两份数据 |
+| **linkd**（可选） | 区分「网络断了」和「ComfyUI 没起」 | 退回直连探测，提示会模糊一些 | 电脑侧跑 linkd.py，插件自动用 http://<comfy_host>:8201/link/state，或用 comfy_linkd 指定 |
+
+> 法典/标签库属于个人资料，不随分享包分发。缺失时 _promptlib() 会记一条
+> vailable=False 的日志，两个查询工具会明确告诉模型「未配置」，不会假装查到东西。
+
 ## 已知限制
 
 - **单卡**：和完整版 ComfyUI 同时出图会抢显存
