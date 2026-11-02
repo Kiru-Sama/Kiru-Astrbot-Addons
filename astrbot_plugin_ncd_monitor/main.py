@@ -535,183 +535,30 @@ def _is_private_session(umo: Any) -> bool:
     return _PRIVATE_MESSAGE_TYPE in text
 
 
-# ---------------------------------------------------------------------------
-#  思考过程（reasoning）的剥离
-# ---------------------------------------------------------------------------
+# ★ 2026-11-02：文本工具（思考剥离 / 流式 chunk / 内部请求识别）搬到 text_utils.py。
+#   用别名导入，原有调用点与测试脚本里的 `from main import _chunk_text` 都不受影响。
+# ★ 2026-11-02：text_utils 是同目录模块。这里用【按文件路径显式加载】，
+#   不依赖 sys.path —— AstrBot 安装/加载插件的环境里，插件目录不一定在
+#   sys.path，普通 rom text_utils import 会让安装直接失败（表现是
+#   「插件操作失败，请查看服务端日志」）。
+import importlib.util as _ilu
+import os as _os_path
 
-def _is_think_part(part: Any) -> bool:
-    """这个内容块是不是"思考"。
+_PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.abspath(__file__))
+_TEXT_UTILS_PATH = _os_path.path.join(_PLUGIN_DIR_PATH, 'text_utils.py')
+_spec = _ilu.spec_from_file_location('ncd_monitor_text_utils', _TEXT_UTILS_PATH)
+_text_utils = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(_text_utils)
 
-    运行时可能是 ThinkPart（pydantic 对象），也可能是 dict 形态的
-    {"type": "think", "think": ...} —— 两种都认（跟 _content_text 一样的教训）。
-    """
-    if isinstance(part, dict):
-        return part.get("type") == "think"
-    return getattr(part, "type", None) == "think"
-
-
-def _strip_think_parts(messages: list[Any]) -> int:
-    """把消息里的 ThinkPart 摘掉，返回摘掉了几段。
-
-    ★ 只动 ThinkPart，别的都不碰：
-      · 正文（TextPart）原样保留；
-      · **tool_calls 必须留着** —— 摘掉它工具链就断了；
-      · 摘完这条消息什么都不剩（纯思考）就整条丢弃，免得给供应商一个空壳。
-    ★ 原地改传进来的那个列表（messages[:] = …）：AstrBot 在压缩决策和落盘时
-      用的就是同一个列表对象，换成新对象等于没改。
-
-    为什么要剥：推理模型吐的思考会以 ThinkPart 写进 run_context.messages，
-    而那份列表既是【压缩决策的输入】又是【最后落盘的内容】——实测一条会话攒了
-    10 段、合计 13673 字，全在 8192 的上下文里反复重发。
-    """
-    removed = 0
-    kept = []
-    for msg in messages:
-        content = getattr(msg, "content", None)
-        if not isinstance(content, list):
-            kept.append(msg)
-            continue
-        remaining = [p for p in content if not _is_think_part(p)]
-        if len(remaining) != len(content):
-            removed += len(content) - len(remaining)
-            if not remaining and not getattr(msg, "tool_calls", None):
-                continue
-            msg.content = remaining
-        kept.append(msg)
-    if removed:
-        messages[:] = kept
-    return removed
-
-
-def _count_think_chars(messages: list[Any]) -> int:
-    """数一下这些消息里思考一共多少字（剥离前调用，用于记账）。"""
-    total = 0
-    for msg in messages:
-        content = getattr(msg, "content", None)
-        if not isinstance(content, list):
-            continue
-        for p in content:
-            if not _is_think_part(p):
-                continue
-            if isinstance(p, dict):
-                total += len(p.get("think") or "")
-            else:
-                total += len(getattr(p, "think", "") or "")
-    return total
-
-
-# ---------------------------------------------------------------------------
-#  流式 chunk 的解析
-# ---------------------------------------------------------------------------
-
-def _is_delta_chunk(chunk: Any) -> bool:
-    """这个流式 chunk 是【增量片段】还是【最终完整结果】。
-
-    ★ 依据 LLMResponse.is_chunk：
-        openai_source.py:631  造增量片段时传了 is_chunk=True
-        openai_source.py:831  造最终完整结果时没传 → False
-      provider.py:154 的 docstring 也写明了「在生成的最后会返回一次完整的结果」。
-    """
-    return bool(getattr(chunk, "is_chunk", False))
-
-
-# 跨插件约定：工具箱的「网页总结」调用会在 prompt 开头带上这个标记自报身份，
-# 本插件据此把它排除在会话统计之外。两侧都各自定义了一份，改一处要同步另一处。
-# （toolbox/main.py 的 _summarize_page 里是同一个字面量。）
-_INTERNAL_REQUEST_MARKERS = ("[内部·网页总结]",)
-
-
-def _is_internal_request(contexts: Any, prompt: str) -> bool:
-    """这次 provider 调用是不是本插件之外的内部调用（不是某个会话的对话）。
-
-    只看 prompt 和第一条消息的开头 —— 标记是我们自己写在最前面的，
-    网页正文接在它后面，所以开头比对比全文包含更不容易误伤。
-    """
-    candidates = [prompt or ""]
-    for m in contexts or []:
-        content = getattr(m, "content", None)
-        if content is None and isinstance(m, dict):
-            content = m.get("content")
-        candidates.append(_plugin_content_text(content))
-        break
-    for text in candidates:
-        stripped = (text or "").lstrip()
-        if any(stripped.startswith(mark) for mark in _INTERNAL_REQUEST_MARKERS):
-            return True
-    return False
-
-
-def _plugin_content_text(content: Any) -> str:
-    """模块级版本的 content→文本，供 _is_internal_request 使用。
-
-    ★ 不复用 Plugin._content_text 是因为那个要 instance；这里只要「够判断前缀」
-      的一小段文本，不需要它那套图片标记解析。
-    """
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-                continue
-            text = getattr(item, "text", None)
-            if text is None and isinstance(item, dict):
-                text = item.get("text")
-            if isinstance(text, str):
-                parts.append(text)
-        return "\n".join(parts)
-    return str(content)
-
-
-def _has_final_text(chunk: Any) -> bool:
-    """这个非 delta chunk 是不是【真的】带着完整文本的最终结果。
-
-    只看 is_chunk=False 是不够的：那是 openai_source 的约定，换个 provider、
-    或者同一家的 reasoning / 工具调用段，都可能中途吐非 delta 的 chunk。
-    那种空壳一旦被当成 final，面板会安静地显示错内容。
-
-    ★ 判据用 completion_text 和 result_chain 两条都认：
-      最终结果走 completion_text（测试-流式捕获.py 里的 FakeChunk 就是照这个形状造的）；
-      增量对象则把文本放在 result_chain 里。两条都空才算空壳。
-    """
-    text = getattr(chunk, "completion_text", None)
-    if isinstance(text, str) and text.strip():
-        return True
-    chain = getattr(chunk, "result_chain", None)
-    for comp in getattr(chain, "chain", None) or []:
-        part = getattr(comp, "text", None)
-        if isinstance(part, str) and part.strip():
-            return True
-    return False
-
-
-def _chunk_text(chunk: Any) -> str:
-    """取出这个增量 chunk 里【新增的那段文本】。
-
-    ★ 为什么读 result_chain 而不是 completion_text：
-      openai_source._query_stream 把 llm_response 造成【一个对象反复复用】
-      （:631 创建，:664 每轮开头把 completion_text 清成 ""），
-      增量文本被放进 result_chain = MessageChain([Plain(delta)])。
-      只读 completion_text 的话，每个增量片段拿到的都是空串。
-
-    ★ 同一个"复用对象"的事实还有个后果：
-      不能把 chunk 对象攒起来事后统一读 —— 攒到最后大家是同一个对象。
-      必须在 yield 的那一刻就把文本抠出来。
-    """
-    chain = getattr(chunk, "result_chain", None)
-    parts: list[str] = []
-    for comp in getattr(chain, "chain", None) or []:
-        text = getattr(comp, "text", None)
-        if isinstance(text, str):
-            parts.append(text)
-    if parts:
-        return "".join(parts)
-    text = getattr(chunk, "completion_text", None)
-    return text if isinstance(text, str) else ""
-
+_INTERNAL_REQUEST_MARKERS = _text_utils.INTERNAL_REQUEST_MARKERS
+_chunk_text = _text_utils.chunk_text
+_count_think_chars = _text_utils.count_think_chars
+_has_final_text = _text_utils.has_final_text
+_is_delta_chunk = _text_utils.is_delta_chunk
+_is_internal_request = _text_utils.is_internal_request
+_is_think_part = _text_utils.is_think_part
+_plugin_content_text = _text_utils.plugin_content_text
+_strip_think_parts = _text_utils.strip_think_parts
 
 class _StreamSummary:
     """流结束时【没等到完整结果】的兜底载体。
