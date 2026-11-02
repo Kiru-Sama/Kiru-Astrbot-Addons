@@ -4756,7 +4756,7 @@ class NcdComfyPlugin(star.Star):
                 return self._comfy_error_hint(exc) + TOOL_RETRY_HINT
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"[comfy] 出图异常: {exc}", exc_info=True)
-                return f"出图失败：{type(exc).__name__}: {exc}" + TOOL_RETRY_HINT
+                return self._comfy_error_hint(exc) + TOOL_RETRY_HINT
             finally:
                 # 成功/失败/超时都算这次任务结束；下一次同用户出队要看间隔。
                 self._quota_record_end(event)
@@ -5540,7 +5540,7 @@ class NcdComfyPlugin(star.Star):
                 data = await client.fetch_image(audio)
             except ComfyError as exc:
                 logger.warning(f"[comfy] 语音合成失败: {exc}")
-                return f"发语音失败：{exc}"
+                return self._comfy_error_hint(exc).replace("出图失败", "语音失败")
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"[comfy] 语音合成异常: {exc}", exc_info=True)
                 return f"发语音失败：{type(exc).__name__}: {exc}"

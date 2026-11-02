@@ -494,25 +494,14 @@ class ComfyClient:
     # ------------------------------------------------------------------
 
     async def cancel(self) -> None:
-        """中止远端正在跑的这一张：先 interrupt，再从队列删掉。
-
-        ★ 2026-11-02：超时只释放本地槽时，PC 上那张还在跑，
-          插件立刻提交下一张 → 队列越积越长，一次超时后面张张超时。
-        """
+        """中止远端正在跑的这一张（实现在 transport.cancel）。"""
         pid = str(getattr(self, "last_prompt_id", "") or "")
         try:
-            await asyncio.to_thread(self._post_json_sync, "/interrupt", {}, 8.0)
+            await asyncio.to_thread(self.transport.cancel, pid)
             logger.warning(f"[comfy] 已请求中断远端任务 {pid or '(未知)'}")
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 中断远端任务失败: {exc}")
-        if pid:
-            try:
-                await asyncio.to_thread(
-                    self._post_json_sync, "/queue", {"delete": [pid]}, 8.0
-                )
-                logger.warning(f"[comfy] 已从远端队列删除 {pid}")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(f"[comfy] 从远端队列删除失败: {exc}")
+
 
     def _object_info_sync(self, node: str) -> dict:
         return self._get_json_sync(f"/object_info/{urllib.parse.quote(node)}", timeout=20)

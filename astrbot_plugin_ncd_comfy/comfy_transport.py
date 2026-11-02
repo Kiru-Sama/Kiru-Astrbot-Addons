@@ -31,6 +31,20 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """拒绝跟随 3xx。
+
+    ★ 2026-11-02：SSRF 校验只对首跳 URL 生效；urlopen 默认会跟 302，
+      等于校验完还能被跳到 127.0.0.1。这里统一拒绝重定向。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
 DEFAULT_TIMEOUT = 10.0
 
 
@@ -81,11 +95,12 @@ class Transport:
             headers["Content-Type"] = "application/json"
         req = urllib.request.Request(url, data=data, headers=headers, method=method)
         try:
-            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as resp:
+            with _OPENER.open(req, timeout=timeout or self.timeout) as resp:
                 raw = resp.read()
         except urllib.error.HTTPError as exc:
+            # ★ 5xx 是「服务端报错」，不是「连不上」——别把 /prompt 500 说成电脑没开机
             if exc.code >= 500:
-                raise TransportUnreachable(f"HTTP {exc.code} @ {path}") from None
+                raise ProtocolError(f"ComfyUI 服务端 HTTP {exc.code} @ {path}") from None
             raise ProtocolError(f"HTTP {exc.code} @ {path}") from None
         except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as exc:
             raise TransportUnreachable(f"连不上 {self.base_url}（{type(exc).__name__}）") from None
@@ -220,7 +235,7 @@ class Transport:
         )
         url = self.base_url + "/view?" + q
         try:
-            with urllib.request.urlopen(url, timeout=30.0) as resp:
+            with _OPENER.open(url, timeout=30.0) as resp:
                 data = resp.read()
         except urllib.error.HTTPError as exc:
             raise ProtocolError(f"取图 HTTP {exc.code}") from None
