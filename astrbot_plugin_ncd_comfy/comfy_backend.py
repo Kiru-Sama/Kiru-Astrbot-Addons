@@ -35,6 +35,8 @@ _PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.path.abspath(__file__))
 if _PLUGIN_DIR_PATH not in _sys_path.path:
     _sys_path.path.insert(0, _PLUGIN_DIR_PATH)
 import comfy_transport as transport_mod
+import comfy_settings as settings_mod
+
 
 
 class ComfyError(Exception):
@@ -75,7 +77,8 @@ class ComfyClient:
     def __init__(
         self,
         *,
-        comfy_dir: str,
+        settings: "settings_mod.ComfySettings | None" = None,
+        comfy_dir: str = "",
         python: str = "",
         port: int = 8199,
         host: str = "127.0.0.1",
@@ -89,6 +92,20 @@ class ComfyClient:
         temp_dir: str = "",
         log_path: Path | None = None,
     ) -> None:
+        if settings is not None:
+            # ★ 2026-11-02（B）：连接参数只有一个来源 —— ComfySettings。
+            comfy_dir = settings.comfy_dir
+            python = settings.python
+            port = settings.port
+            host = settings.host
+            launcher = settings.launcher
+            idle_timeout = settings.idle_timeout
+            unload_timeout = settings.unload_timeout
+            startup_timeout = settings.startup_timeout
+            gen_timeout = settings.gen_timeout
+            extra_args = settings.extra_args
+            output_dir = settings.output_dir
+            temp_dir = settings.temp_dir
         # ★ 最小便携版根目录（里面有 python_embeded 和 ComfyUI 两个子目录）
         self.comfy_dir = Path(str(comfy_dir or "").strip().strip('"'))
         # 留空 = <comfy_dir>\python_embeded\python.exe

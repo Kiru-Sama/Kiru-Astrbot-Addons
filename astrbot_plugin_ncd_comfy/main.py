@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 # ★ 2026-11-02：安全护栏抽到同目录 safety.py（纯函数），
 #   好处是离线测试能直接 import 断言行为，而不是只断言源码里有这个字符串。
 import os as _os_path
@@ -1411,34 +1412,22 @@ class NcdComfyPlugin(star.Star):
         return str(out), str(tmp)
 
     def _client(self) -> ComfyClient:
+        # ★ 2026-11-02（B）：连接参数统一由 ComfySettings 承载（改地址/端口/超时只动这一处）。
         out_dir, tmp_dir = self._io_dirs()
+        base = settings_mod.ComfySettings.from_conf(self._conf)
+        settings = dataclasses.replace(base, output_dir=out_dir, temp_dir=tmp_dir)
         key = (
-            self._conf_str("comfy_dir"),
-            self._conf_str("comfy_python"),
-            self._conf_int("comfy_port", 8199),
-            self._conf_str("comfy_host") or "127.0.0.1",
-            self._conf_str("comfy_launcher"),
+            settings.comfy_dir,
+            settings.python,
+            settings.port,
+            settings.host,
+            settings.launcher,
         )
         if self._client_obj is not None and self._client_key != key:
             self._client_obj.stop()
             self._client_obj = None
         if self._client_obj is None:
-            self._client_obj = ComfyClient(
-                comfy_dir=self._conf_str("comfy_dir"),
-                python=self._conf_str("comfy_python"),
-                port=self._conf_int("comfy_port", 8199),
-                host=self._conf_str("comfy_host") or "127.0.0.1",
-                launcher=self._conf_str("comfy_launcher"),
-                # ★ 两档回收：先卸模型（5 分钟），再关进程（30 分钟）
-                unload_timeout=float(self._conf_int("comfy_unload_timeout", 300)),
-                idle_timeout=float(self._conf_int("comfy_idle_timeout", 1800)),
-                startup_timeout=float(self._conf_int("comfy_startup_timeout", 240)),
-                gen_timeout=float(self._conf_int("comfy_timeout", 300)),
-                extra_args=self._conf_str("comfy_extra_args"),
-                output_dir=out_dir,
-                temp_dir=tmp_dir,
-                log_path=self._log_path(),
-            )
+            self._client_obj = ComfyClient(settings=settings, log_path=self._log_path())
             self._client_key = key
         return self._client_obj
 
