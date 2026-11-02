@@ -781,7 +781,8 @@ class ComfyClient:
         try:
             return self.transport.submit(graph, client_id or uuid.uuid4().hex)
         except transport_mod.ProtocolError as exc:
-            raise ComfyError(f"ComfyUI 拒绝了工作流：{exc}") from exc
+            # ★ 工作流被拒/参数错属于执行类，让用户拿到"按节点报错改"的提示
+            raise ComfyExecutionError(f"ComfyUI 拒绝了工作流：{exc}") from exc
         except transport_mod.TransportUnreachable as exc:
             raise ComfyUnreachable(f"连不上 ComfyUI：{exc}") from exc
 

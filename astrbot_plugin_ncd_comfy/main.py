@@ -66,8 +66,23 @@ except ImportError:  # 离线单测
 from astrbot.core.message.message_event_result import MessageChain
 
 try:  # AstrBot 以包的形式加载插件
-    from . import model_paths, presets, promptlib, quota, quota_store, sizing, tts
-    from .comfy_backend import ComfyClient, ComfyError
+    from . import (
+        comfy_settings as settings_mod,
+        model_paths,
+        presets,
+        promptlib,
+        quota,
+        quota_store,
+        sizing,
+        tts,
+    )
+    from .comfy_backend import (
+        ComfyClient,
+        ComfyError,
+        ComfyExecutionError,
+        ComfyTimeout,
+        ComfyUnreachable,
+    )
 except ImportError:  # 离线单测
     import model_paths
     import presets
@@ -76,13 +91,14 @@ except ImportError:  # 离线单测
     import quota_store
     import sizing
     import tts
+    import comfy_settings as settings_mod
     from comfy_backend import (
-    ComfyClient,
-    ComfyError,
-    ComfyExecutionError,
-    ComfyTimeout,
-    ComfyUnreachable,
-)
+        ComfyClient,
+        ComfyError,
+        ComfyExecutionError,
+        ComfyTimeout,
+        ComfyUnreachable,
+    )
 
 PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
 PLUGIN_DIR_NAME = os.path.basename(PLUGIN_DIR)
@@ -252,6 +268,8 @@ _QUOTA_JOB_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
 _QUOTA_SNAPSHOT: contextvars.ContextVar[object | None] = contextvars.ContextVar(
     "ncd_comfy_quota_snapshot", default=None
 )
+# ★ 历史裁剪单次删除上限（P1-6）
+HISTORY_DELETE_CAP = 20
 HISTORY_FILE = "history.json"
 
 GATE_ERROR = (
@@ -5802,12 +5820,12 @@ class NcdComfyPlugin(star.Star):
             self._history_write(umo, kept)
             return kept
         removed, overflow = _safety.prune_files(
-            folder, keep_names, cutoff, skip_names=(HISTORY_FILE,), max_delete=20
+            folder, keep_names, cutoff, skip_names=(HISTORY_FILE,), max_delete=HISTORY_DELETE_CAP
         )
         if overflow:
             logger.warning(
                 f"[comfy] 历史裁剪一次要删 {removed + overflow} 张，超过单次上限 "
-                f"{MAX_DELETE}；本次只删了 {removed} 张，剩余留给下次/人工确认 → {umo}"
+                f"{HISTORY_DELETE_CAP}；本次只删了 {removed} 张，剩余留给下次/人工确认 → {umo}"
             )
         self._history_write(umo, kept)
         return kept
