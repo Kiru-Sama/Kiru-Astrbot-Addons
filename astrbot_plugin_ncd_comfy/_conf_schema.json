@@ -559,5 +559,35 @@
     "description": "排队上限（张）",
     "hint": "全局待画任务超过这个数就拒绝新请求，默认 50；填 0 = 不限。",
     "default": 50
+  },
+  "comfy_audit_report_admin": {
+    "type": "bool",
+    "description": "审核未通过的图发给管理员留档",
+    "hint": "开启后，群聊里被判 NSFW 的图会连同群号/提示词一起私聊发给管理员，方便追溯。",
+    "default": true
+  },
+  "comfy_proactive_enabled": {
+    "type": "bool",
+    "description": "群聊主动发言",
+    "hint": "24h 内被 @ 过的群每 1 小时说一句；24~48h 的群每 3 小时；更久不发言。2:00-7:00 静默。",
+    "default": true
+  },
+  "comfy_proactive_quiet_start": {
+    "type": "int",
+    "description": "静默开始小时（0-23）",
+    "hint": "默认 2（凌晨 2 点）",
+    "default": 2
+  },
+  "comfy_proactive_quiet_end": {
+    "type": "int",
+    "description": "静默结束小时（0-23）",
+    "hint": "默认 7（早上 7 点）",
+    "default": 7
+  },
+  "comfy_proactive_lines": {
+    "type": "list",
+    "description": "主动发言话术池",
+    "hint": "留空用内置几句；也可以写多条，随机挑一句。",
+    "default": []
   }
 }

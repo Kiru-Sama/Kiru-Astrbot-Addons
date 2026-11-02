@@ -14,6 +14,7 @@ sys.path.insert(0, COMFY)
 import quota  # noqa: E402
 import sizing  # noqa: E402
 import tts  # noqa: E402
+import proactive  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -81,6 +82,23 @@ def main() -> int:
         return "连续空行被压成一行（死正则已修）"
 
     check("tts 空行压缩", t_tts_blank)
+
+    def t_proactive():
+        # 2-7 点静默
+        assert proactive.in_quiet_hours(2) and proactive.in_quiet_hours(6)
+        assert not proactive.in_quiet_hours(7) and not proactive.in_quiet_hours(1)
+        # 分档：24h 内 1 小时、24~48h 3 小时、更久 0
+        now = 1_000_000.0
+        assert proactive.interval_for(now - 3600, now) == 3600
+        assert proactive.interval_for(now - 30 * 3600, now) == 10800
+        assert proactive.interval_for(now - 50 * 3600, now) == 0
+        # 判定：刚被 @ 且从没说过 → 太早不说；过了一个间隔才说
+        assert not proactive.should_speak(now - 600, 0, now, 12)
+        assert proactive.should_speak(now - 3700, 0, now, 12)
+        assert not proactive.should_speak(now - 3700, 0, now, 3)   # 静默时段
+        return "静默/分档/间隔判定 8 条通过"
+
+    check("proactive 主动发言判定", t_proactive)
 
     ok = sum(1 for _, p, _ in results if p)
     bad = [r for r in results if not r[1]]

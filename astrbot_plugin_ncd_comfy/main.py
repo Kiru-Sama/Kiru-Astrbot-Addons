@@ -73,6 +73,7 @@ from mcp.types import CallToolResult, ImageContent, TextContent
 import astrbot.api.message_components as Comp
 from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.event.filter import EventMessageType
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.web import request
 from astrbot.core.platform.astrbot_message import AstrBotMessage, Group, MessageMember
@@ -85,6 +86,10 @@ try:  # 审核模块（内部用，不注册成聊天工具）
 except ImportError:  # 离线单测
     import moderation  # type: ignore
 from astrbot.core.message.message_event_result import MessageChain
+try:  # 群聊主动发言判定（纯函数，可离线测）
+    from . import proactive
+except ImportError:  # 离线单测
+    import proactive  # type: ignore
 
 try:  # AstrBot 以包的形式加载插件
     from . import (
@@ -391,6 +396,10 @@ class NcdComfyPlugin(star.Star):
         self._pending_notes: dict[str, tuple[float, str]] = {}
         # 审核失败自动拉起 bot 回复：每会话 10 分钟最多一次，防止循环
         self._audit_nudge_at: dict[str, float] = {}
+        # ★ 2026-11-02：群聊主动发言（24h 内 1h/次、48h 内 3h/次、2-7 点静默）
+        self._proactive_mentions: dict[str, float] = {}
+        self._proactive_sent: dict[str, float] = {}
+        self._proactive_task: asyncio.Task | None = None
         # 异步图写入会话历史时串行，避免并发写坏 content
         self._conv_lock = asyncio.Lock()
         # ★ 启动/重载时先发一次空状态：旧进程可能留下“正在画”的总线快照，
@@ -3663,6 +3672,207 @@ class NcdComfyPlugin(star.Star):
         req.system_prompt = (base + "\n\n[系统提醒] " + note).strip()
 
     # ------------------------------------------------------------------
+    #  群聊主动发言（按「最近被 @ 的时间」分两档）
+    # ------------------------------------------------------------------
+    def _proactive_file(self) -> Path:
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "proactive.json"
+        )
+
+    def _proactive_load(self) -> None:
+        try:
+            raw = json.loads(self._proactive_file().read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        if self._proactive_mentions or self._proactive_sent:
+            return  # 内存里已有（别用磁盘旧值覆盖刚记下的 @）
+        if isinstance(raw, dict):
+            self._proactive_mentions = {str(k): float(v) for k, v in (raw.get("mentions") or {}).items()}
+            self._proactive_sent = {str(k): float(v) for k, v in (raw.get("sent") or {}).items()}
+
+    def _proactive_save(self) -> None:
+        try:
+            path = self._proactive_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(
+                    {"mentions": self._proactive_mentions, "sent": self._proactive_sent},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 主动发言状态保存失败: {exc}")
+
+    async def _proactive_loop(self) -> None:
+        """每 5 分钟检查一次；只在 2-7 点之外、且群够活跃时说话。"""
+        self._proactive_load()
+        await asyncio.sleep(90)
+        while not getattr(self, "_closing", False):
+            try:
+                if self._conf_bool("comfy_proactive_enabled", True):
+                    await self._proactive_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 主动发言检查失败: {exc}")
+            await asyncio.sleep(300)
+
+    async def _proactive_tick(self) -> None:
+        now = time.time()
+        hour = time.localtime(now).tm_hour
+        quiet_start = self._conf_int("comfy_proactive_quiet_start", 2)
+        quiet_end = self._conf_int("comfy_proactive_quiet_end", 7)
+        if proactive.in_quiet_hours(hour, quiet_start, quiet_end):
+            return
+        for umo, mention_ts in list(self._proactive_mentions.items()):
+            if not str(umo).endswith("GroupMessage:" + str(umo).split("GroupMessage:")[-1]):
+                pass  # 只处理群聊 umo（形如 xxx:GroupMessage:123）
+            if ":GroupMessage:" not in str(umo):
+                continue
+            last_sent = float(self._proactive_sent.get(umo) or 0.0)
+            if not proactive.should_speak(mention_ts, last_sent, now, hour, quiet_start, quiet_end):
+                continue
+            raw_lines = self._conf.get("comfy_proactive_lines")
+            if isinstance(raw_lines, list):
+                lines = [str(x) for x in raw_lines if str(x).strip()]
+            elif isinstance(raw_lines, str):
+                lines = [x.strip() for x in raw_lines.split("|") if x.strip()]
+            else:
+                lines = []
+            lines = lines or list(proactive.DEFAULT_LINES)
+            text = proactive.pick_line(lines)
+            ok = await self._send_plain(umo, text)
+            if ok:
+                self._proactive_sent[umo] = now
+                self._proactive_save()
+                logger.info(f"[comfy] 群聊主动发言 → {umo}：{text[:40]}")
+
+    async def _send_plain(self, umo: str, text: str) -> bool:
+        try:
+            await asyncio.wait_for(
+                self.context.send_message(umo, MessageChain(chain=[Comp.Plain(str(text))])),
+                timeout=15,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 主动发言发送失败 → {umo}: {exc}")
+            return False
+
+    @filter.event_message_type(EventMessageType.ALL)
+    async def _note_bot_mention(self, event: AstrMessageEvent) -> None:
+        """记录「这个群最近一次主动 @ bot 的时间」（主动发言分档依据）。"""
+        try:
+            if not self._is_group_chat(event):
+                return
+            self_id = str(getattr(event, "get_self_id", lambda: "")() or "")
+            if not self_id:
+                return
+            hit = False
+            for comp in event.get_messages() or []:
+                if isinstance(comp, Comp.At) and str(getattr(comp, "qq", "")) == self_id:
+                    hit = True
+                    break
+            if not hit:
+                return
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if not umo:
+                return
+            if umo not in self._proactive_mentions:
+                self._proactive_load_if_needed()
+            self._proactive_mentions[umo] = time.time()
+            self._proactive_save()
+            if self._proactive_task is None or self._proactive_task.done():
+                self._proactive_task = asyncio.create_task(self._proactive_loop())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 记录 @ 时间失败: {exc}")
+
+    def _proactive_load_if_needed(self) -> None:
+        if not self._proactive_mentions:
+            self._proactive_load()
+
+    # ------------------------------------------------------------------
+    #  审核未通过：把图与上下文发给管理员留档
+    # ------------------------------------------------------------------
+    async def _report_blocked_to_admin(
+        self,
+        event: AstrMessageEvent,
+        data: bytes,
+        image_prompt: str = "",
+        preset_name: str = "",
+        model_name: str = "",
+        filename: str = "",
+    ) -> None:
+        if not self._conf_bool("comfy_audit_report_admin", True):
+            return
+        admin = str(self._PRIMARY_ADMIN or "").strip()
+        if not admin:
+            return
+        base = str(getattr(event, "unified_msg_origin", "") or "")
+        plat = base.split(":", 1)[0] if ":" in base else ""
+        if not plat:
+            return
+        admin_umo = f"{plat}:FriendMessage:{admin}"
+        gid = str(getattr(event, "get_group_id", lambda: "")() or "")
+        gname = ""
+        try:
+            gname = str(getattr(getattr(event, "message_obj", None), "group", None).group_name or "")  # type: ignore[union-attr]
+        except Exception:  # noqa: BLE001
+            gname = ""
+        lines = [
+            "【审核未通过 · 留档】",
+            f"群：{gname or '（未知）'}（{gid or '?'}）",
+            f"发送者：{getattr(event, 'get_sender_id', lambda: '')() or '?'}",
+            f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"工作流：{preset_name or '?'}　底模：{os.path.basename(str(model_name or '')) or '?'}",
+            f"文件：{filename or '?'}",
+            f"提示词：{str(image_prompt or '')[:400]}",
+        ]
+        chain = []
+        try:
+            thumb = self._save_audit_thumb(data) if data else ""
+        except Exception:  # noqa: BLE001
+            thumb = ""
+        if thumb and os.path.isfile(thumb):
+            try:
+                chain.append(Comp.Image.fromFileSystem(str(thumb)))
+            except Exception:  # noqa: BLE001
+                pass
+        chain.append(Comp.Plain("\n".join(lines)))
+        try:
+            await asyncio.wait_for(
+                self.context.send_message(admin_umo, MessageChain(chain=chain)),
+                timeout=20,
+            )
+            logger.info(f"[comfy] 审核未通过已留档给管理员 {admin}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 审核留档发给管理员失败: {exc}")
+
+    # ------------------------------------------------------------------
+    #  认主：管理员身份注入
+    # ------------------------------------------------------------------
+    @filter.on_llm_request()
+    async def _mark_owner(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
+        """管理员 = 主人：让模型知道这是它的主人。"""
+        try:
+            if not self._is_admin_event(event):
+                return
+            base = (req.system_prompt or "").rstrip()
+            req.system_prompt = (
+                base
+                + "\n\n【身份】当前对话者是你的主人（管理员）。"
+                "对他要优先、耐心、直接，不要用对待普通群友的客套话。"
+            ).strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 认主提示注入失败: {exc}")
+
+    # ------------------------------------------------------------------
     #  工具入口
     # ------------------------------------------------------------------
     def _gate(self, event: AstrMessageEvent, tool: str) -> str | None:
@@ -4859,6 +5069,18 @@ class NcdComfyPlugin(star.Star):
 
         if await self._nsfw_blocked(event, data, image_prompt=text):
             logger.info("[comfy] 群聊图片被判 NSFW，已拒绝发送")
+            # ★ 2026-11-02：把被拦的图与上下文发给管理员留档（方便追溯误判/违规）
+            try:
+                await self._report_blocked_to_admin(
+                    event,
+                    data,
+                    image_prompt=text,
+                    preset_name=preset_name,
+                    model_name=used_model,
+                    filename=str(image.get("filename") or ""),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 审核留档失败（不影响主流程）: {exc}")
             self._remember_recent(
                 {
                     "name": str(image.get("filename") or "image.png"),
@@ -6147,6 +6369,12 @@ class NcdComfyPlugin(star.Star):
                 await self._send_chat(umo, text)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[comfy] 中断提示发送失败 → {umo}: {exc}")
+        try:
+            if self._proactive_task is not None:
+                self._proactive_task.cancel()
+                self._proactive_task = None
+        except Exception:  # noqa: BLE001
+            pass
         self._bg_tasks.clear()
         self._bg_umo.clear()
         self._img_queues.clear()
