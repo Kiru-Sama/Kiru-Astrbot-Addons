@@ -137,12 +137,18 @@ class ComfyClient:
         self.output_dir = str(output_dir or "").strip()
         self.temp_dir = str(temp_dir or "").strip()
         self.log_path = Path(log_path) if log_path else None
-        self.base = f"http://{self.host}:{self.port}"
+        self.settings_connection = (
+            settings.connection
+            if settings is not None
+            else settings_mod.ConnectionSettings(host=self.host, port=self.port)
+        )
+        self.base = self.settings_connection.base_url
+        conn = self.settings_connection
         self.transport = transport_mod.Transport(
-            self.base,
-            timeout=10.0,
+            conn.base_url,
+            timeout=conn.timeout,
             client_id="ncd-comfy",
-            auth_token=getattr(settings, "auth_token", "") if settings else "",
+            auth_token=conn.auth_token,
         )
 
         self._proc: subprocess.Popen | None = None

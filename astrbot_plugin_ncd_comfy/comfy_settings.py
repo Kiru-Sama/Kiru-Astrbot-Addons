@@ -20,6 +20,29 @@ LOCAL_HOSTS = ("", "127.0.0.1", "localhost", "::1", "0.0.0.0")
 
 
 @dataclass(frozen=True)
+class ConnectionSettings:
+    """纯连接参数：任何 ComfyUI 客户端只需要这些。"""
+
+    host: str = "127.0.0.1"
+    port: int = 8199
+    scheme: str = "http"
+    auth_token: str = ""
+    timeout: float = 10.0
+    gen_timeout: float = 300.0
+
+    @property
+    def base_url(self) -> str:
+        s = (self.scheme or "http").strip().lower()
+        if s not in ("http", "https"):
+            s = "http"
+        return f"{s}://{self.host}:{self.port}"
+
+    @property
+    def is_remote(self) -> bool:
+        return (self.host or "").strip().lower() not in LOCAL_HOSTS
+
+
+@dataclass(frozen=True)
 class ComfySettings:
     comfy_dir: str = ""
     python: str = ""
@@ -42,6 +65,17 @@ class ComfySettings:
         if scheme not in ("http", "https"):
             scheme = "http"
         return f"{scheme}://{self.host}:{self.port}"
+
+    @property
+    def connection(self) -> ConnectionSettings:
+        """纯连接视图（通用客户端只依赖它）。"""
+        return ConnectionSettings(
+            host=self.host,
+            port=self.port,
+            scheme=self.scheme,
+            auth_token=self.auth_token,
+            gen_timeout=self.gen_timeout,
+        )
 
     @property
     def is_remote(self) -> bool:
