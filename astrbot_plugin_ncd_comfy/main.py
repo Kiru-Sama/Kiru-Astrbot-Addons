@@ -114,6 +114,17 @@ QUOTA_CONFIG_SPEC: dict[str, tuple[str, str]] = {
     "window_hour": ("comfy_quota_window_hour", "int"),
     "bypass_ids": ("comfy_quota_bypass_ids", "str"),
 }
+# ★ 2026-11-02（P0-1）：额度阈值单独存这里，框架不会碰
+QUOTA_CONFIG_FILE = (
+    Path(PLUGIN_DIR).parents[2]
+    / "data"
+    / "plugin_data"
+    / "ncd_comfy"
+    / "quota"
+    / "config.json"
+)
+QUOTA_KEYS = {spec[0] for spec in QUOTA_CONFIG_SPEC.values()}
+
 QUOTA_CONFIG_BOUNDS = {
     "global_limit": (1, 100000),
     "throttle_top": (1, 50),
@@ -368,31 +379,82 @@ class NcdComfyPlugin(star.Star):
     # ------------------------------------------------------------------
     #  绘图额度 / 排名面板
     # ------------------------------------------------------------------
+    # ★ 2026-11-02（P0-1）：额度阈值改存 plugin_data，不再写框架的插件配置文件。
+    #   原因：data/config/astrbot_plugin_ncd_comfy_config.json 是 AstrBot 自己保存插件配置的
+    #   同一个文件，框架保存时整体回写，会把面板改的阈值覆盖回旧值。
+    def _quota_override(self) -> dict:
+        cache = getattr(self, "_quota_override_cache", None)
+        now = time.time()
+        if cache and now - float(cache[0]) < 5.0:
+            return cache[1]
+        data: dict = {}
+        try:
+            if QUOTA_CONFIG_FILE.is_file():
+                raw = json.loads(QUOTA_CONFIG_FILE.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    data = {k: v for k, v in raw.items() if k in QUOTA_KEYS}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 读额度配置失败，本次用框架配置: {exc}")
+            data = {}
+        self._quota_override_cache = (now, data)
+        return data
+
+    def _quota_view(self) -> dict:
+        """框架配置 + 面板改过的额度值（后者优先）。"""
+        merged = dict(self._conf)
+        merged.update(self._quota_override())
+        return merged
+
+    def _save_quota_override(self, values: dict) -> None:
+        pick = {k: values[k] for k in values if k in QUOTA_KEYS}
+        QUOTA_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = QUOTA_CONFIG_FILE.with_name(QUOTA_CONFIG_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(pick, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, QUOTA_CONFIG_FILE)
+        self._quota_override_cache = (time.time(), dict(pick))
+
     def _quota_config(self) -> quota.QuotaConfig:
-        raw = self._conf.get("comfy_quota_bypass_ids") or ""
+        view = self._quota_view()
+
+        def gi(key: str, default: int) -> int:
+            raw = view.get(key)
+            if raw is None or raw == "":
+                return default
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        def gb(key: str, default: bool) -> bool:
+            raw = view.get(key)
+            if raw is None or raw == "":
+                return default
+            if isinstance(raw, bool):
+                return raw
+            return str(raw).strip().lower() in ("1", "true", "yes", "on", "是")
+
+        raw = view.get("comfy_quota_bypass_ids") or ""
         if isinstance(raw, str):
             bypass = tuple(x for x in re.split(r"[,，\s]+", raw) if x)
         else:
             bypass = tuple(str(x) for x in raw)
         return quota.QuotaConfig(
-            window_hour=self._conf_int("comfy_quota_window_hour", 8),
-            global_enabled=self._conf_bool("comfy_quota_global_enabled", True),
-            global_limit=self._conf_int("comfy_quota_global_limit", 30),
-            throttle_top=self._conf_int("comfy_quota_throttle_top", 5),
-            canvas_top=self._conf_int("comfy_quota_canvas_top", 3),
-            canvas_max_side=self._conf_int("comfy_quota_canvas_max_side", 1080),
-            queue_limited=self._conf_int("comfy_quota_queue_limited", 1),
-            queue_normal=self._conf_int("comfy_quota_queue_normal", 3),
-            interval_base=self._conf_int("comfy_quota_interval_base", 120),
-            interval_step=self._conf_int("comfy_quota_interval_step", 10),
-            degrade_after=self._conf_int("comfy_quota_degrade_after", 50),
-            degrade_steps=self._conf_int("comfy_quota_degrade_steps", 20),
-            ban_after=self._conf_int("comfy_quota_ban_after", 70),
-            ban_hours=self._conf_int("comfy_quota_ban_hours", 36),
+            window_hour=gi("comfy_quota_window_hour", 8),
+            global_enabled=gb("comfy_quota_global_enabled", True),
+            global_limit=gi("comfy_quota_global_limit", 30),
+            throttle_top=gi("comfy_quota_throttle_top", 5),
+            canvas_top=gi("comfy_quota_canvas_top", 3),
+            canvas_max_side=gi("comfy_quota_canvas_max_side", 1080),
+            queue_limited=gi("comfy_quota_queue_limited", 1),
+            queue_normal=gi("comfy_quota_queue_normal", 3),
+            interval_base=gi("comfy_quota_interval_base", 120),
+            interval_step=gi("comfy_quota_interval_step", 10),
+            degrade_after=gi("comfy_quota_degrade_after", 50),
+            degrade_steps=gi("comfy_quota_degrade_steps", 20),
+            ban_after=gi("comfy_quota_ban_after", 70),
+            ban_hours=gi("comfy_quota_ban_hours", 36),
             bypass_ids=bypass,
-            counted_jobs_limit=self._conf_int(
-                "comfy_quota_counted_jobs_limit", 2000
-            ),
+            counted_jobs_limit=gi("comfy_quota_counted_jobs_limit", 70),
         )
 
     def _quota_config_values(self) -> dict:
@@ -452,7 +514,7 @@ class NcdComfyPlugin(star.Star):
     def _quota_config_update(self, values: dict) -> dict:
         if not isinstance(values, dict):
             raise ValueError("config 必须是对象")
-        candidate = dict(self._conf)
+        candidate = dict(self._quota_view())
         for short, (key, kind) in QUOTA_CONFIG_SPEC.items():
             if short not in values:
                 continue
@@ -474,12 +536,12 @@ class NcdComfyPlugin(star.Star):
                     raise ValueError(f"{short} 必须是整数") from None
                 low, high = QUOTA_CONFIG_BOUNDS[short]
                 candidate[key] = max(low, min(high, num))
-        self._write_comfy_config(candidate)
-        self._conf = candidate
+        # ★ 只写自己的 override 文件；不再写框架配置、不再替换 self._conf
+        self._save_quota_override(candidate)
         eng = getattr(self, "_quota_engine_obj", None)
         if eng is not None:
             eng.config = self._quota_config()
-        logger.info("[comfy] 额度全局阈值已从面板更新")
+        logger.info("[comfy] 额度全局阈值已保存（plugin_data/ncd_comfy/quota/config.json）")
         return self._quota_config_values()
 
     def _quota_engine(self) -> quota.QuotaEngine:
@@ -539,7 +601,14 @@ class NcdComfyPlugin(star.Star):
             try:
                 import asyncio as _aio
 
-                _aio.create_task(self._refresh_deputy_state(gid))
+                task = _aio.create_task(self._refresh_deputy_state(gid))
+                # ★ 2026-11-02（P1-3）：asyncio 只持弱引用，裸 create_task 可能被 GC，
+                #   那样缓存永远不刷新 → 副管理员在该群永久失效且日志无痕。
+                tasks = getattr(self, "_bg_tasks", None)
+                if tasks is None:
+                    tasks = self._bg_tasks = set()
+                tasks.add(task)
+                task.add_done_callback(tasks.discard)
             except Exception:  # noqa: BLE001
                 pass
             return False
@@ -578,6 +647,25 @@ class NcdComfyPlugin(star.Star):
             logger.info(f"[副管理员] 群 {gid} 主管理员在群={in_group}")
         except Exception:  # noqa: BLE001
             pass
+
+    async def _is_admin_event_async(self, event: AstrMessageEvent) -> bool:
+        """管理员判定（命令入口用）：副管理员第一次就能判对。
+
+        ★ 2026-11-02（P1-3）：同步版 _is_admin_event 在群成员缓存缺失时只能返回 False，
+          于是副管理员在某个群第一次执行管理命令必被拒。这里在缓存缺失时先 await
+          查一次（一次 HTTP，几十毫秒），换来「第一次就准」。
+        """
+        if self._is_admin_event(event):
+            return True
+        try:
+            sender = str(event.get_sender_id() or "")
+            gid = str(event.get_group_id() or "")
+            if sender == self._DEPUTY_ADMIN and gid:
+                await self._refresh_deputy_state(gid)
+                return self._deputy_allowed(event)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 副管理员判定失败（按非管理员处理）: {exc}")
+        return False
 
     def _is_admin_event(self, event: AstrMessageEvent) -> bool:
         try:
@@ -997,7 +1085,7 @@ class NcdComfyPlugin(star.Star):
           手机→电脑这条链路是通的（linkd 探针在电脑 8201）。
         """
         try:
-            ok, why = self._pc_link_state(force=True)
+            ok, why = await self._pc_link_state(force=True)
             client = self._client()
             host = str(getattr(client, "host", "") or "")
             return {
@@ -1211,7 +1299,7 @@ class NcdComfyPlugin(star.Star):
     @filter.command("全部排行", alias={"全部排名", "四榜"})
     async def quota_all_rank_cmd(self, event: AstrMessageEvent):
         """管理员查看四榜前 10：生图/发言 · 日榜/总榜。"""
-        if not self._is_admin_event(event):
+        if not await self._is_admin_event_async(event):
             yield event.plain_result("这个指令只有管理员能用。")
             return
         try:
@@ -2423,7 +2511,71 @@ class NcdComfyPlugin(star.Star):
             logger.warning(f"[comfy] 固定参考图失败（保留原路径）: {exc}")
             return ref
 
-    async def _image_url_bytes(self, url: str) -> bytes | None:
+    # ★ 2026-11-02（P0-2）：reference / 历史图只允许读这三根目录内的文件，
+    #   否则模型可以把 reference 写成任意本地路径，把容器里的凭据文件送去电脑出图。
+    def _allowed_roots(self, umo: str = "") -> list[str]:
+        roots: list[str] = []
+        for fn in ("_ref_cache_root", "_temp_root"):
+            try:
+                roots.append(os.path.realpath(str(getattr(self, fn)())))
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            if umo:
+                roots.append(os.path.realpath(str(self._session_image_dir(umo))))
+        except Exception:  # noqa: BLE001
+            pass
+        return [r for r in roots if r]
+
+    def _path_allowed(self, p, umo: str = "") -> bool:
+        """realpath 后必须落在允许的根目录内（防 ../ 逃逸与符号链接）。"""
+        try:
+            rp = os.path.realpath(str(p))
+        except Exception:  # noqa: BLE001
+            return False
+        for root in self._allowed_roots(umo):
+            if rp == root or rp.startswith(root + os.sep):
+                return True
+        return False
+
+    @staticmethod
+    def _public_url_error(url: str) -> str:
+        """http(s) 取图前的 SSRF 兜底：拒环回/内网/链路本地/保留地址。"""
+        import ipaddress
+        import socket
+        from urllib.parse import urlparse
+
+        try:
+            host = (urlparse(str(url)).hostname or "").strip()
+        except Exception:  # noqa: BLE001
+            return "地址解析失败"
+        if not host:
+            return "地址为空"
+        candidates = [host]
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            try:
+                candidates = [socket.gethostbyname(host)]
+            except Exception:  # noqa: BLE001
+                return "域名解析失败"
+        for cand in candidates:
+            try:
+                ip = ipaddress.ip_address(cand)
+            except ValueError:
+                continue
+            if (
+                ip.is_private
+                or ip.is_loopback
+                or ip.is_link_local
+                or ip.is_reserved
+                or ip.is_multicast
+                or ip.is_unspecified
+            ):
+                return "只允许公网地址（拒绝内网/本机）"
+        return ""
+
+    async def _image_url_bytes(self, url: str, umo: str = "") -> bytes | None:
         """把历史里的 image_url（data URL / 本地路径 / http）变成字节。"""
         u = str(url or "").strip()
         if not u:
@@ -2436,12 +2588,20 @@ class NcdComfyPlugin(star.Star):
                 return raw[: 12 * 1024 * 1024] if raw else None
             if u.startswith("file://"):
                 p = Path(u[7:])
-                if p.is_file():
+                if p.is_file() and self._path_allowed(p, umo):
                     return p.read_bytes()[: 12 * 1024 * 1024]
+                if p.is_file():
+                    logger.warning(f"[comfy] 拒绝读取白名单外的文件: {p}")
             p = Path(u)
             if p.is_file():
-                return p.read_bytes()[: 12 * 1024 * 1024]
+                if self._path_allowed(p, umo):
+                    return p.read_bytes()[: 12 * 1024 * 1024]
+                logger.warning(f"[comfy] 拒绝读取白名单外的文件: {p}")
             if u.startswith(("http://", "https://")):
+                err = self._public_url_error(u)
+                if err:
+                    logger.warning(f"[comfy] 拒绝非公网取图（{err}）: {u[:80]}")
+                    return None
                 import urllib.request
 
                 def _read():
@@ -2494,7 +2654,7 @@ class NcdComfyPlugin(star.Star):
                     if not isinstance(part, dict) or part.get("type") != "image_url":
                         continue
                     url = (part.get("image_url") or {}).get("url", "")
-                    data = await self._image_url_bytes(url)
+                    data = await self._image_url_bytes(url, umo)
                     if data:
                         logger.info(
                             "[comfy] reference=auto 从会话历史选图（%s）",
@@ -2599,9 +2759,14 @@ class NcdComfyPlugin(star.Star):
         # 任何关键字，但文件真实存在，就直接读，别再报"没找到"。
         if ref and not ref.startswith(("data:", "http://", "https://")):
             p = Path(str(reference).strip())
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
             try:
                 if p.is_file():
-                    return p.read_bytes()[: 12 * 1024 * 1024]
+                    if self._path_allowed(p, umo):
+                        return p.read_bytes()[: 12 * 1024 * 1024]
+                    logger.warning(
+                        f"[comfy] reference 指向白名单外的文件，已拒绝: {p}"
+                    )
             except OSError:
                 pass
         return None
@@ -2972,8 +3137,15 @@ class NcdComfyPlugin(star.Star):
             return None
         ready = []
         for user in users:
-            if self._quota_job_wait(queues[user][0]) <= 0:
-                ready.append(user)
+            job0 = queues[user][0]
+            if self._quota_job_wait(job0) > 0:
+                continue
+            # ★ 2026-11-02（P0-4）：图片间隔也在「排队阶段」挡，
+            #   否则画完才 sleep，一个会话就能把单 worker 占住 5 分钟，全群干等。
+            umo0 = str(job0.get("umo") or user)
+            if self._image_allowed(umo0, job0.get("event"))[1] > 0:
+                continue
+            ready.append(user)
         if not ready:
             return None
         batch = self._fair_batch()
@@ -3028,6 +3200,12 @@ class NcdComfyPlugin(star.Star):
                 except asyncio.TimeoutError:
                     umo = str(job.get("umo") or "")
                     logger.error(f"[comfy] 后台出图超时（已中止）→ {umo}")
+                    # ★ 2026-11-02：超时必须清远端队列，否则 PC 上那张还在跑，
+                    #   插件立刻提交下一张 → 一次超时后面张张超时（队列雪崩）。
+                    try:
+                        await self._client().cancel()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(f"[comfy] 超时后清远端队列失败: {exc}")
                     # _image_job 的 CancelledError 分支会发“被中断”提示，避免重复发。
                 finally:
                     self._img_current = None
@@ -3600,7 +3778,21 @@ class NcdComfyPlugin(star.Star):
         cache[cat] = lines
         return lines
 
-    def _pc_link_state(self, force: bool = False) -> tuple[bool, str]:
+    async def _pc_link_state(self, force: bool = False) -> tuple[bool, str]:
+        """链路状态的 async 入口：磁盘/网络探测都丢到线程池，不阻塞事件循环。
+
+        ★ 2026-11-02（P1-9）：原来这个是同步函数，里面 urlopen 2.5s + healthy_sync 2s；
+          电脑一关机，单次工具调用就把主循环卡 2.5~4.5 秒（全部会话停摆）。
+        """
+        now = time.time()
+        cache = getattr(self, "_pc_link_cache", None)
+        if not force and cache and now - float(cache[0]) < 15.0:
+            return bool(cache[1]), str(cache[2])
+        ok, why = await asyncio.to_thread(self._pc_link_state_sync)
+        self._pc_link_cache = (now, ok, why)
+        return ok, why
+
+    def _pc_link_state_sync(self) -> tuple[bool, str]:
         """手机能不能连到电脑上的 ComfyUI。返回 (可用, 说明)。
 
         ★ 2026-11-01：先问电脑上的 linkd（默认 http://<comfy host>:8201/link/state）。
@@ -3609,13 +3801,9 @@ class NcdComfyPlugin(star.Star):
             · 连不上 linkd → 才能断定是「链路不通」（热点断了/电脑关机/换网络）
           以前只探 ComfyUI 与拉起器，两者都不通时分不清是网络断了还是 ComfyUI 没起，
           只能统一报 comfy未连接电脑，用户不知道该修网络还是修 ComfyUI。
-        缓存 15 秒：工具一进来就问，太频繁会拖慢回复，但也不能缓存太久。
+        ★ 缓存由 async 包装 _pc_link_state 统一管，这里不再查（P1-9 改造时留下的
+          `force` 引用会 NameError —— 2026-11-02 修复）。
         """
-        now = time.time()
-        cache = getattr(self, "_pc_link_cache", None)
-        if not force and cache and now - float(cache[0]) < 15.0:
-            return bool(cache[1]), str(cache[2])
-
         client = self._client()
         host = str(getattr(client, "host", "") or "").strip()
         linkd = self._conf_str("comfy_linkd", "").strip() or (
@@ -3674,7 +3862,7 @@ class NcdComfyPlugin(star.Star):
                 )
             )
 
-        self._pc_link_cache = (now, ok, why)
+        # 缓存由 async 包装 _pc_link_state 统一写（这里不再碰，避免 force 语义混乱）
         return ok, why
 
     @filter.llm_tool(name="comfy_tools")
@@ -3702,7 +3890,7 @@ class NcdComfyPlugin(star.Star):
                 "直接调 comfy_generate（参数见上一轮说明）即可。"
             )
 
-        online, why = self._pc_link_state()
+        online, why = await self._pc_link_state()
         if not online:
             return (
                 f"⚠ {why}。\n"
@@ -3913,7 +4101,7 @@ class NcdComfyPlugin(star.Star):
         lookup_gate = self._lookup_gate(event)
         if lookup_gate:
             return lookup_gate
-        online, why = self._pc_link_state()
+        online, why = await self._pc_link_state()
         if not online:
             logger.info(f"[comfy] 跳过出图（{why}）")
             return (
@@ -4586,10 +4774,15 @@ class NcdComfyPlugin(star.Star):
 
         umo_ev = str(getattr(event, "unified_msg_origin", "") or "")
         ok, wait = self._image_allowed(umo_ev, event)
-        if not ok:
-            # 图已经画好了，别再像旧版那样直接丢掉；等够间隔再发。
-            logger.info(f"[comfy] 会话发图间隔未到，等待 {wait}s 后发送（不丢图）")
-            await asyncio.sleep(wait)
+        if not ok and wait > 0:
+            # ★ 2026-11-02（P0-4）：正常情况下排队阶段就把间隔挡住了；
+            #   真走到这里（刚发完一张又立刻出了新图）也最多等 15 秒，
+            #   绝不 sleep(300) 把公平队列占死——图仍然发，只是不按严格间隔。
+            cap = min(int(wait), 15)
+            logger.info(
+                f"[comfy] 发图间隔未到（{wait}s），最多等 {cap}s 后直接发（不占死队列）"
+            )
+            await asyncio.sleep(cap)
         await self._pace_send()
         self._last_image_at[umo_ev] = time.time()
         filename = str(image.get("filename") or "image.png")
@@ -5197,12 +5390,13 @@ class NcdComfyPlugin(star.Star):
                 # ★ 2026-11-02：远程模式下「ComfyUI 没起」和「电脑没连上」必须分开说。
                 #   以前一律回「comfy未连接电脑」，模型据此认为画不了、直接放弃，
                 #   而实际上只要调 comfy_generate，插件就会请拉起器把 ComfyUI 拉起来。
-                can, why = self._pc_link_state()
+                can, why = await self._pc_link_state()
                 if can:
                     return (
                         "电脑在线，但 ComfyUI 现在没在跑。\n"
-                        "★ 这不影响出图：直接调 comfy_generate 就行，插件会请电脑上的拉起器"
-                        "把它启动起来（模型加载约 60~90 秒）。\n"
+                        "★ 这不影响出图：电脑上有常驻看护（Windows 计划任务），"
+                        "会在十几秒内把它拉起来；直接调 comfy_generate 即可"
+                        "（模型加载约 20~90 秒）。\n"
                         "不要回答“没连上 / 画不了”，也不要去让用户自己开程序。"
                     )
                 return (
@@ -5587,22 +5781,57 @@ class NcdComfyPlugin(star.Star):
             logger.warning(f"[comfy] 写历史索引失败: {exc}")
 
     def _history_prune(self, umo: str, items: list[dict]) -> list[dict]:
-        """按天数和每会话张数裁剪，顺便删掉不再保留的图。"""
+        """按天数和每会话张数裁剪，顺便删掉不再保留的图。
+
+        ★ 2026-11-02（P1-6）：裁剪同时是删除器，判定不能只信索引里的 ts：
+          · 索引里的 ts 可能被手工改过 / 时钟异常（为 0 或未来）；
+          · 一次误判就是物理删除，且不可回滚。
+        保护：
+          1) 删除判定再叠加文件 mtime —— 文件系统时间也必须早于 cutoff；
+          2) 单次最多删 20 个，超过就只写索引 + WARNING（交给人确认）；
+          3) items 为空时不做删除（说明索引读失败/刚建）。
+        """
         cutoff = time.time() - self._history_days() * 86400
-        kept = [e for e in sorted(items, key=lambda x: x["ts"], reverse=True)
-                if e["ts"] >= cutoff][: self._history_limit()]
+        kept = [
+            e
+            for e in sorted(items, key=lambda x: x.get("ts") or 0, reverse=True)
+            if (e.get("ts") or 0) >= cutoff
+        ][: self._history_limit()]
         keep_names = {e["file"] for e in kept}
         folder = self._session_image_dir(umo)
+
+        if not items:
+            self._history_write(umo, kept)
+            return kept
+
+        removed = 0
+        MAX_DELETE = 20
+        overflow = 0
         try:
             for fp in folder.iterdir():
                 if not fp.is_file() or fp.name == HISTORY_FILE:
                     continue
                 if fp.suffix.lower() not in (".png", ".jpg", ".jpeg", ".webp"):
                     continue
-                if fp.name not in keep_names:
-                    fp.unlink(missing_ok=True)
+                if fp.name in keep_names:
+                    continue
+                try:
+                    if fp.stat().st_mtime >= cutoff:
+                        continue          # 文件本身还新：不动
+                except OSError:
+                    continue
+                if removed >= MAX_DELETE:
+                    overflow += 1
+                    continue
+                fp.unlink(missing_ok=True)
+                removed += 1
         except OSError:
             pass
+        if overflow:
+            logger.warning(
+                f"[comfy] 历史裁剪一次要删 {removed + overflow} 张，超过单次上限 "
+                f"{MAX_DELETE}；本次只删了 {removed} 张，剩余留给下次/人工确认 → {umo}"
+            )
         self._history_write(umo, kept)
         return kept
 
@@ -5658,7 +5887,7 @@ class NcdComfyPlugin(star.Star):
         """开关 ComfyUI 进程：/comfyui off 关闭，/comfyui on 启动，不带参数看状态。"""
         sub = str(args or "").strip().lower()
         sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
-        is_admin = self._is_admin_event(event)
+        is_admin = await self._is_admin_event_async(event)
         logger.info(
             f"[comfy] /comfyui 收到 sub={sub!r} sender={sender} "
             f"admin={is_admin} role={getattr(event, 'role', '')!r}"

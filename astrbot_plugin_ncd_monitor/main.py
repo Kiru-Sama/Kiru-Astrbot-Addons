@@ -1057,6 +1057,13 @@ class Main(star.Star):
           1Hz 等于常驻 10% 单核。流式模式只有进程启动那一次开销。
         进程意外退出就 5 秒后重启（跑监控不能因为 GPU 驱动抽一下就永久瞎掉）。
         """
+        # ★ 2026-11-02（P1-1）：手机 proot 里永远没有 nvidia-smi，
+        #   以前每 5 秒失败一次（一天 1.7 万条 WARNING + 持续唤醒）。
+        import shutil as _shutil
+
+        if not _shutil.which("nvidia-smi"):
+            logger.info("[ncd-monitor] 本机没有 nvidia-smi，GPU 采样关闭（手机端正常）")
+            return
         query = (
             "--query-gpu=name,memory.used,memory.total,"
             "utilization.gpu,temperature.gpu,power.draw"
@@ -1111,7 +1118,13 @@ class Main(star.Star):
             await asyncio.sleep(5)
 
     async def _sample_system_loop(self) -> None:
-        gpu_task = asyncio.create_task(self._gpu_stream_loop())
+        import shutil as _shutil
+
+        gpu_task = (
+            asyncio.create_task(self._gpu_stream_loop())
+            if _shutil.which("nvidia-smi")
+            else None
+        )
         try:
             import psutil
         except Exception:  # noqa: BLE001
@@ -4954,7 +4967,8 @@ class Main(star.Star):
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
             if safe == "comfy":
-                self._enrich_comfy(data)
+                # ★ 2026-11-02（P0-3）：缩略图解码是同步 IO，必须挪出事件循环
+                await asyncio.to_thread(self._enrich_comfy, data)
                 await self._attach_comfy_queue(data)
             return json_response(data)
         except Exception as exc:  # noqa: BLE001
@@ -5000,7 +5014,8 @@ class Main(star.Star):
             roots.append(os.path.realpath(str(get_astrbot_temp_path())))
         except Exception:  # noqa: BLE001
             pass
-        roots.append(os.path.realpath(tempfile.gettempdir()))
+        # ★ 2026-11-02（P1-8）：不再把系统临时目录放进可读范围。
+        #   理由：临时目录常落别的应用的截图/导出图，为了修 UI 破图把读取面扩到那里不划算。
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):  # noqa: D401
@@ -5013,10 +5028,18 @@ class Main(star.Star):
                     q = parse_qs(urlparse(self.path).query)
                     p = unquote((q.get("p") or [""])[0])
                     s = (q.get("s") or [""])[0]
+                    e = (q.get("e") or [""])[0]
                     want = hmac.new(
-                        secret.encode(), p.encode(), hashlib.sha256
-                    ).hexdigest()[:16]
-                    if not p or not hmac.compare_digest(s, want):
+                        secret.encode(), f"{p}|{e}".encode(), hashlib.sha256
+                    ).hexdigest()[:32]
+                    if not p or not e or not hmac.compare_digest(s, want):
+                        self.send_error(403)
+                        return
+                    try:
+                        if int(e) < time.time():      # 直链过期即失效
+                            self.send_error(403)
+                            return
+                    except ValueError:
                         self.send_error(403)
                         return
                     real = os.path.realpath(p)
@@ -5090,10 +5113,11 @@ class Main(star.Star):
             from urllib.parse import quote
 
             port = self._ensure_file_server()
+            exp = int(time.time()) + 600          # 10 分钟内有效
             sig = hmac.new(
-                self._file_secret.encode(), path.encode(), hashlib.sha256
-            ).hexdigest()[:16]
-            return f"http://{self._lan_ip()}:{port}/i?p={quote(path)}&s={sig}"
+                self._file_secret.encode(), f"{path}|{exp}".encode(), hashlib.sha256
+            ).hexdigest()[:32]
+            return f"http://{self._lan_ip()}:{port}/i?p={quote(path)}&e={exp}&s={sig}"
         except Exception:  # noqa: BLE001
             return ""
 
@@ -5540,7 +5564,9 @@ class Main(star.Star):
                 f"[ncd-monitor] /thumb 键 {key} 没有登记过路径"
                 f"（已登记 {len(self._thumb_paths)} 个）"
             )
-        data = self._make_thumb(key, path)
+        # ★ 2026-11-02：缩略图解码是同步 IO（PIL open/thumbnail/save + b64），
+        #   面板一次并发 8+ 个 /thumb 会把事件循环卡 1~2 秒，全部会话停摆。
+        data = await asyncio.to_thread(self._make_thumb, key, path)
         if not data:
             logger.warning(
                 f"[ncd-monitor] /thumb 生成失败 key={key} path={path!r} "

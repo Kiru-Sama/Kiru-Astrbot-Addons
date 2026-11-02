@@ -474,6 +474,28 @@ class ComfyClient:
     # ------------------------------------------------------------------
     #  模型 / 节点信息
     # ------------------------------------------------------------------
+
+    async def cancel(self) -> None:
+        """中止远端正在跑的这一张：先 interrupt，再从队列删掉。
+
+        ★ 2026-11-02：超时只释放本地槽时，PC 上那张还在跑，
+          插件立刻提交下一张 → 队列越积越长，一次超时后面张张超时。
+        """
+        pid = str(getattr(self, "last_prompt_id", "") or "")
+        try:
+            await asyncio.to_thread(self._post_json_sync, "/interrupt", {}, 8.0)
+            logger.warning(f"[comfy] 已请求中断远端任务 {pid or '(未知)'}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 中断远端任务失败: {exc}")
+        if pid:
+            try:
+                await asyncio.to_thread(
+                    self._post_json_sync, "/queue", {"delete": [pid]}, 8.0
+                )
+                logger.warning(f"[comfy] 已从远端队列删除 {pid}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 从远端队列删除失败: {exc}")
+
     def _object_info_sync(self, node: str) -> dict:
         return self._get_json_sync(f"/object_info/{urllib.parse.quote(node)}", timeout=20)
 
@@ -755,7 +777,27 @@ class ComfyClient:
 
     async def _wait_history(self, prompt_id: str) -> dict:
         deadline = time.time() + self.gen_timeout
+        # ★ 2026-11-02：电脑中途关机/热点掉线时，原来只轮询 /history，
+        #   会一直等到 gen_timeout（默认 300 秒）才报错，用户干等 5 分钟。
+        #   这里每 15 秒顺手探一次活，连续 3 次探不到就立刻中止。
+        link_fails = 0
+        last_probe = 0.0
         while time.time() < deadline:
+            if time.time() - last_probe >= 15.0:
+                last_probe = time.time()
+                try:
+                    alive = await asyncio.to_thread(self._health_sync, 1.0)
+                except Exception:  # noqa: BLE001
+                    alive = None
+                if alive is None:
+                    link_fails += 1
+                    if self.is_remote and link_fails >= 3:
+                        raise ComfyError(
+                            "电脑断线（连续 3 次探活失败，已中止等待）。"
+                            "链路恢复后再画；如果是电脑睡了，等它醒来自动重连。"
+                        )
+                else:
+                    link_fails = 0
             if self._proc is not None and self._proc.poll() is not None:
                 # ★ 先看端口：手动重启/外部进程接管时，旧句柄已死但服务还活着，
                 #   不能把上一张图的日志当成这一张的崩溃。

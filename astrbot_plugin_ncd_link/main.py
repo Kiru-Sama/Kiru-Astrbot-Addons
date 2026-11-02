@@ -40,6 +40,7 @@ class NcdLinkPlugin(star.Star):
         self._last_error = ""
         self._last_umo = ""
         self._gap_events: list[dict] = []
+        self._closing = False
 
         try:
             self.context.register_web_api(
@@ -144,6 +145,8 @@ class NcdLinkPlugin(star.Star):
           （表现为 /ncd-link/status 里 online 一直是 null）。
           所以再加两条拉起路径：第一条消息、第一次 API 调用。
         """
+        if self._closing:
+            return
         if self._task is None or self._task.done():
             try:
                 self._task = asyncio.create_task(self._loop())
@@ -164,6 +167,25 @@ class NcdLinkPlugin(star.Star):
         if umo:
             self._last_umo = umo
         self._ensure_task()
+
+    async def terminate(self) -> None:
+        """插件被禁用/重载时收掉探测循环。
+
+        ★ 2026-11-02（P1-5）：原来没有 terminate，热重载一次就多一个循环，
+          同一条「网络恢复了」可能被发好几次；禁用后还会幽灵发通知。
+        """
+        self._closing = True
+        task = getattr(self, "_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[link] 停止看护时异常（忽略）: {exc}")
+        self._task = None
+        logger.info("[link] 链路看护已停止")
 
     # ------------------------------------------------------------------
     #  Web API
