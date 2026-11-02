@@ -26,6 +26,16 @@ from pathlib import Path
 
 from astrbot.api import logger
 
+# ★ 2026-11-02（S2）：HTTP 收发统一走 comfy_transport.Transport（纯 stdlib、可离线测）。
+#   ComfyClient 只保留进程管理 / 排队 / 进度解析，不再自己拼 urllib。
+import os as _os_path
+import sys as _sys_path
+
+_PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.path.abspath(__file__))
+if _PLUGIN_DIR_PATH not in _sys_path.path:
+    _sys_path.path.insert(0, _PLUGIN_DIR_PATH)
+import comfy_transport as transport_mod
+
 
 class ComfyError(Exception):
     """ComfyUI 后端的可预期失败（要给人话，不是栈）。"""
@@ -99,6 +109,9 @@ class ComfyClient:
         self.temp_dir = str(temp_dir or "").strip()
         self.log_path = Path(log_path) if log_path else None
         self.base = f"http://{self.host}:{self.port}"
+        self.transport = transport_mod.Transport(
+            self.base, timeout=10.0, client_id="ncd-comfy"
+        )
 
         self._proc: subprocess.Popen | None = None
         self._owned = False  # True = 进程是我们拉起来的（空闲时才敢杀）
@@ -148,11 +161,7 @@ class ComfyClient:
     # ------------------------------------------------------------------
     def _health_sync(self, timeout: float = 2.0) -> dict | None:
         """探活：/system_stats 能返回带 system 的 JSON 才算 ComfyUI。"""
-        try:
-            with urllib.request.urlopen(f"{self.base}/system_stats", timeout=timeout) as r:
-                data = json.loads(r.read().decode("utf-8"))
-        except Exception:  # noqa: BLE001
-            return None
+        data = self.transport.health(timeout)
         if not isinstance(data, dict) or not isinstance(data.get("system"), dict):
             return None
         return data
@@ -443,33 +452,13 @@ class ComfyClient:
     #  HTTP 基础
     # ------------------------------------------------------------------
     def _get_json_sync(self, path: str, timeout: float = 10.0) -> dict:
-        with urllib.request.urlopen(f"{self.base}{path}", timeout=timeout) as r:
-            return json.loads(r.read().decode("utf-8"))
+        return self.transport._request("GET", path, None, timeout)
 
     def _post_json_sync(self, path: str, payload: dict, timeout: float) -> dict:
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            f"{self.base}{path}",
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                raw = r.read().decode("utf-8", "replace")
-        except urllib.error.HTTPError as exc:
-            detail = ""
-            try:
-                detail = exc.read().decode("utf-8", "replace")[:1200]
-            except Exception:  # noqa: BLE001
-                pass
-            raise ComfyError(f"ComfyUI 返回 HTTP {exc.code}: {detail}") from exc
-        except Exception as exc:  # noqa: BLE001
+            return self.transport._request("POST", path, payload, timeout)
+        except transport_mod.TransportError as exc:
             raise ComfyError(f"请求 ComfyUI 失败: {exc}") from exc
-        try:
-            return json.loads(raw or "{}")
-        except json.JSONDecodeError as exc:
-            raise ComfyError(f"ComfyUI 返回的不是 JSON: {raw[:200]!r}") from exc
 
     # ------------------------------------------------------------------
     #  模型 / 节点信息
@@ -760,87 +749,39 @@ class ComfyClient:
             logger.debug(f"[comfy] 进度监听失败（忽略）: {exc}")
 
     def _submit_sync(self, graph: dict, client_id: str = "") -> str:
-        data = self._post_json_sync(
-            "/prompt",
-            {"prompt": graph, "client_id": client_id or uuid.uuid4().hex},
-            timeout=max(30.0, self.gen_timeout),
-        )
-        if not isinstance(data, dict):
-            raise ComfyError(f"ComfyUI /prompt 返回了奇怪的东西: {data!r}")
-        node_errors = data.get("node_errors") or {}
-        if node_errors:
-            raise ComfyError(f"ComfyUI 拒绝了工作流：{_fmt_node_errors(node_errors)}")
-        prompt_id = str(data.get("prompt_id") or "")
-        if not prompt_id:
-            raise ComfyError(f"ComfyUI 没返回 prompt_id：{json.dumps(data, ensure_ascii=False)[:400]}")
-        return prompt_id
+        try:
+            return self.transport.submit(graph, client_id or uuid.uuid4().hex)
+        except transport_mod.ProtocolError as exc:
+            raise ComfyError(f"ComfyUI 拒绝了工作流：{exc}") from exc
+        except transport_mod.TransportUnreachable as exc:
+            raise ComfyError(f"连不上 ComfyUI：{exc}") from exc
 
     async def _wait_history(self, prompt_id: str) -> dict:
+        """等出图结果：委托 Transport（内含每 15 秒探活 + 连续 3 次失败中止）。"""
         deadline = time.time() + self.gen_timeout
-        # ★ 2026-11-02：电脑中途关机/热点掉线时，原来只轮询 /history，
-        #   会一直等到 gen_timeout（默认 300 秒）才报错，用户干等 5 分钟。
-        #   这里每 15 秒顺手探一次活，连续 3 次探不到就立刻中止。
-        link_fails = 0
-        last_probe = 0.0
-        while time.time() < deadline:
-            if time.time() - last_probe >= 15.0:
-                last_probe = time.time()
-                try:
-                    alive = await asyncio.to_thread(self._health_sync, 1.0)
-                except Exception:  # noqa: BLE001
-                    alive = None
-                if alive is None:
-                    link_fails += 1
-                    if self.is_remote and link_fails >= 3:
-                        raise ComfyError(
-                            "电脑断线（连续 3 次探活失败，已中止等待）。"
-                            "链路恢复后再画；如果是电脑睡了，等它醒来自动重连。"
-                        )
-                else:
-                    link_fails = 0
-            if self._proc is not None and self._proc.poll() is not None:
-                # ★ 先看端口：手动重启/外部进程接管时，旧句柄已死但服务还活着，
-                #   不能把上一张图的日志当成这一张的崩溃。
-                stats = await asyncio.to_thread(self._health_sync, 1.0)
-                if stats is not None:
-                    logger.warning("[comfy] 旧进程句柄已退出但服务在线，接管后继续等待")
-                    self._drop_stale_proc()
-                else:
-                    raise ComfyError(
-                        f"出图过程中 ComfyUI 退出了（exit={_exit_text(self._proc.returncode)}）。"
-                        f"日志尾部：{_log_tail(self.log_path) or '（空）'}"
-                    )
-            try:
-                hist = await asyncio.to_thread(
-                    self._get_json_sync, f"/history/{urllib.parse.quote(prompt_id)}", 10.0
-                )
-            except ComfyError as exc:
-                # 服务刚起来时可能有短暂 404/连接问题，继续等
-                logger.warning(f"[comfy] 轮询历史失败（继续等）: {exc}")
-                hist = {}
-            entry = (hist or {}).get(prompt_id)
-            if entry:
-                status = entry.get("status") or {}
-                if status.get("status_str") == "error":
-                    raise ComfyError(f"ComfyUI 执行出错：{_fmt_status_messages(status)}")
-                if status.get("completed") or entry.get("outputs"):
-                    return entry.get("outputs") or {}
-            await asyncio.sleep(0.6)
-        raise ComfyError(
-            f"等 ComfyUI 出图超过 {self.gen_timeout:.0f} 秒还没结果。"
-            "（第一次跑大模型会慢一些；还不行就看 comfy_timeout 配置和显存）"
-        )
+        try:
+            return await asyncio.to_thread(self.transport.wait, prompt_id, deadline)
+        except transport_mod.TransportTimeout:
+            raise ComfyError(
+                f"等 ComfyUI 出图超过 {self.gen_timeout:.0f} 秒还没结果。"
+                "（第一次跑大模型会慢一些；还不行就看 comfy_timeout 配置和显存）"
+            ) from None
+        except transport_mod.TransportUnreachable as exc:
+            raise ComfyError(f"电脑断线（{exc}）") from exc
+        except transport_mod.ExecutionError as exc:
+            raise ComfyError(f"ComfyUI 执行出错：{exc}") from exc
 
     async def fetch_image(self, image: dict) -> bytes:
         """按 /view 取回图片字节。"""
-        query = urllib.parse.urlencode(
-            {
-                "filename": image.get("filename", ""),
-                "subfolder": image.get("subfolder", ""),
-                "type": image.get("type", "output"),
-            }
-        )
-        return await asyncio.to_thread(self._fetch_sync, query)
+        try:
+            return await asyncio.to_thread(
+                self.transport.view,
+                image.get("filename", ""),
+                image.get("subfolder", ""),
+                image.get("type", "output"),
+            )
+        except transport_mod.TransportError as exc:
+            raise ComfyError(f"取图失败: {exc}") from exc
 
     async def upload_image(self, data: bytes, filename: str = "reference.png") -> str:
         """把参考图传进 ComfyUI 的 input 目录，返回 LoadImage 认的名字。
@@ -901,12 +842,9 @@ class ComfyClient:
     async def queue_status(self) -> dict:
         """队列里还有几个在跑（给状态工具用，连不上就返回空）。"""
         try:
-            data = await asyncio.to_thread(self._get_json_sync, "/queue", 3.0)
+            return await asyncio.to_thread(self.transport.queue)
         except Exception:  # noqa: BLE001
             return {"running": 0, "pending": 0}
-        running = len(data.get("queue_running") or [])
-        pending = len(data.get("queue_pending") or [])
-        return {"running": running, "pending": pending}
 
     async def queue_position(self, prompt_id: str) -> int | None:
         """0 = 正在跑；N = 前面还有 N 个；None = 不在队列里。"""
