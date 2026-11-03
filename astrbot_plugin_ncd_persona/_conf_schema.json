@@ -1,0 +1,8 @@
+{
+  "persona_admin_only": {
+    "type": "bool",
+    "description": "群聊里只允许管理员切换人格",
+    "hint": "默认关：群友也能给本群换人格（只影响这个群）。打开后只有管理员/群主能换。",
+    "default": false
+  }
+}
