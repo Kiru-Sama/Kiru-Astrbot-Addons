@@ -1,8 +1,14 @@
 {
-  "persona_admin_only": {
-    "type": "bool",
-    "description": "群聊里只允许管理员切换人格",
-    "hint": "默认关：群友也能给本群换人格（只影响这个群）。打开后只有管理员/群主能换。",
-    "default": false
+  "ncd_primary_admin": {
+    "type": "string",
+    "description": "主管理员 QQ（群聊里可以改人格）",
+    "hint": "填你自己的 QQ 号。群聊只有主管理员和副管理员能切换人格；私聊不受限。",
+    "default": ""
+  },
+  "ncd_deputy_admin": {
+    "type": "string",
+    "description": "副管理员 QQ（群聊里可以改人格）",
+    "hint": "留空 = 没有副管理员。",
+    "default": ""
   }
 }

@@ -37,15 +37,28 @@ class NcdPersonaPlugin(Star):
         self._conf = config or {}
 
     # ------------------------------------------------------------------
-    #  配置
+    #  权限：群聊只允许管理员/副管理员，私聊不限
     # ------------------------------------------------------------------
-    def _conf_bool(self, key: str, default: bool = False) -> bool:
+    def _conf_str(self, key: str, default: str = "") -> str:
         raw = self._conf.get(key)
-        if raw is None or raw == "":
-            return default
-        if isinstance(raw, bool):
-            return raw
-        return str(raw).strip().lower() in ("1", "true", "yes", "on", "是")
+        return default if raw is None else str(raw).strip()
+
+    def _is_allowed(self, event: AstrMessageEvent) -> bool:
+        """群聊：只有主/副管理员能切；私聊：谁都能切（只影响自己会话）。"""
+        try:
+            gid = str(event.get_group_id() or "")
+        except Exception:  # noqa: BLE001
+            gid = ""
+        if not gid:
+            return True
+        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        if not sender:
+            return False
+        primary = self._conf_str("ncd_primary_admin")
+        deputy = self._conf_str("ncd_deputy_admin")
+        return bool(
+            (primary and sender == primary) or (deputy and sender == deputy)
+        )
 
     # ------------------------------------------------------------------
     #  AstrBot 原生数据
@@ -133,6 +146,9 @@ class NcdPersonaPlugin(Star):
 
         # ② 恢复默认
         if name in RESET_WORDS:
+            if not self._is_allowed(event):
+                yield event.plain_result("群聊里只有管理员 / 副管理员能改人格。")
+                return
             if "persona_id" in cfg:
                 cfg.pop("persona_id", None)
                 if not await self._write_cfg(umo, cfg):
@@ -142,6 +158,9 @@ class NcdPersonaPlugin(Star):
             return
 
         # ③ 切换
+        if not self._is_allowed(event):
+            yield event.plain_result("群聊里只有管理员 / 副管理员能改人格。")
+            return
         target, hits = self._match(name, items)
         if target is None:
             if hits:
