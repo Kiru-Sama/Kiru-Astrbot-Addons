@@ -87,16 +87,29 @@ def main() -> int:
         # 2-7 点静默
         assert proactive.in_quiet_hours(2) and proactive.in_quiet_hours(6)
         assert not proactive.in_quiet_hours(7) and not proactive.in_quiet_hours(1)
-        # 分档：24h 内 1 小时、24~48h 3 小时、更久 0
+        # 分档
         now = 1_000_000.0
-        assert proactive.interval_for(now - 3600, now) == 3600
-        assert proactive.interval_for(now - 30 * 3600, now) == 10800
-        assert proactive.interval_for(now - 50 * 3600, now) == 0
-        # 判定：刚被 @ 且从没说过 → 太早不说；过了一个间隔才说
-        assert not proactive.should_speak(now - 600, 0, now, 12)
-        assert proactive.should_speak(now - 3700, 0, now, 12)
-        assert not proactive.should_speak(now - 3700, 0, now, 3)   # 静默时段
-        return "静默/分档/间隔判定 8 条通过"
+        assert proactive.tier_for(now - 3600, now) == "fast"
+        assert proactive.tier_for(now - 30 * 3600, now) == "slow"
+        assert proactive.tier_for(now - 50 * 3600, now) == ""
+        # 随机间隔范围：24h 档 10~90 分钟；48h 档 180~240 分钟
+        import random as _r
+        rng = _r.Random(42)
+        for _ in range(200):
+            g = proactive.next_gap(now - 3600, now, rng=rng)
+            assert 600 - 1 <= g <= 5400 + 1, g
+            g2 = proactive.next_gap(now - 30 * 3600, now, rng=rng)
+            assert 10800 - 1 <= g2 <= 14400 + 1, g2
+        # 到点判断：早于 next 不说；到了才说；群里热闹时跳过
+        assert not proactive.should_speak(now + 100, now, 12)
+        assert proactive.should_speak(now - 1, now, 12)
+        assert not proactive.should_speak(now - 1, now, 3)          # 静默时段
+        assert not proactive.should_speak(now - 1, now, 12, recent_activity_ts=now - 60)  # 刚有人说话
+        # 决策解析
+        assert proactive.parse_decision("SKIP") == ""
+        assert proactive.parse_decision("发言：在呢") == "在呢"
+        assert proactive.parse_decision("") == ""
+        return "静默/分档/随机范围/上下文跳过/解析 全通过"
 
     check("proactive 主动发言判定", t_proactive)
 

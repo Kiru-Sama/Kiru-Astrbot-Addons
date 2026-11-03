@@ -589,5 +589,41 @@
     "description": "主动发言话术池",
     "hint": "留空用内置几句；也可以写多条，随机挑一句。",
     "default": []
+  },
+  "comfy_proactive_min_gap_min": {
+    "type": "int",
+    "description": "24h 内活跃群：最短间隔（分钟）",
+    "hint": "默认 10。每次发言后在这个范围里随机排下一次。",
+    "default": 10
+  },
+  "comfy_proactive_max_gap_min": {
+    "type": "int",
+    "description": "24h 内活跃群：最长间隔（分钟）",
+    "hint": "默认 90。",
+    "default": 90
+  },
+  "comfy_proactive_slow_min_gap_min": {
+    "type": "int",
+    "description": "24~48h 群：最短间隔（分钟）",
+    "hint": "默认 180。",
+    "default": 180
+  },
+  "comfy_proactive_slow_max_gap_min": {
+    "type": "int",
+    "description": "24~48h 群：最长间隔（分钟）",
+    "hint": "默认 240。",
+    "default": 240
+  },
+  "comfy_proactive_use_llm": {
+    "type": "bool",
+    "description": "到期后让模型看群聊上下文决定说不说",
+    "hint": "开：模型读最近几条消息，判断不适合就 SKIP；关：只用话术池。",
+    "default": true
+  },
+  "comfy_proactive_context_messages": {
+    "type": "int",
+    "description": "判断时读最近几条消息",
+    "hint": "默认 10，范围 3~30。",
+    "default": 10
   }
 }

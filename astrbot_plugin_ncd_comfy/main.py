@@ -400,6 +400,10 @@ class NcdComfyPlugin(star.Star):
         self._proactive_mentions: dict[str, float] = {}
         self._proactive_sent: dict[str, float] = {}
         self._proactive_task: asyncio.Task | None = None
+        # ★ 2026-11-03：随机间隔 + 上下文判断所需的状态
+        self._proactive_next: dict[str, float] = {}
+        self._proactive_recent_lines: dict[str, list[str]] = {}
+        self._group_last_msg: dict[str, float] = {}
         # 异步图写入会话历史时串行，避免并发写坏 content
         self._conv_lock = asyncio.Lock()
         # ★ 启动/重载时先发一次空状态：旧进程可能留下“正在画”的总线快照，
@@ -1103,14 +1107,24 @@ class NcdComfyPlugin(star.Star):
             now = time.time()
             rows = []
             for umo, ts in sorted(self._proactive_mentions.items()):
+                tier = proactive.tier_for(float(ts), now)
+                if tier == "fast":
+                    gap_min = [10, 90]
+                elif tier == "slow":
+                    gap_min = [180, 240]
+                else:
+                    gap_min = [0, 0]
+                next_at = float(self._proactive_next.get(umo) or 0.0)
                 rows.append(
                     {
                         "umo": umo,
+                        "tier": tier or "expired",
                         "mention_ago_min": round((now - float(ts)) / 60.0, 1),
                         "sent_ago_min": round((now - float(self._proactive_sent.get(umo, 0.0))) / 60.0, 1)
                         if self._proactive_sent.get(umo)
                         else None,
-                        "interval_min": int(proactive.interval_for(float(ts), now) // 60),
+                        "gap_min": gap_min,
+                        "next_in_min": round((next_at - now) / 60.0, 1) if next_at else None,
                     }
                 )
             return {
@@ -3724,7 +3738,7 @@ class NcdComfyPlugin(star.Star):
         req.system_prompt = (base + "\n\n[系统提醒] " + note).strip()
 
     # ------------------------------------------------------------------
-    #  群聊主动发言（按「最近被 @ 的时间」分两档）
+    #  群聊主动发言
     # ------------------------------------------------------------------
     def _proactive_file(self) -> Path:
         return (
@@ -3743,8 +3757,19 @@ class NcdComfyPlugin(star.Star):
         if self._proactive_mentions or self._proactive_sent:
             return  # 内存里已有（别用磁盘旧值覆盖刚记下的 @）
         if isinstance(raw, dict):
-            self._proactive_mentions = {str(k): float(v) for k, v in (raw.get("mentions") or {}).items()}
-            self._proactive_sent = {str(k): float(v) for k, v in (raw.get("sent") or {}).items()}
+            self._proactive_mentions = {
+                str(k): float(v) for k, v in (raw.get("mentions") or {}).items()
+            }
+            self._proactive_sent = {
+                str(k): float(v) for k, v in (raw.get("sent") or {}).items()
+            }
+            self._proactive_next = {
+                str(k): float(v) for k, v in (raw.get("next") or {}).items()
+            }
+            self._proactive_recent_lines = {
+                str(k): [str(x) for x in (v or [])]
+                for k, v in (raw.get("recent") or {}).items()
+            }
 
     def _proactive_save(self) -> None:
         try:
@@ -3753,7 +3778,12 @@ class NcdComfyPlugin(star.Star):
             tmp = path.with_name(path.name + ".tmp")
             tmp.write_text(
                 json.dumps(
-                    {"mentions": self._proactive_mentions, "sent": self._proactive_sent},
+                    {
+                        "mentions": self._proactive_mentions,
+                        "sent": self._proactive_sent,
+                        "next": self._proactive_next,
+                        "recent": self._proactive_recent_lines,
+                    },
                     ensure_ascii=False,
                 ),
                 encoding="utf-8",
@@ -3762,8 +3792,82 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 主动发言状态保存失败: {exc}")
 
+    def _proactive_gap_ranges(self) -> tuple[tuple[float, float], tuple[float, float]]:
+        """两个档位的随机间隔（秒）：24h 内 10~90 分钟；24~48h 180~240 分钟。"""
+        fast = (
+            max(0.0, self._conf_float("comfy_proactive_min_gap_min", 10) * 60),
+            max(0.0, self._conf_float("comfy_proactive_max_gap_min", 90) * 60),
+        )
+        slow = (
+            max(0.0, self._conf_float("comfy_proactive_slow_min_gap_min", 180) * 60),
+            max(0.0, self._conf_float("comfy_proactive_slow_max_gap_min", 240) * 60),
+        )
+        return fast, slow
+
+    def _proactive_lines(self) -> list[str]:
+        raw = self._conf.get("comfy_proactive_lines")
+        if isinstance(raw, list):
+            lines = [str(x) for x in raw if str(x).strip()]
+        elif isinstance(raw, str):
+            lines = [x.strip() for x in raw.split("|") if x.strip()]
+        else:
+            lines = []
+        return lines or list(proactive.DEFAULT_LINES)
+
+    async def _proactive_context(self, umo: str) -> str:
+        """这个群最近几条消息（人类可读），给模型判断用。"""
+        try:
+            cm = getattr(self.context, "conversation_manager", None)
+            if cm is None:
+                return ""
+            cid = await cm.get_curr_conversation_id(umo)
+            if not cid:
+                return ""
+            size = max(3, min(30, self._conf_int("comfy_proactive_context_messages", 10)))
+            texts, _total = await cm.get_human_readable_context(
+                umo, cid, page=1, page_size=size
+            )
+            return "\n".join((texts or [])[-size:])[-2000:]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 读取主动发言上下文失败: {exc}")
+            return ""
+
+    async def _proactive_llm(self, umo: str) -> str | None:
+        """让模型看着上下文决定说不说；None = 调用不可用（调用方回落话术）。"""
+        ctx = await self._proactive_context(umo)
+        prompt = (
+            "下面是这个群聊最近的消息（User 是群友，Assistant 是你之前的回复）：\n"
+            f"{ctx or '（最近没有消息）'}\n\n"
+            "现在轮到你主动在群里说一句话。规则：\n"
+            "1. 如果现在不适合插话（别人在互相说话、气氛严肃、话题和你无关），只回 SKIP。\n"
+            "2. 如果适合，只回一句很短的口语（不超过 30 字），自然、符合你的人设。\n"
+            "3. 不要复述上面的内容，不要解释你在干什么，不要问连串问题。\n"
+            "只输出要发的那句话，或者 SKIP。"
+        )
+        try:
+            provider = await self.context.get_using_provider_async(umo)
+            if provider is None:
+                return None
+            resp = await asyncio.wait_for(provider.text_chat(prompt=prompt), timeout=45)
+            raw = getattr(resp, "completion_text", "") or ""
+            if not raw.strip():
+                return None
+            return proactive.parse_decision(raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 主动发言判断失败（回落话术）: {exc}")
+            return None
+
+    async def _proactive_decide(self, umo: str) -> str:
+        """返回要说的话；空串 = 这次不说。"""
+        if self._conf_bool("comfy_proactive_use_llm", True):
+            decided = await self._proactive_llm(umo)
+            if decided is not None:
+                return decided
+        recent = self._proactive_recent_lines.get(umo) or []
+        return proactive.pick_line(self._proactive_lines(), recent)
+
     async def _proactive_loop(self) -> None:
-        """每 5 分钟检查一次；只在 2-7 点之外、且群够活跃时说话。"""
+        """每 5 分钟检查一次；只有排定时间到了才进入判断。"""
         self._proactive_load()
         await asyncio.sleep(90)
         while not getattr(self, "_closing", False):
@@ -3783,28 +3887,46 @@ class NcdComfyPlugin(star.Star):
         quiet_end = self._conf_int("comfy_proactive_quiet_end", 7)
         if proactive.in_quiet_hours(hour, quiet_start, quiet_end):
             return
+        min_gap = max(0.0, self._conf_float("comfy_proactive_min_gap_min", 10) * 60)
+        fast, slow = self._proactive_gap_ranges()
         for umo, mention_ts in list(self._proactive_mentions.items()):
-            if not str(umo).endswith("GroupMessage:" + str(umo).split("GroupMessage:")[-1]):
-                pass  # 只处理群聊 umo（形如 xxx:GroupMessage:123）
             if ":GroupMessage:" not in str(umo):
                 continue
-            last_sent = float(self._proactive_sent.get(umo) or 0.0)
-            if not proactive.should_speak(mention_ts, last_sent, now, hour, quiet_start, quiet_end):
-                continue
-            raw_lines = self._conf.get("comfy_proactive_lines")
-            if isinstance(raw_lines, list):
-                lines = [str(x) for x in raw_lines if str(x).strip()]
-            elif isinstance(raw_lines, str):
-                lines = [x.strip() for x in raw_lines.split("|") if x.strip()]
-            else:
-                lines = []
-            lines = lines or list(proactive.DEFAULT_LINES)
-            text = proactive.pick_line(lines)
-            ok = await self._send_plain(umo, text)
-            if ok:
-                self._proactive_sent[umo] = now
+            # ① 还没排时间：按档位随机排一个
+            next_at = float(self._proactive_next.get(umo) or 0.0)
+            if next_at <= 0:
+                gap = proactive.next_gap(mention_ts, now, fast, slow)
+                if gap <= 0:
+                    continue
+                self._proactive_next[umo] = now + gap
                 self._proactive_save()
-                logger.info(f"[comfy] 群聊主动发言 → {umo}：{text[:40]}")
+                continue
+
+            # ② 时间没到 / 群里正热闹：跳过
+            recent = float(self._group_last_msg.get(umo) or 0.0)
+            if not proactive.should_speak(
+                next_at, now, hour, quiet_start, quiet_end, recent, min_gap
+            ):
+                continue
+
+            # ③ 到点了：先排下一次，再让模型判断「说不说」
+            gap = proactive.next_gap(mention_ts, now, fast, slow)
+            if gap <= 0:
+                self._proactive_next.pop(umo, None)
+                self._proactive_save()
+                continue
+            self._proactive_next[umo] = now + gap
+            text = await self._proactive_decide(umo)
+            if text:
+                if await self._send_plain(umo, text):
+                    self._proactive_sent[umo] = now
+                    history = list(self._proactive_recent_lines.get(umo) or [])
+                    history.append(text)
+                    self._proactive_recent_lines[umo] = history[-3:]
+                    logger.info(f"[comfy] 主动发言 → {umo}：{text[:40]}")
+            else:
+                logger.info(f"[comfy] 主动发言跳过（看上下文不适合）→ {umo}")
+            self._proactive_save()
 
     async def _send_plain(self, umo: str, text: str) -> bool:
         try:
@@ -3819,10 +3941,15 @@ class NcdComfyPlugin(star.Star):
 
     @filter.event_message_type(EventMessageType.ALL)
     async def _note_bot_mention(self, event: AstrMessageEvent) -> None:
-        """记录「这个群最近一次主动 @ bot 的时间」（主动发言分档依据）。"""
+        """记录群活跃：最近消息时间 + 最近被 @ 时间。"""
         try:
             if not self._is_group_chat(event):
                 return
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if not umo:
+                return
+            # 所有群消息都记（判断「群里正热闹就别插嘴」）
+            self._group_last_msg[umo] = time.time()
             self_id = str(getattr(event, "get_self_id", lambda: "")() or "")
             if not self_id:
                 return
@@ -3833,18 +3960,16 @@ class NcdComfyPlugin(star.Star):
                     break
             if not hit:
                 return
-            umo = str(getattr(event, "unified_msg_origin", "") or "")
-            if not umo:
-                return
             if umo not in self._proactive_mentions:
                 self._proactive_load_if_needed()
             self._proactive_mentions[umo] = time.time()
+            self._proactive_next.pop(umo, None)  # 被 @ 了，重新排
             self._proactive_save()
             logger.info(f"[comfy] 群活跃记录（被 @）：{umo}")
             if self._proactive_task is None or self._proactive_task.done():
                 self._proactive_task = asyncio.create_task(self._proactive_loop())
         except Exception as exc:  # noqa: BLE001
-            logger.debug(f"[comfy] 记录 @ 时间失败: {exc}")
+            logger.debug(f"[comfy] 记录群活跃失败: {exc}")
 
     def _proactive_load_if_needed(self) -> None:
         if not self._proactive_mentions:
