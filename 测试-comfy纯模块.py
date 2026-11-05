@@ -15,6 +15,7 @@ import quota  # noqa: E402
 import sizing  # noqa: E402
 import tts  # noqa: E402
 import proactive  # noqa: E402
+import scramble  # noqa: E402
 
 results: list[tuple[str, bool, str]] = []
 
@@ -112,6 +113,27 @@ def main() -> int:
         return "静默/分档/随机范围/上下文跳过/解析 全通过"
 
     check("proactive 主动发言判定", t_proactive)
+
+    def t_tomato():
+        """小番茄：往返无损 + 曲线是排列。"""
+        import io as _io
+
+        from PIL import Image as _Image
+
+        w, h = 24, 16
+        img = _Image.new("RGBA", (w, h))
+        img.putdata([((x*7) % 256, (y*11) % 256, (x ^ y) % 256, 255) for y in range(h) for x in range(w)])
+        buf = _io.BytesIO(); img.save(buf, "PNG"); orig = buf.getvalue()
+        enc = scramble.scramble_image(orig)
+        dec = scramble.scramble_image(enc, decrypt=True)
+        a = _Image.open(_io.BytesIO(orig)).convert("RGBA").tobytes()
+        b = _Image.open(_io.BytesIO(dec)).convert("RGBA").tobytes()
+        assert a == b, "小番茄往返不一致"
+        assert enc != orig, "混淆后和原图一样（没生效）"
+        assert sorted(scramble.gilbert_order(w, h)) == list(range(w*h)), "Gilbert 曲线不是排列"
+        return "往返无损 + 曲线是排列"
+
+    check("小番茄混淆（无损往返）", t_tomato)
 
     ok = sum(1 for _, p, _ in results if p)
     bad = [r for r in results if not r[1]]

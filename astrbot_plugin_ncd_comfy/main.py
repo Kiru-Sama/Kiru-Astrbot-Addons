@@ -51,6 +51,10 @@ try:
     _safety = _load_local("safety", "safety.py")
 except Exception:  # noqa: BLE001
     _safety = None
+try:  # 小番茄混淆（纯像素重排，无损）
+    _scramble = _load_local("scramble", "scramble.py")
+except Exception:  # noqa: BLE001
+    _scramble = None
 
 import base64
 import contextvars
@@ -407,6 +411,9 @@ class NcdComfyPlugin(star.Star):
         # ★ 2026-11-05：群级审核开关（/审核 开|关），优先于全局 comfy_group_guard
         self._audit_guard: dict[str, bool] = {}
         self._audit_guard_loaded = False
+        # ★ 2026-11-05：被拦的图是否做小番茄混淆再发（按群）
+        self._audit_scramble: dict[str, bool] = {}
+        self._audit_scramble_loaded = False
         # 异步图写入会话历史时串行，避免并发写坏 content
         self._conv_lock = asyncio.Lock()
         # ★ 启动/重载时先发一次空状态：旧进程可能留下“正在画”的总线快照，
@@ -3866,6 +3873,43 @@ class NcdComfyPlugin(star.Star):
             return bool(self._audit_guard[umo])
         return self._conf_bool("comfy_group_guard", True)
 
+    def _audit_scramble_file(self) -> Path:
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "audit_scramble.json"
+        )
+
+    def _audit_scramble_load(self) -> None:
+        if self._audit_scramble_loaded:
+            return
+        self._audit_scramble_loaded = True
+        try:
+            raw = json.loads(self._audit_scramble_file().read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        if isinstance(raw, dict):
+            self._audit_scramble = {str(k): bool(v) for k, v in raw.items()}
+
+    def _audit_scramble_save(self) -> None:
+        try:
+            path = self._audit_scramble_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(self._audit_scramble, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 混淆图开关保存失败: {exc}")
+
+    def _scramble_enabled(self, umo: str) -> bool:
+        self._audit_scramble_load()
+        return bool(self._audit_scramble.get(str(umo or "")))
+
     @filter.command("审核", alias={"出图审核"})
     async def audit_cmd(self, event: AstrMessageEvent, arg: GreedyStr = ""):
         """查看/开关本群的出图审核。"""
@@ -3889,6 +3933,32 @@ class NcdComfyPlugin(star.Star):
                 f"本群出图审核：{'开' if enabled else '关'}（{source}）\n"
                 f"判定模型：{provider}\n"
                 "改：/审核 开　/审核 关"
+            )
+            return
+        if word in ("混淆图", "混淆"):
+            on = self._scramble_enabled(umo)
+            yield event.plain_result(
+                f"本群混淆图：{'开' if on else '关'}\n"
+                "开：/审核 混淆图 开　关：/审核 混淆图 关\n"
+                "打开后，被审核拦下的图会先做小番茄混淆再发到群里（原图仍然只发给你）。"
+            )
+            return
+        if word.startswith(("混淆图", "混淆")):
+            sub = word.replace("混淆图", "").replace("混淆", "").strip()
+            if sub in ("开", "on", "开启", "打开", "启用", "true", "1"):
+                self._audit_scramble[umo] = True
+            elif sub in ("关", "off", "关闭", "关掉", "禁用", "false", "0"):
+                self._audit_scramble[umo] = False
+            else:
+                yield event.plain_result("用法：/审核 混淆图 开　/审核 混淆图 关")
+                return
+            self._audit_scramble_save()
+            logger.info(
+                f"[comfy] 群聊混淆图 {umo} → "
+                f"{'开' if self._audit_scramble[umo] else '关'}"
+            )
+            yield event.plain_result(
+                f"本群混淆图已{'打开' if self._audit_scramble[umo] else '关闭'}。"
             )
             return
         if word in ("开", "on", "开启", "打开", "启用", "true", "1"):
@@ -5454,9 +5524,27 @@ class NcdComfyPlugin(star.Star):
                     "prompt": text[:120],
                 }
             )
+            # ★ 2026-11-05：本群开了混淆图 → 原图只留档给管理员，群里发小番茄混淆版
+            scraped_text = ""
+            if self._scramble_enabled(str(getattr(event, "unified_msg_origin", "") or "")) and _scramble is not None:
+                try:
+                    blended = await asyncio.to_thread(_scramble.scramble_image, data)
+                    await asyncio.wait_for(
+                        self.context.send_message(
+                            str(getattr(event, "unified_msg_origin", "") or ""),
+                            MessageChain(chain=[Comp.Image.fromBytes(blended)]),
+                        ),
+                        timeout=30,
+                    )
+                    scraped_text = "（已用小番茄混淆后发出，可用同款工具还原）"
+                    logger.info("[comfy] 审核拦下的图已混淆发送")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"[comfy] 混淆图生成/发送失败: {exc}")
+                    scraped_text = ""
             return (
-                "这张图被判为 NSFW，已经拦下没有发到群里。\n"
-                "★ 换个更收敛的画面描述重画；如果其实是误判，可以私聊发或调高判断阈值。"
+                "这张图被判为 NSFW，原图没有发到群里。"
+                + (scraped_text or "")
+                + "\n★ 换个更收敛的画面描述重画；如果其实是误判，可以私聊发或调高判断阈值。"
             )
 
         umo_ev = str(getattr(event, "unified_msg_origin", "") or "")
