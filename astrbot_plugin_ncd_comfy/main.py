@@ -404,6 +404,9 @@ class NcdComfyPlugin(star.Star):
         self._proactive_next: dict[str, float] = {}
         self._proactive_recent_lines: dict[str, list[str]] = {}
         self._group_last_msg: dict[str, float] = {}
+        # ★ 2026-11-05：群级审核开关（/审核 开|关），优先于全局 comfy_group_guard
+        self._audit_guard: dict[str, bool] = {}
+        self._audit_guard_loaded = False
         # 异步图写入会话历史时串行，避免并发写坏 content
         self._conv_lock = asyncio.Lock()
         # ★ 启动/重载时先发一次空状态：旧进程可能留下“正在画”的总线快照，
@@ -2332,7 +2335,8 @@ class NcdComfyPlugin(star.Star):
         标准由用户定：只有明确露出三点才拒；性暗示/情趣内衣/露沟都放行。
         判断不了（模型不能读图 / 调用失败 / 回答含糊）时放行并记日志。
         """
-        if not self._conf_bool("comfy_group_guard", True):
+        # ★ 2026-11-05：先看本群开关，再看全局默认（/审核 关 的群不审核）
+        if not self._audit_enabled(event):
             return False
         if not self._is_group_chat(event):
             return False
@@ -3736,6 +3740,87 @@ class NcdComfyPlugin(star.Star):
             return
         base = (req.system_prompt or "").rstrip()
         req.system_prompt = (base + "\n\n[系统提醒] " + note).strip()
+
+    # ------------------------------------------------------------------
+    #  群级审核开关（/审核）
+    # ------------------------------------------------------------------
+    def _audit_guard_file(self) -> Path:
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "audit_guard.json"
+        )
+
+    def _audit_guard_load(self) -> None:
+        if self._audit_guard_loaded:
+            return
+        self._audit_guard_loaded = True
+        try:
+            raw = json.loads(self._audit_guard_file().read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        if isinstance(raw, dict):
+            self._audit_guard = {str(k): bool(v) for k, v in raw.items()}
+
+    def _audit_guard_save(self) -> None:
+        try:
+            path = self._audit_guard_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(self._audit_guard, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 审核开关保存失败: {exc}")
+
+    def _audit_enabled(self, event: AstrMessageEvent) -> bool:
+        """本群有没有开审核：本群设置优先，否则全局默认。"""
+        self._audit_guard_load()
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if umo and umo in self._audit_guard:
+            return bool(self._audit_guard[umo])
+        return self._conf_bool("comfy_group_guard", True)
+
+    @filter.command("审核", alias={"出图审核"})
+    async def audit_cmd(self, event: AstrMessageEvent, arg: GreedyStr = ""):
+        """查看/开关本群的出图审核。"""
+        if not self._is_group_chat(event):
+            yield event.plain_result(
+                "审核只对群聊生效；私聊不审核。\n"
+                f"全局开关：{'开' if self._conf_bool('comfy_group_guard', True) else '关'}"
+            )
+            return
+        if not self._is_admin_event(event):
+            yield event.plain_result("只有管理员 / 副管理员能改审核开关。")
+            return
+        self._audit_guard_load()
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        enabled = self._audit_enabled(event)
+        source = "本群设置" if umo in self._audit_guard else "全局默认"
+        word = str(arg or "").strip().lower()
+        if not word or word in ("状态", "status", "?"):
+            provider = self._conf_str("comfy_group_guard_provider") or "当前会话的视觉模型"
+            yield event.plain_result(
+                f"本群出图审核：{'开' if enabled else '关'}（{source}）\n"
+                f"判定模型：{provider}\n"
+                "改：/审核 开　/审核 关"
+            )
+            return
+        if word in ("开", "on", "开启", "打开", "启用", "true", "1"):
+            self._audit_guard[umo] = True
+        elif word in ("关", "off", "关闭", "关掉", "禁用", "false", "0"):
+            self._audit_guard[umo] = False
+        else:
+            yield event.plain_result("用法：/审核（看状态）　/审核 开　/审核 关")
+            return
+        self._audit_guard_save()
+        state = "打开" if self._audit_guard[umo] else "关闭"
+        logger.info(f"[comfy] 群聊审核 {umo} → {state}")
+        yield event.plain_result(f"本群出图审核已{state}。")
 
     # ------------------------------------------------------------------
     #  群聊主动发言

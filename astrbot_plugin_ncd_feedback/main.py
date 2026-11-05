@@ -19,9 +19,13 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import asyncio
+
+import astrbot.api.message_components as Comp
 from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.web import request
+from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import GreedyStr
 
 PLUGIN_DIR = Path(__file__).resolve().parent
@@ -345,20 +349,35 @@ class NcdFeedbackPlugin(star.Star):
         )
 
     async def _notify_admin(self, item: dict) -> None:
-        if not self._cfg_bool("feedback_notify_admin", False):
+        """新反馈私聊推给主/副管理员（原来只写日志，等于没通知）。"""
+        if not self._cfg_bool("feedback_notify_admin", True):
             return
-        try:
-            cfg = self.context.get_config()
-            admins = [str(x) for x in (cfg.get("admins_id") or [])]
-        except Exception:  # noqa: BLE001
-            admins = []
+        umo = str(item.get("umo") or "")
+        plat = umo.split(":", 1)[0] if ":" in umo else ""
+        admins = [a for a in dict.fromkeys([self._PRIMARY_ADMIN, self._DEPUTY_ADMIN]) if a]
         if not admins:
+            logger.warning(f"[feedback] 新反馈 #{item['id']}：没配管理员，无法推送")
             return
-        # ★ 真正的私聊推送需要管理员会话的 umo，目前没有可靠来源，所以只落一条日志
-        logger.warning(
-            f"[feedback] 新反馈 #{item['id']} [{item['category']}] "
-            f"{item['text'][:60]}（管理员 {admins}）"
+        if not plat:
+            logger.warning(f"[feedback] 新反馈 #{item['id']}：拿不到平台名，无法推送")
+            return
+        text = (
+            f"【新反馈 #{item['id']}】[{item['category']}]\n"
+            f"来自：{item.get('group') or '私聊'} / {item.get('sender') or item.get('sender_id') or '?'}\n"
+            f"{item['text']}"
         )
+        for admin in admins:
+            try:
+                await asyncio.wait_for(
+                    self.context.send_message(
+                        f"{plat}:FriendMessage:{admin}",
+                        MessageChain(chain=[Comp.Plain(text)]),
+                    ),
+                    timeout=20,
+                )
+                logger.info(f"[feedback] 新反馈 #{item['id']} 已私聊推给 {admin}")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[feedback] 推送给管理员 {admin} 失败: {exc}")
 
     # ------------------------------------------------------------------
     #  Web API（面板用）

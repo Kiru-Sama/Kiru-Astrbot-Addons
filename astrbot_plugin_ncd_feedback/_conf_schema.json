@@ -7,9 +7,9 @@
   },
   "feedback_notify_admin": {
     "type": "bool",
-    "description": "新反馈写一条 WARNING 日志",
-    "hint": "开：每来一条反馈就打一条 WARNING 日志，方便在日志里瞄一眼。\n★ 真正的「私聊推给管理员」还没做（需要管理员会话的 umo），别指望它推送。",
-    "default": false
+    "description": "新反馈私聊推给管理员",
+    "hint": "开：每条反馈都私聊发给主/副管理员（需要填 ncd_primary_admin）。",
+    "default": true
   },
   "feedback_allow_group": {
     "type": "bool",
