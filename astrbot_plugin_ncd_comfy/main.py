@@ -1143,6 +1143,51 @@ class NcdComfyPlugin(star.Star):
             logger.error(f"[comfy] 读取主动发言状态失败: {exc}", exc_info=True)
             return {"error": f"{type(exc).__name__}: {exc}"}
 
+    async def api_report_test(self):
+        """调试：验证「审核留档」通道——给管理员私聊发一条测试消息。"""
+        from astrbot.api.web import request
+
+        admin = str(self._PRIMARY_ADMIN or "").strip()
+        if not admin:
+            return {"ok": False, "error": "没配 ncd_primary_admin"}
+        plat = ""
+        # ★ 优先从真实会话 umo 取平台实例名（形如 ncd-app_xxx）；
+        #   platform_manager 给的是类型名（aiocqhttp），拼出来的 umo 发不出去。
+        for umo in list(self._proactive_mentions.keys()):
+            if ":" in str(umo):
+                plat = str(umo).split(":", 1)[0]
+                break
+        if not plat:
+            try:
+                insts = list(self.context.platform_manager.get_insts() or [])
+                if insts:
+                    meta = insts[0].meta() if callable(getattr(insts[0], "meta", None)) else None
+                    plat = str(getattr(meta, "name", "") or "")
+            except Exception:  # noqa: BLE001
+                plat = ""
+        if not plat:
+            return {"ok": False, "error": "拿不到平台名（platform_manager 为空）"}
+        target = f"{plat}:FriendMessage:{admin}"
+        try:
+            await asyncio.wait_for(
+                self.context.send_message(
+                    target,
+                    MessageChain(
+                        chain=[
+                            Comp.Plain(
+                                "【留档通道测试】如果你看到这条消息，说明审核拦截的图能私聊发到你这里。"
+                            )
+                        ]
+                    ),
+                ),
+                timeout=20,
+            )
+            logger.info(f"[comfy] 留档通道测试已发送 → {target}")
+            return {"ok": True, "target": target}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 留档通道测试失败 → {target}: {exc}")
+            return {"ok": False, "target": target, "error": f"{type(exc).__name__}: {exc}"}
+
     def _register_quota_api(self) -> None:
         try:
             self.context.register_web_api(
@@ -1174,6 +1219,12 @@ class NcdComfyPlugin(star.Star):
                 self.api_proactive,
                 ["GET"],
                 "群聊主动发言状态（调试用）",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/report-test",
+                self.api_report_test,
+                ["POST"],
+                "给管理员私聊发一条留档通道测试（调试用）",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 注册额度面板 API 失败: {exc}")
