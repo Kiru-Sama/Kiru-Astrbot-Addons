@@ -3926,25 +3926,41 @@ class NcdComfyPlugin(star.Star):
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         enabled = self._audit_enabled(event)
         source = "本群设置" if umo in self._audit_guard else "全局默认"
-        word = str(arg or "").strip().lower()
-        if not word or word in ("状态", "status", "?"):
+        raw_arg = str(arg or "").strip()
+        if not raw_arg or " " not in raw_arg and len(raw_arg) <= 3:
+            # ★ 2026-11-05：AstrBot 的 GreedyStr 有时只给第一个词（"混淆图 开" → "混淆图"），
+            #   这里从原始消息里再取一次，保证子命令完整。
+            msg = str(getattr(event, "message_str", "") or "").strip()
+            stripped = re.sub(r"^[/／]?(?:审核|出图审核)\s*", "", msg).strip()
+            if stripped:
+                raw_arg = stripped
+        logger.info(f"[comfy] /审核 参数: {raw_arg!r}")
+        parts = [p for p in re.split(r"[\s\u3000]+", raw_arg) if p]
+        head = parts[0].lower() if parts else ""
+        sub = parts[1].lower() if len(parts) > 1 else ""
+
+        scramble_on = self._scramble_enabled(umo)
+
+        # ① 看状态（不带参数）
+        if not parts or head in ("状态", "status", "?"):
             provider = self._conf_str("comfy_group_guard_provider") or "当前会话的视觉模型"
             yield event.plain_result(
                 f"本群出图审核：{'开' if enabled else '关'}（{source}）\n"
+                f"本群混淆图　：{'开' if scramble_on else '关'}\n"
                 f"判定模型：{provider}\n"
-                "改：/审核 开　/审核 关"
+                "改：/审核 开　/审核 关　/审核 混淆图 开　/审核 混淆图 关"
             )
             return
-        if word in ("混淆图", "混淆"):
-            on = self._scramble_enabled(umo)
-            yield event.plain_result(
-                f"本群混淆图：{'开' if on else '关'}\n"
-                "开：/审核 混淆图 开　关：/审核 混淆图 关\n"
-                "打开后，被审核拦下的图会先做小番茄混淆再发到群里（原图仍然只发给你）。"
-            )
-            return
-        if word.startswith(("混淆图", "混淆")):
-            sub = word.replace("混淆图", "").replace("混淆", "").strip()
+
+        # ② 混淆图开关
+        if head in ("混淆图", "混淆"):
+            if not sub:
+                yield event.plain_result(
+                    f"本群混淆图：{'开' if scramble_on else '关'}\n"
+                    "开：/审核 混淆图 开　关：/审核 混淆图 关\n"
+                    "打开后，被审核拦下的图会先做小番茄混淆再发到群里（原图仍然只发给你）。"
+                )
+                return
             if sub in ("开", "on", "开启", "打开", "启用", "true", "1"):
                 self._audit_scramble[umo] = True
             elif sub in ("关", "off", "关闭", "关掉", "禁用", "false", "0"):
@@ -3953,20 +3969,21 @@ class NcdComfyPlugin(star.Star):
                 yield event.plain_result("用法：/审核 混淆图 开　/审核 混淆图 关")
                 return
             self._audit_scramble_save()
-            logger.info(
-                f"[comfy] 群聊混淆图 {umo} → "
-                f"{'开' if self._audit_scramble[umo] else '关'}"
-            )
-            yield event.plain_result(
-                f"本群混淆图已{'打开' if self._audit_scramble[umo] else '关闭'}。"
-            )
+            state = "打开" if self._audit_scramble[umo] else "关闭"
+            logger.info(f"[comfy] 群聊混淆图 {umo} → {state}")
+            yield event.plain_result(f"本群混淆图已{state}。")
             return
-        if word in ("开", "on", "开启", "打开", "启用", "true", "1"):
+
+        # ③ 审核总开关
+        if head in ("开", "on", "开启", "打开", "启用", "true", "1"):
             self._audit_guard[umo] = True
-        elif word in ("关", "off", "关闭", "关掉", "禁用", "false", "0"):
+        elif head in ("关", "off", "关闭", "关掉", "禁用", "false", "0"):
             self._audit_guard[umo] = False
         else:
-            yield event.plain_result("用法：/审核（看状态）　/审核 开　/审核 关")
+            yield event.plain_result(
+                "用法：/审核（看状态）　/审核 开　/审核 关"
+                "　/审核 混淆图 开　/审核 混淆图 关"
+            )
             return
         self._audit_guard_save()
         state = "打开" if self._audit_guard[umo] else "关闭"
