@@ -414,6 +414,9 @@ class NcdComfyPlugin(star.Star):
         # ★ 2026-11-05：被拦的图是否做小番茄混淆再发（按群）
         self._audit_scramble: dict[str, bool] = {}
         self._audit_scramble_loaded = False
+        # ★ 2026-11-05：全局审核档位（仅管理员可改；本群设置优先于它）
+        self._audit_global_level_value = ""
+        self._audit_global_loaded = False
         # 异步图写入会话历史时串行，避免并发写坏 content
         self._conv_lock = asyncio.Lock()
         # ★ 启动/重载时先发一次空状态：旧进程可能留下“正在画”的总线快照，
@@ -759,6 +762,9 @@ class NcdComfyPlugin(star.Star):
         except Exception:  # noqa: BLE001
             pass
         sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        # ★ 2026-11-05：配置里的主管理员也算（不依赖 AstrBot 全局 admins_id）
+        if sender and sender == str(self._PRIMARY_ADMIN or "").strip():
+            return True
         try:
             admins = self.context.get_config().get("admins_id") or []
         except Exception:  # noqa: BLE001
@@ -3873,12 +3879,12 @@ class NcdComfyPlugin(star.Star):
             logger.debug(f"[comfy] 审核开关保存失败: {exc}")
 
     def _audit_level(self, event: AstrMessageEvent) -> str:
-        """本群审核档位：strict（A 严）/ loose（B 宽）/ off（C 无）。"""
+        """审核档位：本群设置 > 全局档位 > 配置兜底。"""
         self._audit_guard_load()
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if umo and umo in self._audit_guard:
             return str(self._audit_guard[umo])
-        return "strict" if self._conf_bool("comfy_group_guard", True) else "off"
+        return self._audit_global_level()
 
     def _audit_enabled(self, event: AstrMessageEvent) -> bool:
         """有没有开审核（A/B 都算开，C 算关）。"""
@@ -3925,22 +3931,51 @@ class NcdComfyPlugin(star.Star):
             lv = "strict" if self._conf_bool("comfy_group_guard", True) else "off"
         return lv == "loose"
 
+    def _audit_global_file(self) -> Path:
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "audit_global.json"
+        )
+
+    def _audit_global_load(self) -> None:
+        if self._audit_global_loaded:
+            return
+        self._audit_global_loaded = True
+        try:
+            raw = json.loads(self._audit_global_file().read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        if isinstance(raw, dict):
+            lv = str(raw.get("level") or "")
+            if lv in ("strict", "loose", "off"):
+                self._audit_global_level_value = lv
+
+    def _audit_global_save(self) -> None:
+        try:
+            path = self._audit_global_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps({"level": self._audit_global_level_value}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 全局审核档位保存失败: {exc}")
+
+    def _audit_global_level(self) -> str:
+        """全局档位；没设过就用 comfy_group_guard 配置兜底。"""
+        self._audit_global_load()
+        if self._audit_global_level_value:
+            return self._audit_global_level_value
+        return "strict" if self._conf_bool("comfy_group_guard", True) else "off"
+
     @filter.command("审核", alias={"出图审核"})
     async def audit_cmd(self, event: AstrMessageEvent, arg: GreedyStr = ""):
-        """查看/开关本群的出图审核。"""
-        if not self._is_group_chat(event):
-            yield event.plain_result(
-                "审核只对群聊生效；私聊不审核。\n"
-                f"全局开关：{'开' if self._conf_bool('comfy_group_guard', True) else '关'}"
-            )
-            return
-        if not self._is_admin_event(event):
-            yield event.plain_result("只有管理员 / 副管理员能改审核开关。")
-            return
-        self._audit_guard_load()
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
-        enabled = self._audit_enabled(event)
-        source = "本群设置" if umo in self._audit_guard else "全局默认"
+        """查看/切换审核档位（A 严 / B 宽 / C 无）；管理员还能设全局档位。"""
         raw_arg = str(arg or "").strip()
         if not raw_arg or (" " not in raw_arg and len(raw_arg) <= 3):
             # ★ GreedyStr 有时只给第一个词，这里从原始消息再取一次
@@ -3952,25 +3987,117 @@ class NcdComfyPlugin(star.Star):
         parts = [p for p in re.split(r"[\s\u3000]+", raw_arg) if p]
         head = parts[0].lower() if parts else ""
         sub = parts[1].lower() if len(parts) > 1 else ""
+        is_global = head in ("全局", "global", "全群")
+        is_force = head in ("强制", "force", "全部")
 
-        level = self._audit_level(event)
-        label = {
+        level_label = {
             "strict": "A 严审核（拦下不发群，只留档）",
             "loose": "B 宽审核（拦下后发小番茄混淆图）",
             "off": "C 无审核（不拦）",
-        }.get(level, level)
+        }
 
-        # ① 看状态
-        if not parts or head in ("状态", "status", "?"):
-            provider = self._conf_str("comfy_group_guard_provider") or "当前会话的视觉模型"
+        # 权限：改档位只给管理员（看状态谁都能看）
+        if not self._is_admin_event(event):
+            yield event.plain_result("只有管理员 / 副管理员能改审核档位。")
+            return
+
+        if is_force:
+            # 强制所有群：设全局档位 + 清掉所有群级覆盖
+            if not sub:
+                yield event.plain_result(
+                    "强制所有群：/审核 强制 A｜B｜C\n"
+                    "（会清掉所有群单独设过的档位，统一用这一个）"
+                )
+                return
+            target = {
+                "a": "strict", "严": "strict", "严审核": "strict", "开": "strict",
+                "b": "loose", "宽": "loose", "宽审核": "loose",
+                "c": "off", "无": "off", "无审核": "off", "关": "off",
+            }.get(sub, "")
+            if target not in ("strict", "loose", "off"):
+                yield event.plain_result("用法：/审核 强制 A｜B｜C")
+                return
+            self._audit_global_level_value = target
+            self._audit_global_save()
+            self._audit_guard_load()
+            cleared = len(self._audit_guard)
+            self._audit_guard.clear()
+            self._audit_guard_save()
+            logger.info(
+                f"[comfy] 强制所有群审核 → {target}（清掉 {cleared} 个群级覆盖）"
+            )
             yield event.plain_result(
-                f"本群审核：{label}\n"
-                f"判定模型：{provider}\n"
-                "改：/审核 A（严）　/审核 B（宽）　/审核 C（无）"
+                f"已强制所有群：{level_label[target]}。"
+                + (f"（清掉 {cleared} 个群级设置）" if cleared else "")
             )
             return
 
-        # ② 解析目标档位（兼容旧写法）
+        if is_global:
+            # 全局：私聊/群聊都能设
+            current = self._audit_global_level()
+            if not sub:
+                self._audit_guard_load()
+                overrides = len(self._audit_guard)
+                yield event.plain_result(
+                    f"全局审核档位：{level_label.get(current, current)}\n"
+                    + (
+                        f"有 {overrides} 个群单独设过档位（它们不跟随全局）\n"
+                        if overrides
+                        else ""
+                    )
+                    + "改：/审核 全局 A｜B｜C（只影响没单独设过的群）\n"
+                    "　　 /审核 强制 A｜B｜C（所有群统一，清掉单独设置）"
+                )
+                return
+            target = {
+                "a": "strict", "严": "strict", "严审核": "strict", "开": "strict",
+                "b": "loose", "宽": "loose", "宽审核": "loose",
+                "c": "off", "无": "off", "无审核": "off", "关": "off",
+            }.get(sub, "")
+            if target not in ("strict", "loose", "off"):
+                yield event.plain_result("用法：/审核 全局 A｜B｜C")
+                return
+            self._audit_global_level_value = target
+            self._audit_global_save()
+            self._audit_guard_load()
+            overrides = len(self._audit_guard)
+            short = {"strict": "A", "loose": "B", "off": "C"}[target]
+            logger.info(f"[comfy] 全局审核档位 → {target}（{event.get_sender_id()}）")
+            yield event.plain_result(
+                f"全局审核档位已设为：{level_label[target]}。"
+                + (
+                    f"\n注意：有 {overrides} 个群单独设过档位，它们仍按自己的来；"
+                    f"要让所有群统一，用 /审核 强制 {short}"
+                    if overrides
+                    else ""
+                )
+            )
+            return
+
+        # 本群档位：只对群聊生效
+        if not self._is_group_chat(event):
+            yield event.plain_result(
+                "审核只对群聊生效；私聊不审核。\n"
+                "（管理员可在这里用 /审核 全局 A|B|C 设全局档位）"
+            )
+            return
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        self._audit_guard_load()
+        level = self._audit_level(event)
+        label = level_label.get(level, level)
+        source = "本群设置" if umo in self._audit_guard else "全局"
+
+        if not parts or head in ("状态", "status", "?"):
+            provider = self._conf_str("comfy_group_guard_provider") or "当前会话的视觉模型"
+            yield event.plain_result(
+                f"本群审核：{label}（{source}）\n"
+                f"全局档位：{level_label.get(self._audit_global_level(), '?')}\n"
+                f"判定模型：{provider}\n"
+                "改：/审核 A　/审核 B　/审核 C　/审核 全局 A|B|C"
+            )
+            return
+
         target = ""
         if head in ("混淆图", "混淆"):
             if sub in ("开", "on", "开启", "打开", "true", "1"):
@@ -3995,7 +4122,6 @@ class NcdComfyPlugin(star.Star):
             )
             return
 
-        # ③ 写入
         self._audit_guard[umo] = target
         self._audit_guard_save()
         self._audit_scramble.pop(umo, None)  # 旧的独立混淆开关清理掉
