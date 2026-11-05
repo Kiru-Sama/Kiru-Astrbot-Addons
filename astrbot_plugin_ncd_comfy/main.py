@@ -1631,6 +1631,36 @@ class NcdComfyPlugin(star.Star):
             logger.debug(f"[comfy] 审核缩略图失败: {exc}")
             return ""
 
+    def _save_audit_full(self, data: bytes) -> str:
+        """被拦的图留原图（不缩放），给管理员追溯用；只保留最近 100 张。"""
+        if not data:
+            return ""
+        if len(data) > 16 * 1024 * 1024:
+            logger.warning("[comfy] 审核原图超过 16MB，改发缩略图")
+            return ""
+        try:
+            ext = ".png"
+            if data[:2] == b"\xff\xd8":
+                ext = ".jpg"
+            elif data[:4] == b"RIFF":
+                ext = ".webp"
+            self._audit_thumb_dir.mkdir(parents=True, exist_ok=True)
+            path = self._audit_thumb_dir / f"full_{uuid.uuid4().hex[:12]}{ext}"
+            path.write_bytes(data)
+            try:
+                files = sorted(
+                    self._audit_thumb_dir.glob("full_*"),
+                    key=lambda p: p.stat().st_mtime,
+                )
+                for old in files[:-100]:
+                    old.unlink(missing_ok=True)
+            except Exception:  # noqa: BLE001
+                pass
+            return str(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 审核原图保存失败: {exc}")
+            return ""
+
     async def _queue_poller(self) -> None:
         """每秒问一次 ComfyUI 队列：0=正在跑，N=前面还有 N 个。"""
         while True:
@@ -4150,7 +4180,8 @@ class NcdComfyPlugin(star.Star):
         ]
         chain = []
         try:
-            thumb = self._save_audit_thumb(data) if data else ""
+            # ★ 2026-11-05：管理员要看原图，优先发原图；存不下再退回 96px 缩略图
+            thumb = (self._save_audit_full(data) or self._save_audit_thumb(data)) if data else ""
         except Exception:  # noqa: BLE001
             thumb = ""
         if thumb and os.path.isfile(thumb):
