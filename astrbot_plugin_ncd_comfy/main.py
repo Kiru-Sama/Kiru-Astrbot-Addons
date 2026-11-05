@@ -417,6 +417,9 @@ class NcdComfyPlugin(star.Star):
         # ★ 2026-11-05：全局审核档位（仅管理员可改；本群设置优先于它）
         self._audit_global_level_value = ""
         self._audit_global_loaded = False
+        # ★ 2026-11-05：群级主动发言开关（/主动回复 开|关）
+        self._proactive_guard: dict[str, bool] = {}
+        self._proactive_guard_loaded = False
         # 异步图写入会话历史时串行，避免并发写坏 content
         self._conv_lock = asyncio.Lock()
         # ★ 启动/重载时先发一次空状态：旧进程可能留下“正在画”的总线快照，
@@ -1158,8 +1161,6 @@ class NcdComfyPlugin(star.Star):
 
     async def api_report_test(self):
         """调试：验证「审核留档」通道——给管理员私聊发一条测试消息。"""
-        from astrbot.api.web import request
-
         admin = str(self._PRIMARY_ADMIN or "").strip()
         if not admin:
             return {"ok": False, "error": "没配 ncd_primary_admin"}
@@ -4131,6 +4132,121 @@ class NcdComfyPlugin(star.Star):
         yield event.plain_result(f"本群审核已切换为：{name}。")
 
     # ------------------------------------------------------------------
+    #  群级主动发言开关（/主动回复）
+    # ------------------------------------------------------------------
+    def _proactive_guard_file(self) -> Path:
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "proactive_guard.json"
+        )
+
+    def _proactive_guard_load(self) -> None:
+        if self._proactive_guard_loaded:
+            return
+        self._proactive_guard_loaded = True
+        try:
+            raw = json.loads(self._proactive_guard_file().read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            return
+        if isinstance(raw, dict):
+            self._proactive_guard = {str(k): bool(v) for k, v in raw.items()}
+
+    def _proactive_guard_save(self) -> None:
+        try:
+            path = self._proactive_guard_file()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(self._proactive_guard, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 主动发言开关保存失败: {exc}")
+
+    def _proactive_enabled_for(self, umo: str) -> bool:
+        """本群开没开主动发言：群级设置优先，否则跟随配置。"""
+        self._proactive_guard_load()
+        key = str(umo or "")
+        if key and key in self._proactive_guard:
+            return bool(self._proactive_guard[key])
+        return self._conf_bool("comfy_proactive_enabled", True)
+
+    @filter.command("主动回复", alias={"主动发言"})
+    async def proactive_cmd(self, event: AstrMessageEvent, arg: GreedyStr = ""):
+        """查看/开关群聊主动发言。"""
+        if not self._is_admin_event(event):
+            yield event.plain_result("只有管理员 / 副管理员能改主动发言。")
+            return
+        raw_arg = str(arg or "").strip()
+        if not raw_arg or (" " not in raw_arg and len(raw_arg) <= 3):
+            msg = str(getattr(event, "message_str", "") or "").strip()
+            stripped = re.sub(r"^[/／]?(?:主动回复|主动发言)\s*", "", msg).strip()
+            if stripped:
+                raw_arg = stripped
+        logger.info(f"[comfy] /主动回复 参数: {raw_arg!r}")
+        parts = [p for p in re.split(r"[\s\u3000]+", raw_arg) if p]
+        head = parts[0].lower() if parts else ""
+        sub = parts[1].lower() if len(parts) > 1 else ""
+        is_force = head in ("强制", "force", "全部")
+        if is_force:
+            head = sub
+            sub = ""
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        on = self._proactive_enabled_for(umo)
+
+        if not parts or head in ("状态", "status", "?"):
+            if not self._is_group_chat(event):
+                yield event.plain_result(
+                    f"主动发言默认：{'开' if self._conf_bool('comfy_proactive_enabled', True) else '关'}\n"
+                    "在群里用 /主动回复 开|关 控制单个群。"
+                )
+                return
+            interval_txt = "1~90 分钟随机"
+            yield event.plain_result(
+                f"本群主动发言：{'开' if on else '关'}\n"
+                f"间隔：{interval_txt}（24h 内被 @ 过）；凌晨 2-7 点不说\n"
+                "改：/主动回复 开　/主动回复 关　/主动回复 强制 开|关"
+            )
+            return
+
+        if head in ("开", "on", "开启", "打开", "启用", "true", "1"):
+            target = True
+        elif head in ("关", "off", "关闭", "关掉", "禁用", "false", "0"):
+            target = False
+        else:
+            yield event.plain_result(
+                "用法：/主动回复（看状态）　/主动回复 开　/主动回复 关　/主动回复 强制 开|关"
+            )
+            return
+
+        if is_force:
+            self._proactive_guard_load()
+            cleared = len(self._proactive_guard)
+            self._proactive_guard.clear()
+            self._proactive_guard_save()
+            logger.info(f"[comfy] 强制所有群主动发言 → {'开' if target else '关'}")
+            yield event.plain_result(
+                f"已强制所有群主动发言：{'开' if target else '关'}"
+                + (f"（清掉 {cleared} 个群级设置）" if cleared else "")
+                + "\n（未单独设过的群仍跟随配置开关）"
+            )
+            return
+
+        if not self._is_group_chat(event):
+            yield event.plain_result("开关只对群聊有意义；在群里发 /主动回复 开|关。")
+            return
+        self._proactive_guard_load()
+        self._proactive_guard[umo] = target
+        self._proactive_guard_save()
+        logger.info(f"[comfy] 主动发言 {umo} → {'开' if target else '关'}")
+        yield event.plain_result(f"本群主动发言已{'打开' if target else '关闭'}。")
+
+    # ------------------------------------------------------------------
     #  群聊主动发言
     # ------------------------------------------------------------------
     def _proactive_file(self) -> Path:
@@ -4284,6 +4400,9 @@ class NcdComfyPlugin(star.Star):
         fast, slow = self._proactive_gap_ranges()
         for umo, mention_ts in list(self._proactive_mentions.items()):
             if ":GroupMessage:" not in str(umo):
+                continue
+            # ★ 2026-11-05：/主动回复 关 的群跳过
+            if not self._proactive_enabled_for(umo):
                 continue
             # ① 还没排时间：按档位随机排一个
             next_at = float(self._proactive_next.get(umo) or 0.0)
