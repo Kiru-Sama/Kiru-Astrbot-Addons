@@ -3850,7 +3850,14 @@ class NcdComfyPlugin(star.Star):
         except Exception:  # noqa: BLE001
             return
         if isinstance(raw, dict):
-            self._audit_guard = {str(k): bool(v) for k, v in raw.items()}
+            # ★ 2026-11-05：值从 bool 改三档；旧数据自动迁移（True→严，False→无）
+            out: dict[str, str] = {}
+            for k, v in raw.items():
+                if isinstance(v, bool):
+                    out[str(k)] = "strict" if v else "off"
+                elif isinstance(v, str) and v in ("strict", "loose", "off"):
+                    out[str(k)] = v
+            self._audit_guard = out
 
     def _audit_guard_save(self) -> None:
         try:
@@ -3865,13 +3872,17 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 审核开关保存失败: {exc}")
 
-    def _audit_enabled(self, event: AstrMessageEvent) -> bool:
-        """本群有没有开审核：本群设置优先，否则全局默认。"""
+    def _audit_level(self, event: AstrMessageEvent) -> str:
+        """本群审核档位：strict（A 严）/ loose（B 宽）/ off（C 无）。"""
         self._audit_guard_load()
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         if umo and umo in self._audit_guard:
-            return bool(self._audit_guard[umo])
-        return self._conf_bool("comfy_group_guard", True)
+            return str(self._audit_guard[umo])
+        return "strict" if self._conf_bool("comfy_group_guard", True) else "off"
+
+    def _audit_enabled(self, event: AstrMessageEvent) -> bool:
+        """有没有开审核（A/B 都算开，C 算关）。"""
+        return self._audit_level(event) != "off"
 
     def _audit_scramble_file(self) -> Path:
         return (
@@ -3907,8 +3918,12 @@ class NcdComfyPlugin(star.Star):
             logger.debug(f"[comfy] 混淆图开关保存失败: {exc}")
 
     def _scramble_enabled(self, umo: str) -> bool:
-        self._audit_scramble_load()
-        return bool(self._audit_scramble.get(str(umo or "")))
+        """该会话是不是 B 档（拦下后发混淆图）。"""
+        self._audit_guard_load()
+        lv = self._audit_guard.get(str(umo or ""))
+        if lv is None:
+            lv = "strict" if self._conf_bool("comfy_group_guard", True) else "off"
+        return lv == "loose"
 
     @filter.command("审核", alias={"出图审核"})
     async def audit_cmd(self, event: AstrMessageEvent, arg: GreedyStr = ""):
@@ -3927,9 +3942,8 @@ class NcdComfyPlugin(star.Star):
         enabled = self._audit_enabled(event)
         source = "本群设置" if umo in self._audit_guard else "全局默认"
         raw_arg = str(arg or "").strip()
-        if not raw_arg or " " not in raw_arg and len(raw_arg) <= 3:
-            # ★ 2026-11-05：AstrBot 的 GreedyStr 有时只给第一个词（"混淆图 开" → "混淆图"），
-            #   这里从原始消息里再取一次，保证子命令完整。
+        if not raw_arg or (" " not in raw_arg and len(raw_arg) <= 3):
+            # ★ GreedyStr 有时只给第一个词，这里从原始消息再取一次
             msg = str(getattr(event, "message_str", "") or "").strip()
             stripped = re.sub(r"^[/／]?(?:审核|出图审核)\s*", "", msg).strip()
             if stripped:
@@ -3939,56 +3953,56 @@ class NcdComfyPlugin(star.Star):
         head = parts[0].lower() if parts else ""
         sub = parts[1].lower() if len(parts) > 1 else ""
 
-        scramble_on = self._scramble_enabled(umo)
+        level = self._audit_level(event)
+        label = {
+            "strict": "A 严审核（拦下不发群，只留档）",
+            "loose": "B 宽审核（拦下后发小番茄混淆图）",
+            "off": "C 无审核（不拦）",
+        }.get(level, level)
 
-        # ① 看状态（不带参数）
+        # ① 看状态
         if not parts or head in ("状态", "status", "?"):
             provider = self._conf_str("comfy_group_guard_provider") or "当前会话的视觉模型"
             yield event.plain_result(
-                f"本群出图审核：{'开' if enabled else '关'}（{source}）\n"
-                f"本群混淆图　：{'开' if scramble_on else '关'}\n"
+                f"本群审核：{label}\n"
                 f"判定模型：{provider}\n"
-                "改：/审核 开　/审核 关　/审核 混淆图 开　/审核 混淆图 关"
+                "改：/审核 A（严）　/审核 B（宽）　/审核 C（无）"
             )
             return
 
-        # ② 混淆图开关
+        # ② 解析目标档位（兼容旧写法）
+        target = ""
         if head in ("混淆图", "混淆"):
-            if not sub:
+            if sub in ("开", "on", "开启", "打开", "true", "1"):
+                target = "loose"
+            elif sub in ("关", "off", "关闭", "关掉", "false", "0"):
+                target = "strict"
+            elif not sub:
                 yield event.plain_result(
-                    f"本群混淆图：{'开' if scramble_on else '关'}\n"
-                    "开：/审核 混淆图 开　关：/审核 混淆图 关\n"
-                    "打开后，被审核拦下的图会先做小番茄混淆再发到群里（原图仍然只发给你）。"
+                    f"本群审核：{label}\n"
+                    "B 档（宽）会在拦下后发小番茄混淆图：/审核 B"
                 )
                 return
-            if sub in ("开", "on", "开启", "打开", "启用", "true", "1"):
-                self._audit_scramble[umo] = True
-            elif sub in ("关", "off", "关闭", "关掉", "禁用", "false", "0"):
-                self._audit_scramble[umo] = False
-            else:
-                yield event.plain_result("用法：/审核 混淆图 开　/审核 混淆图 关")
-                return
-            self._audit_scramble_save()
-            state = "打开" if self._audit_scramble[umo] else "关闭"
-            logger.info(f"[comfy] 群聊混淆图 {umo} → {state}")
-            yield event.plain_result(f"本群混淆图已{state}。")
-            return
-
-        # ③ 审核总开关
-        if head in ("开", "on", "开启", "打开", "启用", "true", "1"):
-            self._audit_guard[umo] = True
-        elif head in ("关", "off", "关闭", "关掉", "禁用", "false", "0"):
-            self._audit_guard[umo] = False
         else:
+            target = {
+                "a": "strict", "严": "strict", "严审核": "strict", "开": "strict",
+                "b": "loose", "宽": "loose", "宽审核": "loose",
+                "c": "off", "无": "off", "无审核": "off", "关": "off",
+            }.get(head, "")
+        if target not in ("strict", "loose", "off"):
             yield event.plain_result(
-                "用法：/审核（看状态）　/审核 开　/审核 关"
-                "　/审核 混淆图 开　/审核 混淆图 关"
+                "用法：/审核（看状态）　/审核 A（严）　/审核 B（宽）　/审核 C（无）"
             )
             return
+
+        # ③ 写入
+        self._audit_guard[umo] = target
         self._audit_guard_save()
-        state = "打开" if self._audit_guard[umo] else "关闭"
-        logger.info(f"[comfy] 群聊审核 {umo} → {state}")
-        yield event.plain_result(f"本群出图审核已{state}。")
+        self._audit_scramble.pop(umo, None)  # 旧的独立混淆开关清理掉
+        self._audit_scramble_save()
+        name = {"strict": "A 严审核", "loose": "B 宽审核", "off": "C 无审核"}[target]
+        logger.info(f"[comfy] 群聊审核 {umo} → {target}")
+        yield event.plain_result(f"本群审核已切换为：{name}。")
 
     # ------------------------------------------------------------------
     #  群聊主动发言
