@@ -625,5 +625,11 @@
     "description": "判断时读最近几条消息",
     "hint": "默认 10，范围 3~30。",
     "default": 10
+  },
+  "ncd_primary_admin_name": {
+    "type": "string",
+    "description": "主人的名字（bot 认人时用）",
+    "hint": "默认 KiruSama。bot 会把「这个名字 + 上面的管理员 QQ」当成主人，别人提到也认得出。",
+    "default": "KiruSama"
   }
 }
