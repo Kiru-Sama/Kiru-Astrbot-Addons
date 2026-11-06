@@ -1800,6 +1800,12 @@ class NcdComfyPlugin(star.Star):
                 "port": self._conf_int("comfy_port", 8199),
                 "position": self._queue_pos,
             },
+            # ★ 2026-11-06：面板/设备状态要探活，必须知道 ComfyUI 在哪台机器上
+            "link": {
+                "host": str(getattr(client, "host", "") or "127.0.0.1"),
+                "port": int(getattr(client, "port", 0) or self._conf_int("comfy_port", 8199)),
+                "remote": bool(getattr(client, "is_remote", False)),
+            },
             "progress": self._progress,
             "recent": self._recent[-8:],
             "audit": dict(self._audit_counts),

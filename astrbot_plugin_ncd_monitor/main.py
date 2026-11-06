@@ -45,10 +45,13 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
+import astrbot.api.message_components as Comp
 from astrbot.api import logger, sp, star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.web import json_response
+from astrbot.core.message.message_event_result import MessageChain
+from astrbot.core.star.filter.command import GreedyStr
 
 # 压缩摘要注入上下文时的特征前缀（见 astrbot/core/agent/context/compressor.py）
 SUMMARY_PREFIX = "Our previous history conversation summary:"
@@ -5272,6 +5275,74 @@ class Main(star.Star):
     # =================================================================
     #  聊天命令：设备状态（所有人）
     # =================================================================
+    @staticmethod
+    def _hotspot_connected() -> bool:
+        """手机是不是连着电脑热点（本地 IP 落在 192.168.137.x）。"""
+        try:
+            import socket
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                sock.connect(("192.168.137.1", 80))
+                ip = sock.getsockname()[0]
+            finally:
+                sock.close()
+        except Exception:  # noqa: BLE001
+            return False
+        return str(ip).startswith("192.168.137.")
+
+    def _comfy_admin_qq(self) -> str:
+        """从 comfy 插件配置里读主管理员 QQ（催连接要发给他）。"""
+        try:
+            path = os.path.join(
+                ASTRBOT_ROOT,
+                "data",
+                "config",
+                "astrbot_plugin_ncd_comfy_config.json",
+            )
+            with open(path, encoding="utf-8") as fh:
+                cfg = json.load(fh)
+            return str((cfg or {}).get("ncd_primary_admin") or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @filter.command("催促连接", alias={"催连接", "催出连接"})
+    async def urge_connect_cmd(self, event: AstrMessageEvent, arg: GreedyStr = ""):
+        """催管理员开电脑热点生图（附一句说明）。"""
+        admin = self._comfy_admin_qq()
+        if not admin:
+            yield event.plain_result("还没配管理员 QQ，催不了（检查 comfy 插件的 ncd_primary_admin）。")
+            return
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        plat = umo.split(":", 1)[0] if ":" in umo else ""
+        if not plat:
+            yield event.plain_result("拿不到平台名，稍后再试。")
+            return
+        note = str(arg or "").strip()
+        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        nick = ""
+        try:
+            nick = str(getattr(event.message_obj.sender, "nickname", "") or "")
+        except Exception:  # noqa: BLE001
+            nick = ""
+        who = nick or sender or "有人"
+        text = "【催促连接】" + who + " 让你连一下电脑热点生图。"
+        if note:
+            text += "\n说明：" + note[:300]
+        try:
+            await asyncio.wait_for(
+                self.context.send_message(
+                    f"{plat}:FriendMessage:{admin}",
+                    MessageChain(chain=[Comp.Plain(text)]),
+                ),
+                timeout=20,
+            )
+            logger.info(f"[ncd-monitor] 催促连接已发给管理员 {admin}（{who}）")
+            yield event.plain_result("已经帮你催管理员了，等他把热点连上。")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[ncd-monitor] 催促连接发送失败: {exc}")
+            yield event.plain_result(f"催促发送失败：{type(exc).__name__}")
+
     @filter.command("设备状态", alias={"设备运行状态"})
     async def device_status_cmd(self, event: AstrMessageEvent):
         """展示 CPU/内存/GPU/显存 + ComfyUI 在线状态、模型、队列与进度。"""
@@ -5353,20 +5424,27 @@ class Main(star.Star):
 
             state = self._comfy_state() or {}
             status = state.get("status") or {}
-            if status:
-                port = int(status.get("port") or 8199)
+            link = state.get("link") or {}
+            host = str(link.get("host") or "").strip() or "127.0.0.1"
+            port = int(link.get("port") or status.get("port") or 8199)
 
-                def _probe() -> bool:
-                    try:
-                        with urllib.request.urlopen(
-                            f"http://127.0.0.1:{port}/system_stats", timeout=1.2
-                        ) as resp:
-                            return 200 <= int(getattr(resp, "status", 200)) < 300
-                    except Exception:  # noqa: BLE001
-                        return False
+            def _probe() -> bool:
+                try:
+                    with urllib.request.urlopen(
+                        f"http://{host}:{port}/system_stats", timeout=1.5
+                    ) as resp:
+                        return 200 <= int(getattr(resp, "status", 200)) < 300
+                except Exception:  # noqa: BLE001
+                    return False
 
-                online = await asyncio.to_thread(_probe)
-                lines.append(f"ComfyUI：{'在线' if online else '未连接'}（{port}）")
+            online = await asyncio.to_thread(_probe)
+            lines.append(
+                f"ComfyUI：{'在线' if online else '未连接'}"
+                f"（{host}:{port}）"
+            )
+            # ★ 2026-11-06：手机连的是电脑热点吗（192.168.137.x）
+            hotspot = await asyncio.to_thread(self._hotspot_connected)
+            lines.append(f"电脑热点：{'已连接' if hotspot else '未连接'}")
 
             uptime = max(0, int(time.time() - self.started_at))
             lines.append(
@@ -5374,6 +5452,8 @@ class Main(star.Star):
                 + (f"{uptime // 3600} 小时 " if uptime >= 3600 else "")
                 + f"{(uptime % 3600) // 60} 分"
             )
+            lines.append("")
+            lines.append("连不上电脑？发 /催促连接 [说明] 让 bot 催管理员开热点。")
             yield event.plain_result("\n".join(lines))
             return
 
