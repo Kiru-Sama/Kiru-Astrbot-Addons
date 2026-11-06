@@ -3108,7 +3108,7 @@ class NcdComfyPlugin(star.Star):
         """解析 upscale 参数 → (放大模型名, 倍率)；倍率 <=1 表示不放大。
 
         支持的写法（大小写不敏感）：
-            留空          跟随配置 comfy_upscale_default（默认关）
+            留空          跟随配置 comfy_upscale_default（默认开，2 倍）
             off / 关 / 不放大 / 0     不放大
             2x / 1.5 / x2 / 2        通用放大（lanczos，不用模型）
             model / 超分              用配置里的放大模型 + 配置倍率
@@ -3123,7 +3123,7 @@ class NcdComfyPlugin(star.Star):
         text = str(raw or "").strip()
         low = text.lower()
         if not text:
-            return (cfg_model, cfg_factor) if self._conf_bool("comfy_upscale_default", False) else ("", 0.0)
+            return (cfg_model, cfg_factor) if self._conf_bool("comfy_upscale_default", True) else ("", 0.0)
         if low in ("off", "none", "no", "0", "关", "不放大", "原图", "disable"):
             return "", 0.0
         if low in ("model", "upscale", "超分", "放大"):

@@ -216,8 +216,8 @@
   "comfy_upscale_default": {
     "type": "bool",
     "description": "默认就放大",
-    "hint": "开：不写 upscale 参数也按下面的默认倍率放大（多花时间）。\n关（默认）：只有用户/模型明确说要放大才放大。",
-    "default": false
+    "hint": "开（默认）：不写 upscale 参数也按下面的倍率放大。关：只有明确要求才放大。",
+    "default": true
   },
   "comfy_upscale_model": {
     "type": "string",
