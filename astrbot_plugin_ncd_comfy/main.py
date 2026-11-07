@@ -1611,22 +1611,30 @@ class NcdComfyPlugin(star.Star):
     def _comfy_error_hint(exc: Exception) -> str:
         """把三类错误翻成用户能照着做的提示。"""
         nl = chr(10)
+        # ★ 2026-11-07：任何出图异常都在末尾给「反馈/催促」入口，方便管理员及时响应
+        tail = (
+            nl + "★ 需要管理员处理的话：发 /催促连接 [说明] 催管理员连热点，"
+            "或发 /反馈 [内容] 记录问题（两条都会私聊通知管理员）。"
+        )
         if isinstance(exc, ComfyUnreachable):
             return (
                 "出图失败（连不上电脑）：" + str(exc) + nl
                 + "★ 看热点有没有断、电脑是否开机；常驻看护通常十几秒内会拉起 ComfyUI。"
+                + tail
             )
         if isinstance(exc, ComfyTimeout):
             return (
                 "出图失败（等太久）：" + str(exc) + nl
                 + "★ 先把尺寸/步数调小试试；确定电脑没问题再调大 comfy_timeout。"
+                + tail
             )
         if isinstance(exc, ComfyExecutionError):
             return (
                 "出图失败（ComfyUI 报错）：" + str(exc) + nl
                 + "★ 多是参数或显存问题，按上面的节点报错改；换小一点的分辨率通常就好了。"
+                + tail
             )
-        return "出图失败：" + str(exc)
+        return "出图失败：" + str(exc) + tail
 
     def _save_audit_thumb(self, data: bytes) -> str:
         """被拦的图只留 96px 小图（不落原图），给面板核对用。"""
