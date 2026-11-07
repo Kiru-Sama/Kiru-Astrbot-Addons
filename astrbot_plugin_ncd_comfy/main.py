@@ -4179,7 +4179,7 @@ class NcdComfyPlugin(star.Star):
         key = str(umo or "")
         if key and key in self._proactive_guard:
             return bool(self._proactive_guard[key])
-        return self._conf_bool("comfy_proactive_enabled", True)
+        return self._conf_bool("comfy_proactive_enabled", False)
 
     @filter.command("主动回复", alias={"主动发言"})
     async def proactive_cmd(self, event: AstrMessageEvent, arg: GreedyStr = ""):
@@ -4387,7 +4387,7 @@ class NcdComfyPlugin(star.Star):
         await asyncio.sleep(90)
         while not getattr(self, "_closing", False):
             try:
-                if self._conf_bool("comfy_proactive_enabled", True):
+                if self._conf_bool("comfy_proactive_enabled", False):
                     await self._proactive_tick()
             except asyncio.CancelledError:
                 raise

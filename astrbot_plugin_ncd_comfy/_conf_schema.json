@@ -569,8 +569,8 @@
   "comfy_proactive_enabled": {
     "type": "bool",
     "description": "群聊主动发言",
-    "hint": "24h 内被 @ 过的群每 1 小时说一句；24~48h 的群每 3 小时；更久不发言。2:00-7:00 静默。",
-    "default": true
+    "hint": "默认关。开：24h 内被 @ 过的群每 1~90 分钟随机说一句（2-7 点静默）；没有单独设置的群都跟随这个开关。",
+    "default": false
   },
   "comfy_proactive_quiet_start": {
     "type": "int",
