@@ -20,6 +20,7 @@ linkd 的做法：在电脑上跑一个极小的 HTTP 服务（0.0.0.0:8201）�
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 
@@ -35,7 +36,14 @@ from pathlib import Path
 PORT = 8201
 COMFY = "http://127.0.0.1:8199"
 # ★ 2026-11-02（P1-2）：8200 拉起器已退役，进程生命周期归 Windows 计划任务。
-LOG = Path(__file__).with_name("linkd.log")
+# ★ 2026-11-07：日志从 F 盘（USB 外接盘，今天报过 Ntfs Delayed Write）挪到系统盘，
+#   避免「写日志失败」拖住探活循环
+_LOG_DIR = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or str(Path(__file__).parent)) / "ncd_linkd"
+try:
+    _LOG_DIR.mkdir(parents=True, exist_ok=True)
+except Exception:
+    _LOG_DIR = Path(__file__).parent
+LOG = _LOG_DIR / "linkd.log"
 HISTORY_MAX = 200
 
 _lock = threading.Lock()
@@ -121,6 +129,7 @@ def _refresh() -> dict:
         "detail": detail,
         "ts": time.time(),
     }
+    log_line = ""
     with _lock:
         prev = _state.get("detail")
         _state.update(snapshot)
@@ -128,11 +137,14 @@ def _refresh() -> dict:
         if prev and prev != detail:
             _history.append({"at": snapshot["ts"], "from": prev, "to": detail})
             del _history[:-HISTORY_MAX]
-            try:
-                with LOG.open("a", encoding="utf-8") as fh:
-                    fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {prev}  ->  {detail}\n")
-            except Exception:
-                pass
+            log_line = f"{time.strftime('%Y-%m-%d %H:%M:%S')}  {prev}  ->  {detail}\n"
+    # ★ 2026-11-07：日志写盘放在锁外——F 盘/USB 卡住时不能把探活线程一起拖死
+    if log_line:
+        try:
+            with LOG.open("a", encoding="utf-8") as fh:
+                fh.write(log_line)
+        except Exception:
+            pass
     return snapshot
 
 

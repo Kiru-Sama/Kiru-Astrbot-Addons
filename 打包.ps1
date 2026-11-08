@@ -38,7 +38,7 @@ $stage   = Join-Path $Work 'AstrBot插件分享包'
 $history = Join-Path $Work '分享包历史'
 $zip     = Join-Path $Work 'AstrBot插件分享包.zip'
 $src     = 'F:\NapCatDesk\ASTRBOT\data\plugins'
-$plugins = @('astrbot_plugin_ncd_monitor', 'astrbot_plugin_ncd_toolbox', 'astrbot_plugin_ncd_patch', 'astrbot_plugin_ncd_extra', 'astrbot_plugin_ncd_comfy', 'astrbot_plugin_ncd_session', 'astrbot_plugin_ncd_catchup', 'astrbot_plugin_ncd_inject', 'astrbot_plugin_ncd_awake', 'astrbot_plugin_ncd_memory', 'astrbot_plugin_ncd_welcome', 'astrbot_plugin_ncd_feedback')
+$plugins = @('astrbot_plugin_ncd_monitor', 'astrbot_plugin_ncd_toolbox', 'astrbot_plugin_ncd_patch', 'astrbot_plugin_ncd_extra', 'astrbot_plugin_ncd_comfy', 'astrbot_plugin_ncd_session', 'astrbot_plugin_ncd_catchup', 'astrbot_plugin_ncd_inject', 'astrbot_plugin_ncd_awake', 'astrbot_plugin_ncd_memory', 'astrbot_plugin_ncd_welcome', 'astrbot_plugin_ncd_feedback', 'astrbot_plugin_ncd_persona')
 
 # ── 1. 读版本号 ────────────────────────────────────────────────────────
 $versions = @{}
