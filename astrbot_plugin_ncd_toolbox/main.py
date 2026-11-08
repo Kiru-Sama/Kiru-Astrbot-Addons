@@ -447,6 +447,14 @@ def _norm_url(value: str) -> str:
 
 
 
+# ★ 2026-11-09：丝瓜固定形象（view_avatar 看自己时附带给模型，画图/描述都用这套）
+SELF_IMAGE_POSITIVE = (
+    "masterpiece, best quality, highres, 1girl, solo, full body, dynamic pose, standing on one leg, crossed legs, body turned slightly to the side, hand on hip, other hand touching hair, hand near hair, head tilted, looking at viewer, fox girl, light green long hair, twin braids, fox ears, fluffy light green tail, tail swaying, pale pink eyes, petite, plain matte black full body suit, matte fabric, soft sheen, skin tight, seamless, white puffy sleeves, detached sleeves, black ribbon on sleeves, white thighhighs with three black stripes, covered feet, footed tights, blush, shy smile, white background, simple background, soft diffused lighting, detailed fabric texture"
+)
+SELF_IMAGE_NEGATIVE = (
+    "multiple girls, 2girls, shoes, sneakers, footwear, bare feet, barefoot, toes visible, open toe, shiny, glossy, latex, zipper, pockets, logos, text, extra limbs, bad hands, bad anatomy, stiff pose"
+)
+
 class NcdToolboxPlugin(star.Star):
     def __init__(
         self, context: star.Context, config: dict[str, Any] | None = None
@@ -614,6 +622,11 @@ class NcdToolboxPlugin(star.Star):
 
     async def terminate(self) -> None:
         """插件卸载/重载时回收我们自己拉起的 Edge，避免留下孤儿进程。"""
+        # ★ 2026-11-02：顺手清掉合并缓冲，避免残留 leader 让新实例继续吞消息
+        try:
+            self._merge_buf.clear()
+        except Exception:  # noqa: BLE001
+            pass
         if self._browser is not None:
             self._browser.shutdown()
             self._browser = None
@@ -673,10 +686,22 @@ class NcdToolboxPlugin(star.Star):
                     self._merge_buf[key] = st
                     leader = True
                 else:
-                    if text:
-                        st["texts"].append(text)
-                    st["images"].extend(images)
-                    leader = False
+                    # ★ 兜底：leader 若卡死/被取消且没来得及清缓冲（超过 4 个窗口），
+                    #   本条接管成新 leader，避免整个会话被永久吞消息。
+                    if time.time() - float(st.get("first") or 0) > max(10.0, window * 4):
+                        st = {
+                            "texts": [text] if text else [],
+                            "images": list(images),
+                            "first": time.time(),
+                            "notified": False,
+                        }
+                        self._merge_buf[key] = st
+                        leader = True
+                    else:
+                        if text:
+                            st["texts"].append(text)
+                        st["images"].extend(images)
+                        leader = False
                     if self._conf_bool("merge_notice", True) and not st["notified"]:
                         st["notified"] = True
                         notify = True
@@ -701,8 +726,15 @@ class NcdToolboxPlugin(star.Star):
                 return
 
             wait = window - (time.time() - float(st["first"]))
-            if wait > 0:
-                await asyncio.sleep(wait)
+            try:
+                if wait > 0:
+                    await asyncio.sleep(wait)
+            except asyncio.CancelledError:
+                # ★ 2026-11-02（盲审 P0-5）：leader 被取消时必须摘掉缓冲，
+                #   否则同会话后续消息永远命中 follower 分支 → stop_event → 被静默吞掉。
+                async with self._merge_lock:
+                    self._merge_buf.pop(key, None)
+                raise
             async with self._merge_lock:
                 texts = list(st["texts"])
                 images_all = list(st["images"])
@@ -2071,12 +2103,24 @@ class NcdToolboxPlugin(star.Star):
             f"[toolbox] 取到头像 {label}（{kind}={key}，"
             f"{'缓存命中' if cached else '新下载'}）→ 只给模型看"
         )
-        return (
+        base = (
             f"已取到{label}的头像（{path.name}，"
             f"{'缓存命中' if cached else '刚下载'}，只给你自己看，不要发给用户）。"
             "图已经放进下一轮上下文了 —— 直接说你看到了什么就行。"
             + (f"（注意：{note}）" if note else "")
         )
+        # ★ 看自己（形象）时带上固定形象提示词，方便画图/描述时保持一致
+        is_self = (
+            str(who or "").strip().lower() in ("me", "self", "自己", "我")
+            or "自己" in str(label or "")
+        )
+        if is_self:
+            base += (
+                "\n\n★ 你的固定形象（丝瓜）：以后画自己、描述自己外貌都按下面这套来，别改。\n"
+                "正面提示词：" + SELF_IMAGE_POSITIVE + "\n"
+                "负面提示词：" + SELF_IMAGE_NEGATIVE
+            )
+        return base
 
 
     # ------------------------------------------------------------------

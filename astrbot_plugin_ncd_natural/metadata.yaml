@@ -1,0 +1,6 @@
+name: astrbot_plugin_ncd_natural
+display_name: 更自然的对话
+desc: 选中人格「更自然的对话beta」后，每轮从聊天记录里检索相似原话做 few-shot，让回复更像真人。人格负责「你是谁」，本插件负责「怎么说」。
+version: 1.6.5
+author: 本地自用
+repo: ""

@@ -1217,6 +1217,30 @@ class NcdComfyPlugin(star.Star):
                 "绘图额度面板",
             )
             self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/gallery",
+                self.api_gallery,
+                ["GET"],
+                "出图图库：按会话列出历史图",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/debug-db",
+                self.api_debug_db,
+                ["GET"],
+                "调试：会话库结构",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/gallery/thumb",
+                self.api_gallery_thumb,
+                ["GET"],
+                "出图图库：缩略图",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/gallery/full",
+                self.api_gallery_full,
+                ["GET"],
+                "出图图库：原图",
+            )
+            self.context.register_web_api(
                 f"/{PLUGIN_DIR_NAME}/ncd-comfy/quota/config",
                 self.api_quota_config,
                 ["POST"],
@@ -1294,6 +1318,276 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[comfy] 链路状态取数失败: {exc}", exc_info=True)
             return {"can_draw": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+    def _umo_index(self) -> dict:
+        """目录名 hash -> (umo, 显示名)：从 platform_sessions 反查。"""
+        import hashlib
+        import sqlite3
+
+        out: dict[str, tuple[str, str]] = {}
+        try:
+            insts = list(self.context.platform_manager.get_insts() or [])
+            plat = str(getattr(insts[0], "name", "") or "") if insts else ""
+        except Exception:  # noqa: BLE001
+            plat = ""
+        try:
+            db = Path(PLUGIN_DIR).parents[2] / "data" / "data_v4.db"
+            if not db.is_file():
+                return out
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                # umo_aliases：AstrBot 自己维护的 umo → 显示名映射
+                cols = [str(r[1]) for r in conn.execute("pragma table_info(umo_aliases)")]
+                if "umo" in cols:
+                    name_col = (
+                        "display_name" if "display_name" in cols
+                        else ("auto_name" if "auto_name" in cols else cols[-1])
+                    )
+                    rows = conn.execute(
+                        f"select umo, {name_col} from umo_aliases"
+                    ).fetchall()
+                    for umo, name in rows:
+                        umo = str(umo or "")
+                        if umo:
+                            key = hashlib.sha1(umo.encode("utf-8")).hexdigest()[:16]
+                            out[key] = (umo, str(name or ""))
+                # 兜底：platform_sessions 里非 webchat 的行（如果有）
+                try:
+                    ps = conn.execute(
+                        "select session_id, display_name, platform_id from platform_sessions where platform_id != 'webchat'"
+                    ).fetchall()
+                except Exception:  # noqa: BLE001
+                    ps = []
+                for sid, name, pid in ps:
+                    sid = str(sid or "")
+                    if not sid:
+                        continue
+                    p2 = plat or str(pid or "")
+                    for kind in ("GroupMessage", "FriendMessage"):
+                        umo = f"{p2}:{kind}:{sid}"
+                        key = hashlib.sha1(umo.encode("utf-8")).hexdigest()[:16]
+                        out.setdefault(key, (umo, str(name or "")))
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 会话索引失败: {exc}")
+        return out
+
+    async def _session_title(self, umo: str) -> str:
+        """群名 / 对方昵称（缓存到 owner.json 的 title 字段）。"""
+        parts = str(umo or "").split(":")
+        if len(parts) < 3:
+            return ""
+        plat, kind, cid = parts[0], parts[1], parts[2]
+        try:
+            insts = list(self.context.platform_manager.get_insts() or [])
+        except Exception:  # noqa: BLE001
+            return ""
+        for inst in insts:
+            try:
+                if getattr(inst, "name", "") and str(getattr(inst, "name")) != plat:
+                    continue
+                client = inst.get_client()
+                if kind == "GroupMessage":
+                    r = await asyncio.wait_for(
+                        client.api.call_action("get_group_info", group_id=int(cid)),
+                        timeout=6,
+                    )
+                    return str((r or {}).get("group_name") or "")
+                r = await asyncio.wait_for(
+                    client.api.call_action("get_stranger_info", user_id=int(cid)),
+                    timeout=6,
+                )
+                if isinstance(r, dict):
+                    data = r.get("data") if isinstance(r.get("data"), dict) else {}
+                    return str(data.get("nickname") or r.get("nickname") or "")
+                return ""
+            except Exception:  # noqa: BLE001
+                continue
+        return ""
+
+    async def api_debug_db(self):
+        """调试：dump platform_sessions / conversations 与平台实例名。"""
+        import sqlite3
+
+        out = {"tables": {}, "insts": []}
+        try:
+            insts = list(self.context.platform_manager.get_insts() or [])
+            out["insts"] = [str(getattr(i, "name", "")) for i in insts]
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            db = Path(PLUGIN_DIR).parents[2] / "data" / "data_v4.db"
+            out["db"] = str(db)
+            out["exists"] = db.is_file()
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                tabs = conn.execute(
+                    "select name from sqlite_master where type='table'"
+                ).fetchall()
+                out["tables"] = [r[0] for r in tabs]
+                try:
+                    qq = conn.execute(
+                        "select session_id, platform_id, display_name, is_group from platform_sessions where platform_id != 'webchat' limit 12"
+                    ).fetchall()
+                    out["qq_sessions"] = [list(map(str, r)) for r in qq]
+                except Exception as exc:  # noqa: BLE001
+                    out["qq_sessions"] = str(exc)
+                for tab in ("platform_sessions", "conversations"):
+                    try:
+                        rows = conn.execute(f"select * from {tab} limit 8").fetchall()
+                        cols = [d[0] for d in conn.execute(f"select * from {tab} limit 1").description]
+                        out[tab] = {"cols": cols, "rows": [list(map(str, r))[:6] for r in rows]}
+                    except Exception as exc:  # noqa: BLE001
+                        out[tab] = {"error": str(exc)}
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = str(exc)
+        return out
+
+    async def api_gallery(self):
+        """图库：按会话目录列出所有历史图（含 umo/数量/时间）。"""
+        import hashlib
+
+        base = (
+            Path(PLUGIN_DIR).parents[2]
+            / "data" / "plugin_data" / "ncd_comfy" / "out"
+        )
+        umo_index = self._umo_index()
+        sessions = []
+        if base.is_dir():
+            for folder in sorted(base.iterdir()):
+                if not folder.is_dir():
+                    continue
+                hist = folder / HISTORY_FILE
+                if not hist.is_file():
+                    continue
+                try:
+                    data = json.loads(hist.read_text(encoding="utf-8"))
+                    items = list((data or {}).get("items") or [])
+                except Exception:  # noqa: BLE001
+                    continue
+                if not items:
+                    continue
+                umo = ""
+                title = ""
+                owner = folder / "owner.json"
+                if owner.is_file():
+                    try:
+                        _owner = json.loads(owner.read_text(encoding="utf-8")) or {}
+                        umo = str(_owner.get("umo") or "")
+                        title = str(_owner.get("title") or "")
+                    except Exception:  # noqa: BLE001
+                        umo = ""
+                if not umo:
+                    hit = umo_index.get(folder.name)
+                    if hit:
+                        umo, title = hit
+                if umo and (not title or title.isdigit()):
+                    fetched = await self._session_title(umo)
+                    if fetched:
+                        title = fetched
+                        try:
+                            owner.write_text(
+                                json.dumps({"umo": umo, "title": title}, ensure_ascii=False),
+                                encoding="utf-8",
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass
+                items.sort(key=lambda e: float(e.get("ts") or 0), reverse=True)
+                latest = max((float(e.get("ts") or 0) for e in items), default=0)
+                sessions.append({
+                    "dir": folder.name,
+                    "umo": umo,
+                    "title": title,
+                    "count": len(items),
+                    "latest": latest,
+                    "items": [
+                        {
+                            "file": os.path.basename(str(e.get("file") or "")),
+                            "ts": float(e.get("ts") or 0),
+                            "size": e.get("size"),
+                            "prompt": str(e.get("prompt") or "")[:300],
+                            "preset": e.get("preset") or "",
+                            "model": os.path.basename(str(e.get("model") or "")),
+                        }
+                        for e in items[:300]
+                        if e.get("file")
+                    ],
+                })
+        sessions.sort(key=lambda s: -s["latest"])
+        return {"sessions": sessions, "total": sum(s["count"] for s in sessions)}
+
+    def _gallery_read(self, folder_name: str, file_name: str):
+        """(Path, bytes) 或 (None, None)。"""
+        base = (
+            Path(PLUGIN_DIR).parents[2]
+            / "data" / "plugin_data" / "ncd_comfy" / "out" / folder_name
+        )
+        target = (base / os.path.basename(file_name)).resolve()
+        try:
+            target.relative_to(base.resolve())
+        except Exception:  # noqa: BLE001
+            return None, None
+        if not target.is_file():
+            return None, None
+        try:
+            return target, target.read_bytes()
+        except Exception:  # noqa: BLE001
+            return None, None
+
+    @staticmethod
+    def _thumb_b64(data: bytes, side: int = 240) -> str:
+        import base64
+        import io as _io
+
+        try:
+            from PIL import Image
+
+            img = Image.open(_io.BytesIO(data)).convert("RGB")
+            img.thumbnail((side, side))
+            buf = _io.BytesIO()
+            img.save(buf, "JPEG", quality=72)
+            return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def api_gallery_thumb(self):
+        from astrbot.api.web import request as _req
+
+        try:
+            q = _req.query or {}
+        except Exception:  # noqa: BLE001
+            q = {}
+        path, data = self._gallery_read(
+            str(q.get("dir") or ""), str(q.get("file") or "")
+        )
+        if path is None:
+            return {"ok": False}
+        return {"ok": True, "thumb": self._thumb_b64(data)}
+
+    async def api_gallery_full(self):
+        from astrbot.api.web import request as _req
+        import base64
+
+        try:
+            q = _req.query or {}
+        except Exception:  # noqa: BLE001
+            q = {}
+        path, data = self._gallery_read(
+            str(q.get("dir") or ""), str(q.get("file") or "")
+        )
+        if path is None:
+            return {"ok": False}
+        mime = "image/png"
+        if data[:4] == b"\xff\xd8\xff\xe0" or data[:2] == b"\xff\xd8":
+            mime = "image/jpeg"
+        return {
+            "ok": True,
+            "mime": mime,
+            "b64": "data:" + mime + ";base64," + base64.b64encode(data).decode(),
+        }
 
     async def api_quota(self):
         try:
@@ -6781,6 +7075,18 @@ class NcdComfyPlugin(star.Star):
             / key
         )
         path.mkdir(parents=True, exist_ok=True)
+        # ★ 2026-11-09：目录名是 hash，写一份 owner.json 让图库能显示真实会话
+        try:
+            owner = path / "owner.json"
+            if not owner.is_file() or str(umo or "") not in (
+                owner.read_text(encoding="utf-8") if owner.is_file() else ""
+            ):
+                owner.write_text(
+                    json.dumps({"umo": str(umo or "")}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+        except Exception:  # noqa: BLE001
+            pass
         return path
 
     def _history_days(self) -> int:

@@ -1,7 +1,7 @@
 name: astrbot_plugin_ncd_persona
 display_name: 人格切换
 desc: 用 /人格 查看或切换当前会话（群聊/私聊）的人格；直接写 AstrBot 原生会话配置，与「自定义规则」同一份，重启不丢
-version: 1.0.1
+version: 1.0.3
 author: Kiru
 repo: https://github.com/Kiru-Sama/Kiru-Astrbot-Addons
 astrbot_version: ">=4.28.0,<4.31"

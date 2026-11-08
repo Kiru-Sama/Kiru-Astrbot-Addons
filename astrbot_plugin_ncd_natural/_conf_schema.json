@@ -1,0 +1,26 @@
+{
+  "natural_enabled": {
+    "type": "bool",
+    "default": false,
+    "description": "总开关",
+    "hint": "开：选中人格「更自然的对话beta」时才注入原话；关：完全不动作。"
+  },
+  "natural_pack_id": {
+    "type": "string",
+    "default": "",
+    "description": "默认数据包 id",
+    "hint": "留空 = 自动用 packs/ 里第一个。切换也可以用 /自然 包 <id>。"
+  },
+  "natural_k": {
+    "type": "int",
+    "default": 5,
+    "description": "每轮检索几条原话",
+    "hint": "默认 5 条，和原版一致。1~10。"
+  },
+  "natural_max_chars": {
+    "type": "int",
+    "default": 1200,
+    "description": "注入内容最大字符数",
+    "hint": "防止 few-shot 挤占上下文。超长会截断。"
+  }
+}

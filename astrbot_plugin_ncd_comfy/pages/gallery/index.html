@@ -1,0 +1,868 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>链路本地生成</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  /* ── 外层（图库） ── */
+  :root {
+    --bg:#f6f7f9; --card:#fff; --border:#e5e8ee; --text:#1f2329;
+    --muted:#8a919b; --accent:#3b82f6; --track:#f1f3f6; --soft:#eef2f8;
+    --ok:#16a34a; --bad:#dc2626; --warn:#d97706;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif; padding:16px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  h1 { font-size:17px; margin:0; }
+  .sub { color:var(--muted); font-size:12px; }
+  .spacer { flex:1; }
+  .tabs { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+  button { font:inherit; border:1px solid var(--border); border-radius:8px;
+    padding:6px 14px; background:var(--card); color:var(--text); cursor:pointer; }
+  button:hover { background:var(--track); }
+  .tabs button.on { background:var(--soft); border-color:#c7dbff; color:var(--accent); }
+  .layout { display:grid; grid-template-columns:280px minmax(0,1fr); gap:12px;
+    align-items:start; }
+  @media (max-width:900px) { .layout { grid-template-columns:1fr; } }
+  .panel { background:var(--card); border:1px solid var(--border); border-radius:12px; }
+  .sessions { max-height:74vh; overflow:auto; padding:6px; }
+  .sess { padding:8px 10px; border-radius:8px; cursor:pointer; margin-bottom:2px; }
+  .sess:hover { background:var(--track); }
+  .sess.on { background:var(--soft); }
+  .sess .t { font-size:13px; font-weight:600; }
+  .sess .m { font-size:11px; color:var(--muted); }
+  .main { padding:12px; }
+  .igrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
+    gap:10px; }
+  .icell { border:1px solid var(--border); border-radius:10px; overflow:hidden;
+    background:#fafbfc; cursor:pointer; position:relative; aspect-ratio:3/4; }
+  .icell img { width:100%; height:100%; object-fit:cover; display:block; }
+  .icell .ph { display:flex; align-items:center; justify-content:center;
+    height:100%; color:var(--muted); font-size:11px; }
+  .icell .info { position:absolute; left:0; right:0; bottom:0; padding:4px 6px;
+    background:linear-gradient(transparent, rgba(0,0,0,.65)); color:#fff;
+    font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .empty { color:var(--muted); padding:24px; text-align:center; font-size:13px; }
+  .status { color:var(--muted); font-size:12px; margin-top:10px; min-height:16px; }
+  .imodal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.72);
+    z-index:60; align-items:center; justify-content:center; padding:24px; }
+  .imodal .box { background:var(--card); border-radius:14px; max-width:94vw;
+    max-height:90vh; overflow:hidden; padding:12px; display:flex; gap:14px; }
+  .imodal img { max-width:60vw; max-height:84vh; display:block; border-radius:8px;
+    object-fit:contain; background:#0b0e13; flex:0 0 auto; }
+  .imodal .meta { color:var(--muted); font-size:12.5px; padding:2px 0;
+    white-space:pre-wrap; word-break:break-word; overflow:auto; flex:1 1 auto;
+    min-width:260px; max-height:84vh; }
+  /* ── 额度板块（quota 原样式，已加作用域） ── */
+.q-scope {
+    --bg:#f6f7f9; --card:#fff; --border:#e5e8ee; --text:#1f2329;
+    --muted:#8a919b; --accent:#3b82f6; --ok:#16a34a; --bad:#dc2626;
+    --warn:#d97706; --track:#f1f3f6; --soft:#eef2f8;
+  }
+.q-scope * { box-sizing:border-box; }
+.q-scope { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif; padding:16px; }
+.q-scope header { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+.q-scope h1 { font-size:17px; margin:0; }
+.q-scope h2 { font-size:12px; color:var(--muted); margin:0 0 10px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.04em; }
+.q-scope .sub { color:var(--muted); font-size:12px; }
+.q-scope .spacer { flex:1; }
+.q-scope button { font:inherit; border:1px solid var(--border); border-radius:8px;
+    padding:7px 12px; background:var(--card); color:var(--text); cursor:pointer; }
+.q-scope button:hover { background:var(--track); }
+.q-scope .tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+.q-scope .tabs button { padding:4px 9px; font-size:12px; border-radius:999px;
+    color:var(--muted); }
+.q-scope .tabs button.on { background:var(--soft); color:var(--accent);
+    border-color:#c7dbff; }
+.q-scope /* KPI 卡片：5 张时按 5/3/2 列自适应，避免出现「4 张 + 1 张吊在第二行」的孤行 */
+  .cards { display:grid; grid-template-columns:repeat(5,minmax(0,1fr));
+    gap:12px; margin-bottom:12px; }
+@media (max-width:1440px) {
+.q-scope .cards { grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
+.q-scope .card { background:var(--card); border:1px solid var(--border);
+    border-radius:12px; padding:12px; }
+.q-scope .kpi .num { font-size:24px; font-weight:700; font-variant-numeric:tabular-nums; }
+.q-scope .kpi .label { color:var(--muted); font-size:12px; }
+.q-scope .kpi .hint { color:var(--muted); font-size:11px; margin-top:2px; }
+.q-scope .bar { height:7px; background:var(--track); border-radius:999px; overflow:hidden; margin-top:8px; }
+.q-scope .bar > i { display:block; height:100%; background:var(--accent); border-radius:999px; }
+.q-scope .bar.hot > i { background:var(--warn); }
+.q-scope .bar.over > i { background:var(--bad); }
+.q-scope .grid { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(0,1fr); gap:12px; }
+.q-scope table { width:100%; border-collapse:collapse; }
+.q-scope th, .q-scope td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--border);
+    font-size:13px; vertical-align:middle; }
+.q-scope th { color:var(--muted); font-size:11px; font-weight:600; }
+.q-scope tr:last-child td { border-bottom:none; }
+.q-scope .num { font-variant-numeric:tabular-nums; }
+.q-scope .name { font-weight:600; }
+.q-scope .uid { color:var(--muted); font-size:11px; }
+.q-scope .badge { display:inline-block; font-size:11px; padding:1px 7px; border-radius:999px;
+    background:var(--track); color:var(--muted); margin-right:4px; white-space:nowrap; }
+.q-scope .badge.bad { background:#fdecec; color:var(--bad); }
+.q-scope .badge.warn { background:#fff7e6; color:var(--warn); }
+.q-scope .badge.ok { background:#eaf7ee; color:var(--ok); }
+.q-scope .badge.blue { background:#eaf2ff; color:#1d4ed8; }
+.q-scope .empty { color:var(--muted); text-align:center; padding:22px 8px; }
+.q-scope .watch-row { display:flex; align-items:center; gap:8px; padding:6px 0;
+    border-bottom:1px solid var(--border); }
+.q-scope .watch-row:last-child { border-bottom:none; }
+.q-scope .watch-main { min-width:0; flex:1; }
+.q-scope .watch-top { display:flex; align-items:baseline; gap:8px; }
+.q-scope .watch-top .n { font-weight:600; font-size:13px; overflow:hidden;
+    text-overflow:ellipsis; white-space:nowrap; }
+.q-scope .watch-top .c { margin-left:auto; color:var(--muted); font-size:11px;
+    font-variant-numeric:tabular-nums; }
+.q-scope .mini { height:5px; background:var(--track); border-radius:999px;
+    overflow:hidden; margin-top:3px; }
+.q-scope .mini > i { display:block; height:100%; background:var(--accent); }
+.q-scope .mini > i.warn { background:var(--warn); }
+.q-scope .mini > i.bad { background:var(--bad); }
+.q-scope .status { margin-top:10px; font-size:12px; color:var(--muted); min-height:18px; }
+.q-scope .status.err { color:var(--bad); }
+.q-scope .status.ok { color:var(--ok); }
+.q-scope .notice { background:#fff7e6; border:1px solid #f5d9a8; color:#8a5a00;
+    border-radius:10px; padding:9px 12px; font-size:12px; margin-bottom:12px; }
+.q-scope .notice b { font-weight:700; }
+.q-scope button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+.q-scope .ctrls { display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:8px 12px; }
+.q-scope .ctrl { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.q-scope .ctrl label { font-size:11px; color:var(--muted); }
+.q-scope .ctrl input { width:100%; padding:5px 7px; border:1px solid var(--border);
+    border-radius:7px; font:13px/1.4 "Segoe UI","Microsoft YaHei",sans-serif;
+    color:var(--text); background:#fbfcfe; }
+.q-scope .ctrl input[type=checkbox] { width:auto; align-self:flex-start; }
+.q-scope .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+.q-scope .sponsor-row { display:flex; align-items:center; gap:10px; padding:7px 0;
+    border-bottom:1px solid var(--border); }
+.q-scope .sponsor-row:last-child { border-bottom:none; }
+.q-scope .sponsor-row .who { min-width:150px; }
+.q-scope .sponsor-row .sum { flex:1; color:var(--muted); font-size:11px; }
+.q-scope .sponsor-row button { padding:3px 9px; font-size:12px; }
+@media (max-width:860px) {
+.q-scope .cards { grid-template-columns:repeat(2,minmax(0,1fr)); }
+.q-scope /* 奇数张时最后一张拉通整行，不要孤零零占半行 */
+    .cards > .card:last-child:nth-child(odd) { grid-column:1 / -1; }
+.q-scope .grid { grid-template-columns:1fr; }
+.q-scope .ctrls { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1>链路本地生成</h1>
+  <span class="sub" id="summary">读取中…</span>
+  <span class="spacer"></span>
+  <button id="refresh">刷新</button>
+</header>
+
+<div class="tabs">
+  <button id="tab-gallery" class="on">图库</button>
+  <button id="tab-quota">额度</button>
+</div>
+
+<div id="view-gallery">
+  <div class="layout">
+    <div class="panel sessions" id="sessions"></div>
+    <div class="panel main">
+      <div id="igrid" class="igrid"></div>
+      <div id="empty" class="empty" style="display:none;">点左边选一个会话</div>
+    </div>
+  </div>
+</div>
+
+<div id="view-quota" style="display:none;">
+  <div class="q-scope">
+
+<header>
+  <h1>绘图额度</h1>
+  <span class="sub" id="q-window">加载中…</span>
+  <span class="spacer"></span>
+  <button id="q-refresh" type="button">刷新</button>
+</header>
+
+<div class="notice" id="q-notice">
+  <b>统计阶段：</b>队列上限、间隔、画幅尚未拦截；50 张降质、70 张禁生图已拦截。
+</div>
+
+<div class="cards" id="q-cards"></div>
+
+<div class="grid">
+  <section class="card">
+    <h2>排行榜 <span class="sub">生图 / 发言 · 日榜 / 总榜</span></h2>
+    <div class="tabs" id="q-rank-tabs"></div>
+    <div id="q-rank"><div class="empty">加载中…</div></div>
+  </section>
+  <section class="card">
+    <h2>50 / 70 进度 <span class="sub">按个人阈值</span></h2>
+    <div id="q-watch"><div class="empty">加载中…</div></div>
+  </section>
+</div>
+
+<section class="card" style="margin-top:12px">
+  <h2>禁生图</h2>
+  <div id="q-bans"><div class="empty">加载中…</div></div>
+</section>
+
+<section class="card" style="margin-top:12px" id="q-controlCard">
+  <h2>数值控制 <span class="sub">保存后立即生效 · 面板与插件配置同一份文件</span></h2>
+  <div class="ctrls" id="q-globalFields"></div>
+  <div class="actions">
+    <button id="q-saveConfig" class="primary" type="button">保存全局阈值</button>
+    <button id="q-resetConfig" type="button">恢复默认数值</button>
+  </div>
+
+  <h2 style="margin-top:18px">赞助者单独额度
+    <span class="sub">仍计入张数/排行，不占普通前 5/前 3</span>
+  </h2>
+  <div class="ctrls" id="q-sponsorFields"></div>
+  <div class="actions">
+    <button id="q-saveSponsor" class="primary" type="button">保存赞助者</button>
+    <button id="q-clearSponsor" type="button">清空表单</button>
+  </div>
+  <div id="q-sponsorList" style="margin-top:10px">
+    <div class="empty">还没有赞助者。</div>
+  </div>
+</section>
+
+<div class="status" id="q-status"></div>
+
+
+
+  </div>
+</div>
+
+<div class="status" id="status"></div>
+
+<div class="imodal" id="imodal">
+  <div class="box">
+    <img id="imodal-img" alt="" />
+    <div class="meta" id="imodal-meta"></div>
+  </div>
+</div>
+
+<script>
+const P = window.AstrBotPluginPage;
+const $ = (id) => document.getElementById(id);
+let sessions = [];
+let current = null;
+
+function setStatus(t) { $("status").textContent = t || ""; }
+function fmtTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(Number(ts) * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function sessName(s) {
+  const parts = String(s.umo || "").split(":");
+  const kind = parts[1] || "";
+  const prefix = kind === "GroupMessage" ? "群聊 " : "私聊 ";
+  const title = s.title || ("会话 " + s.dir.slice(0, 8));
+  return prefix + title;
+}
+
+async function load() {
+  try {
+    const data = await P.apiGet("/ncd-comfy/gallery");
+    sessions = data.sessions || [];
+    $("summary").textContent = `${sessions.length} 个会话 · 共 ${data.total || 0} 张图`;
+    renderSessions();
+    if (!current && sessions.length) selectSession(sessions[0]);
+  } catch (e) {
+    setStatus("读取失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+function renderSessions() {
+  const box = $("sessions");
+  box.innerHTML = "";
+  sessions.forEach((s) => {
+    const el = document.createElement("div");
+    el.className = "sess" + (current && current.dir === s.dir ? " on" : "");
+    const t1 = document.createElement("div");
+    t1.className = "t";
+    t1.textContent = sessName(s);
+    const m1 = document.createElement("div");
+    m1.className = "m";
+    m1.textContent = `${s.count} 张 · 最近 ${fmtTime(s.latest)}`;
+    el.appendChild(t1);
+    el.appendChild(m1);
+    el.addEventListener("click", () => selectSession(s));
+    box.appendChild(el);
+  });
+}
+
+async function selectSession(s) {
+  current = s;
+  renderSessions();
+  $("empty").style.display = "none";
+  const grid = $("igrid");
+  grid.innerHTML = "";
+  setStatus(`加载 ${s.count} 张图…`);
+  s.items.forEach((it) => {
+    const cell = document.createElement("div");
+    cell.className = "icell";
+    const ph = document.createElement("div");
+    ph.className = "ph";
+    ph.textContent = "加载中";
+    const info = document.createElement("div");
+    info.className = "info";
+    info.textContent = (it.prompt || it.file || "").slice(0, 40);
+    cell.appendChild(ph);
+    cell.appendChild(info);
+    cell.addEventListener("click", () => openFull(it));
+    grid.appendChild(cell);
+    loadThumb(cell, s, it);
+  });
+  if (!s.items.length) {
+    $("empty").style.display = "block";
+    $("empty").textContent = "这个会话没有图";
+  }
+  setStatus(`已列出 ${s.count} 张（缩略图按需加载）`);
+}
+
+async function loadThumb(cell, s, it) {
+  try {
+    const r = await P.apiGet("/ncd-comfy/gallery/thumb", { dir: s.dir, file: it.file });
+    if (r && r.ok && r.thumb) {
+      const img = document.createElement("img");
+      img.src = r.thumb;
+      img.alt = it.file;
+      cell.replaceChild(img, cell.firstChild);
+    } else {
+      cell.firstChild.textContent = "无缩略图";
+    }
+  } catch (e) {
+    cell.firstChild.textContent = "加载失败";
+  }
+}
+
+async function openFull(it) {
+  if (!current) return;
+  try {
+    const r = await P.apiGet("/ncd-comfy/gallery/full", { dir: current.dir, file: it.file });
+    if (!r || !r.ok) { setStatus("原图加载失败"); return; }
+    $("imodal-img").src = r.b64;
+    $("imodal-meta").textContent =
+      `${it.file}\n${fmtTime(it.ts)} · ${(it.size ? Math.round(it.size / 1024) : "?")} KB` +
+      `${it.preset ? " · " + it.preset : ""}${it.model ? " · " + it.model : ""}\n` +
+      `${it.prompt || ""}`;
+    $("imodal").style.display = "flex";
+  } catch (e) {
+    setStatus("原图加载失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+function switchView(v) {
+  $("view-gallery").style.display = v === "gallery" ? "" : "none";
+  $("view-quota").style.display = v === "quota" ? "" : "none";
+  $("tab-gallery").className = v === "gallery" ? "on" : "";
+  $("tab-quota").className = v === "quota" ? "on" : "";
+}
+
+$("tab-gallery").addEventListener("click", () => switchView("gallery"));
+$("tab-quota").addEventListener("click", () => switchView("quota"));
+$("refresh").addEventListener("click", () => {
+  const q = $("tab-quota");
+  if (q && q.className === "on") {
+    if (typeof window.__quotaReload === "function") window.__quotaReload();
+  } else {
+    load();
+  }
+});
+$("imodal").addEventListener("click", (e) => {
+  if (e.target === $("imodal")) $("imodal").style.display = "none";
+});
+
+load();
+</script>
+
+<script>
+(function () {
+  const P = window.AstrBotPluginPage;
+  const $ = (id) => document.getElementById(id);
+
+let timer = null;
+let lastData = null;
+let board = "daily";
+const BOARDS = [
+  { key: "daily", label: "生图日榜" },
+  { key: "total", label: "生图总榜" },
+  { key: "speech_daily", label: "发言日榜" },
+  { key: "speech_total", label: "发言总榜" },
+];
+
+function setStatus(text, cls) {
+  const el = $("q-status");
+  el.textContent = text || "";
+  el.className = "status" + (cls ? " " + cls : "");
+}
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined && text !== null) node.textContent = text;
+  return node;
+}
+function fmtTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(Number(ts) * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " +
+    p(d.getHours()) + ":" + p(d.getMinutes());
+}
+function fmtDur(sec) {
+  sec = Math.max(0, Number(sec) || 0);
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (h && m) return h + " 小时 " + m + " 分";
+  if (h) return h + " 小时";
+  if (m) return m + " 分钟";
+  return Math.floor(sec) + " 秒";
+}
+function nameOf(row) {
+  const name = (row.name || "").trim();
+  const uid = String(row.user_id || "");
+  return { name: name || uid || "未知", uid: uid && name ? uid : "" };
+}
+function kpi(label, num, hint, percent, tone) {
+  const card = el("div", "card kpi");
+  card.appendChild(el("div", "label", label));
+  card.appendChild(el("div", "num", num));
+  if (hint) card.appendChild(el("div", "hint", hint));
+  if (percent !== null && percent !== undefined) {
+    const bar = el("div", "bar" + (tone ? " " + tone : ""));
+    const fill = el("i");
+    fill.style.width = Math.max(0, Math.min(100, Number(percent) || 0)) + "%";
+    bar.appendChild(fill);
+    card.appendChild(bar);
+  }
+  return card;
+}
+function badge(text, cls) {
+  return el("span", "badge" + (cls ? " " + cls : ""), text);
+}
+
+const GLOBAL_FIELDS = [
+  { k: "global_enabled", label: "启用全局 30 触发线", type: "bool" },
+  { k: "global_limit", label: "全局触发张数" },
+  { k: "throttle_top", label: "限流池前 N 名" },
+  { k: "canvas_top", label: "画幅池前 N 名" },
+  { k: "canvas_max_side", label: "画幅最长边" },
+  { k: "queue_limited", label: "限流队列上限" },
+  { k: "queue_normal", label: "普通队列上限" },
+  { k: "interval_base", label: "间隔基数（秒）" },
+  { k: "interval_step", label: "间隔递减（秒）" },
+  { k: "degrade_after", label: "降质张数" },
+  { k: "degrade_steps", label: "降质步数" },
+  { k: "ban_after", label: "禁生图张数" },
+  { k: "ban_hours", label: "禁生图小时" },
+  { k: "window_hour", label: "窗口起点（小时）" },
+  { k: "bypass_ids", label: "完全绕过 QQ（逗号分隔）", type: "text" },
+];
+const SPONSOR_FIELDS = [
+  { k: "user_id", label: "赞助者 QQ", type: "text" },
+  { k: "note", label: "备注/名字", type: "text" },
+  { k: "queue_cap", label: "队列上限", placeholder: "默认 3" },
+  { k: "interval_seconds", label: "间隔（秒）", placeholder: "默认 0" },
+  { k: "canvas_max_side", label: "画幅最长边（0=不限）", placeholder: "默认" },
+  { k: "degrade_after", label: "降质张数", placeholder: "默认 50" },
+  { k: "degrade_steps", label: "降质步数", placeholder: "默认 20" },
+  { k: "ban_after", label: "禁生图张数", placeholder: "默认 70" },
+  { k: "ban_hours", label: "禁生图小时", placeholder: "默认 36" },
+];
+let _fieldsBuilt = false;
+let _configFilled = false;
+
+function makeField(field, box, prefix) {
+  const wrap = el("div", "ctrl");
+  wrap.appendChild(el("label", "", field.label));
+  const input = el("input");
+  input.id = prefix + field.k;
+  input.dataset.k = field.k;
+  if (field.type === "bool") {
+    input.type = "checkbox";
+  } else if (field.type === "text") {
+    input.type = "text";
+  } else {
+    input.type = "number";
+    input.step = "1";
+    input.min = "0";
+    if (field.placeholder) input.placeholder = field.placeholder;
+  }
+  wrap.appendChild(input);
+  box.appendChild(wrap);
+  return input;
+}
+function buildFields() {
+  if (_fieldsBuilt) return;
+  _fieldsBuilt = true;
+  const gf = $("q-globalFields");
+  const sf = $("q-sponsorFields");
+  if (gf) GLOBAL_FIELDS.forEach((f) => makeField(f, gf, "gf_"));
+  if (sf) SPONSOR_FIELDS.forEach((f) => makeField(f, sf, "sf_"));
+}
+function fillGlobal(cfg) {
+  GLOBAL_FIELDS.forEach((f) => {
+    const node = $("gf_" + f.k);
+    if (!node) return;
+    const v = cfg ? cfg[f.k] : undefined;
+    if (f.type === "bool") node.checked = !!v;
+    else node.value = v === undefined || v === null ? "" : v;
+  });
+  _configFilled = true;
+}
+function readGlobal() {
+  const out = {};
+  GLOBAL_FIELDS.forEach((f) => {
+    const node = $("gf_" + f.k);
+    if (!node) return;
+    if (f.type === "bool") out[f.k] = !!node.checked;
+    else if (f.type === "text") out[f.k] = node.value.trim();
+    else if (node.value !== "") out[f.k] = Number(node.value);
+  });
+  return out;
+}
+async function saveGlobal(values, doneText) {
+  try {
+    const r = await P.apiPost("/ncd-comfy/quota/config", { values });
+    if (r && r.error) throw new Error(r.error);
+    fillGlobal((r && r.config) || values);
+    setStatus(doneText || "全局阈值已保存", "ok");
+    load();
+  } catch (err) {
+    setStatus("保存失败：" + (err && err.message ? err.message : err), "err");
+  }
+}
+function fillSponsor(ov) {
+  const data = ov || {};
+  SPONSOR_FIELDS.forEach((f) => {
+    const node = $("sf_" + f.k);
+    if (!node) return;
+    const v = data[f.k];
+    node.value = v === undefined || v === null ? "" : v;
+  });
+}
+function readSponsor() {
+  const uid = ($("q-sf_user_id") || {}).value || "";
+  const overrides = {};
+  const note = (($("q-sf_note") || {}).value || "").trim();
+  if (note) overrides.note = note;
+  ["queue_cap", "interval_seconds", "canvas_max_side",
+    "degrade_after", "degrade_steps", "ban_after", "ban_hours"].forEach((k) => {
+    const node = $("sf_" + k);
+    if (node && node.value !== "") overrides[k] = Number(node.value);
+  });
+  return { user_id: uid.trim(), overrides };
+}
+function renderSponsors(overrides) {
+  const box = $("q-sponsorList");
+  if (!box) return;
+  box.replaceChildren();
+  const rows = Object.entries(overrides || {});
+  if (!rows.length) {
+    box.appendChild(el("div", "empty", "还没有赞助者。"));
+    return;
+  }
+  rows.forEach(([uid, ov]) => {
+    const row = el("div", "sponsor-row");
+    const who = el("div", "who");
+    const nm = (ov.name || "").trim();
+    who.appendChild(el("div", "name", nm || uid));
+    who.appendChild(el("div", "uid", uid + (nm ? "" : "")));
+    row.appendChild(who);
+    const cfg = (lastData && lastData.config) || {};
+    const ds = ov.degrade_steps !== undefined
+      ? ov.degrade_steps : (cfg.degrade_steps ?? 20);
+    const bh = ov.ban_hours !== undefined
+      ? ov.ban_hours : (cfg.ban_hours ?? 36);
+    const bits = [];
+    if (ov.queue_cap !== undefined) bits.push("队列 " + ov.queue_cap);
+    if (ov.interval_seconds !== undefined) bits.push("间隔 " + ov.interval_seconds + "s");
+    if (ov.canvas_max_side !== undefined) {
+      bits.push("画幅 " + (Number(ov.canvas_max_side) > 0 ? ov.canvas_max_side : "不限"));
+    }
+    if (ov.degrade_after !== undefined) {
+      bits.push("降质 " + ov.degrade_after + " 张/" + ds + " 步");
+    }
+    if (ov.ban_after !== undefined) {
+      bits.push("禁生 " + ov.ban_after + " 张/" + bh + "h");
+    }
+    row.appendChild(el("div", "sum", bits.join(" · ") || "全部默认，仅不占池"));
+    const edit = el("button", "", "编辑");
+    edit.type = "button";
+    edit.onclick = () => fillSponsor({ ...ov, user_id: uid });
+    row.appendChild(edit);
+    const del = el("button", "", "删除");
+    del.type = "button";
+    del.onclick = async () => {
+      try {
+        const r = await P.apiPost("/ncd-comfy/quota/sponsor",
+          { user_id: uid, action: "remove" });
+        if (r && r.error) throw new Error(r.error);
+        setStatus("已删除赞助者 " + uid, "ok");
+        load();
+      } catch (err) {
+        setStatus("删除失败：" + (err && err.message ? err.message : err), "err");
+      }
+    };
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+}
+
+function renderTabs() {
+  const box = $("q-rank-tabs");
+  if (!box) return;
+  box.replaceChildren();
+  BOARDS.forEach((item) => {
+    const btn = el("button", board === item.key ? "on" : "", item.label);
+    btn.type = "button";
+    btn.onclick = () => {
+      board = item.key;
+      renderTabs();
+      renderBoard(lastData);
+    };
+    box.appendChild(btn);
+  });
+}
+
+function renderBoard(data) {
+  const box = $("q-rank");
+  if (!box) return;
+  box.replaceChildren();
+  const rankings = (data && data.rankings) || {};
+  const rows = Array.isArray(rankings[board])
+    ? rankings[board]
+    : (board === "daily" && data && Array.isArray(data.ranking)
+      ? data.ranking : []);
+  if (!rows.length) {
+    box.appendChild(el("div", "empty",
+      board === "daily" ? "本时段还没有成功生图。" : "还没有数据。"));
+    return;
+  }
+  const heads = board === "daily"
+    ? ["名次", "用户", "今日", "间隔", "队列", "状态"]
+    : board === "total"
+      ? ["名次", "用户", "累计", "最近"]
+      : board === "speech_daily"
+        ? ["名次", "用户", "今日发言", "累计"]
+        : ["名次", "用户", "累计发言"];
+  const table = el("table");
+  const thead = el("thead");
+  const hr = el("tr");
+  heads.forEach((t) => hr.appendChild(el("th", "", t)));
+  thead.appendChild(hr);
+  table.appendChild(thead);
+  const tbody = el("tbody");
+  rows.forEach((row) => {
+    const tr = el("tr");
+    tr.appendChild(el("td", "num", "#" + (row.rank || "—")));
+    const who = el("td");
+    const nm = nameOf(row);
+    who.appendChild(el("div", "name", nm.name));
+    if (nm.uid) who.appendChild(el("div", "uid", nm.uid));
+    tr.appendChild(who);
+    if (board === "daily") {
+      tr.appendChild(el("td", "num", String(row.count || 0)));
+      tr.appendChild(el("td", "num",
+        row.interval_seconds ? row.interval_seconds + "s" : "—"));
+      tr.appendChild(el("td", "num",
+        row.queue_cap === null || row.queue_cap === undefined ? "—" : row.queue_cap));
+      const st = el("td");
+      if (row.banned) st.appendChild(badge("禁生", "bad"));
+      if (row.throttled) st.appendChild(badge("限流", "warn"));
+      if (row.sponsor) st.appendChild(badge("赞助", "blue"));
+      if (row.canvas_limited) {
+        st.appendChild(badge(String(row.canvas_max_side || 1080), "blue"));
+      }
+      if (row.degraded) {
+        st.appendChild(badge((row.degrade_steps || 20) + " 步", "warn"));
+      }
+      if (!st.childNodes.length) st.appendChild(badge("正常", "ok"));
+      tr.appendChild(st);
+    } else if (board === "total") {
+      tr.appendChild(el("td", "num", String(row.count || 0)));
+      tr.appendChild(el("td", "num", fmtTime(row.last_success)));
+    } else if (board === "speech_daily") {
+      tr.appendChild(el("td", "num", String(row.count || 0)));
+      tr.appendChild(el("td", "num", String(row.total_count || 0)));
+    } else {
+      tr.appendChild(el("td", "num", String(row.count || 0)));
+    }
+    tbody.appendChild(tr);
+  });
+  table.appendChild(tbody);
+  box.appendChild(table);
+}
+
+function render(data) {
+  const g = data.global || {};
+  const w = data.window || {};
+  const totals = data.totals || {};
+  const bans = Array.isArray(data.bans) ? data.bans : [];
+  const dailyRows = Array.isArray(data.ranking) ? data.ranking : [];
+  lastData = data;
+  renderTabs();
+  buildFields();
+  const editing = document.activeElement && document.activeElement.closest
+    ? document.activeElement.closest("#controlCard")
+    : null;
+  if (!_configFilled || !editing) fillGlobal(data.config || {});
+  renderSponsors(data.overrides || {});
+
+  $("q-window").textContent = (w.label || "—") +
+    (w.remaining ? " · 距重置 " + fmtDur(w.remaining) : "");
+
+  const notice = $("q-notice");
+  if (notice) notice.style.display = data.enforce === false ? "" : "none";
+
+  const cards = $("q-cards");
+  cards.replaceChildren();
+  cards.appendChild(kpi(
+    "私聊全局成功生图",
+    (g.count || 0) + " / " + (g.limit || 30),
+    g.enabled === false ? "全局 30 已关闭" :
+      (g.triggered ? "已触发前 5 限流" : "未触发限流池"),
+    g.enabled === false ? null : (g.percent || 0),
+    g.triggered ? "over" : ""
+  ));
+  cards.appendChild(kpi(
+    "群聊全局生图",
+    (g.group_count || 0) + " 张",
+    "累计 " + (g.group_total || 0) + " 张 · 不占私聊额度"
+  ));
+  cards.appendChild(kpi(
+    "本时段参与用户", totals.users || 0,
+    "累计成功 " + (totals.images || 0) + " 张"
+  ));
+  cards.appendChild(kpi(
+    "禁生图", bans.length,
+    bans.length ? "到期自动恢复" : "暂无"
+  ));
+  cards.appendChild(kpi(
+    "限流池 / 画幅池",
+    ((data.pools && data.pools.throttle) || []).length + " / " +
+      ((data.pools && data.pools.canvas) || []).length,
+    "前 5 名 / 前 3 名"
+  ));
+
+  renderBoard(data);
+
+  const watchBox = $("q-watch");
+  watchBox.replaceChildren();
+  const watch = dailyRows.filter((r) => (r.count || 0) > 0).slice(0, 14);
+  if (!watch.length) {
+    watchBox.appendChild(el("div", "empty", "还没有需要盯的用户。"));
+  } else {
+    watch.forEach((row) => {
+      const wrap = el("div", "watch-row");
+      const main = el("div", "watch-main");
+      const top = el("div", "watch-top");
+      const nm = nameOf(row);
+      const da = Number(row.degrade_after) || 50;
+      const ba = Number(row.ban_after) || 70;
+      top.appendChild(el("span", "n", nm.name));
+      top.appendChild(el("span", "c",
+        (row.count || 0) + "/" + da + " · " + (row.count || 0) + "/" + ba));
+      main.appendChild(top);
+      const bar = el("div", "mini");
+      const fill = el("i");
+      fill.style.width = Math.max(0, Math.min(100,
+        (Number(row.count) || 0) / ba * 100)) + "%";
+      if ((row.count || 0) >= ba) fill.className = "bad";
+      else if ((row.count || 0) >= da) fill.className = "warn";
+      bar.appendChild(fill);
+      main.appendChild(bar);
+      wrap.appendChild(main);
+      watchBox.appendChild(wrap);
+    });
+  }
+
+  const banBox = $("q-bans");
+  banBox.replaceChildren();
+  if (!bans.length) {
+    banBox.appendChild(el("div", "empty", "当前没有禁生图用户。"));
+  } else {
+    const table = el("table");
+    const thead = el("thead");
+    const hr = el("tr");
+    ["用户", "截止", "剩余"].forEach((t) => hr.appendChild(el("th", "", t)));
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tbody = el("tbody");
+    bans.forEach((ban) => {
+      const tr = el("tr");
+      const who = el("td");
+      const nm = nameOf(ban);
+      who.appendChild(el("div", "name", nm.name));
+      if (nm.uid) who.appendChild(el("div", "uid", nm.uid));
+      tr.appendChild(who);
+      tr.appendChild(el("td", "num", fmtTime(ban.until)));
+      tr.appendChild(el("td", "num", fmtDur(ban.remaining)));
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    banBox.appendChild(table);
+  }
+}
+
+async function load() {
+  try {
+    const data = await P.apiGet("/ncd-comfy/quota");
+    if (data && data.error) throw new Error(data.error);
+    render(data || {});
+    setStatus("已刷新 " + new Date().toLocaleTimeString(), "ok");
+  } catch (err) {
+    setStatus("拉取失败：" + (err && err.message ? err.message : err), "err");
+  }
+}
+
+$("q-refresh").addEventListener("click", load);
+$("q-saveConfig").addEventListener("click", () => {
+  saveGlobal(readGlobal(), "全局阈值已保存");
+});
+$("q-resetConfig").addEventListener("click", () => {
+  const defs = lastData && lastData.defaults;
+  if (!defs) {
+    setStatus("默认值还没加载，稍后再试", "err");
+    return;
+  }
+  fillGlobal(defs);
+  saveGlobal(defs, "已恢复默认数值");
+});
+$("q-clearSponsor").addEventListener("click", () => fillSponsor({}));
+$("q-saveSponsor").addEventListener("click", async () => {
+  const payload = readSponsor();
+  if (!/^\d{5,12}$/.test(payload.user_id)) {
+    setStatus("赞助者 QQ 号格式不对", "err");
+    return;
+  }
+  try {
+    const r = await P.apiPost("/ncd-comfy/quota/sponsor", payload);
+    if (r && r.error) throw new Error(r.error);
+    setStatus("赞助者 " + payload.user_id + " 已保存", "ok");
+    load();
+  } catch (err) {
+    setStatus("保存失败：" + (err && err.message ? err.message : err), "err");
+  }
+});
+load();
+timer = setInterval(load, 5000);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden && timer) { clearInterval(timer); timer = null; }
+  else if (!document.hidden && !timer) { load(); timer = setInterval(load, 5000); }
+});
+
+})();
+
+</script>
+</body>
+</html>

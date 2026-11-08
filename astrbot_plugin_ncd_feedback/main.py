@@ -388,6 +388,7 @@ class NcdFeedbackPlugin(star.Star):
             ("stats", self.api_stats, ["GET"], "反馈统计"),
             ("resolve", self.api_resolve, ["POST"], "标记已处理/忽略"),
             ("delete", self.api_delete, ["POST"], "删除反馈"),
+            ("notify-test", self.api_notify_test, ["POST"], "调试：发一条测试反馈给管理员"),
         ]
         for name, fn, methods, desc in routes:
             try:
@@ -396,6 +397,28 @@ class NcdFeedbackPlugin(star.Star):
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.error(f"[feedback] 注册接口 /{name} 失败: {exc}")
+
+    async def api_notify_test(self):
+        """调试：走真实的 _notify_admin，给管理员私聊发一条测试反馈。"""
+        import time as _t
+
+        item = {
+            "id": "test" + uuid.uuid4().hex[:4],
+            "ts": _t.time(),
+            "category": "功能",
+            "text": "【测试】这条是插件自检发的模拟反馈，用来验证能不能私聊到你。",
+            "status": "new",
+            "note": "",
+            "umo": "ncd-app_be689fd4:GroupMessage:0",
+            "group": "（测试）",
+            "sender_id": "0",
+            "sender": "自检",
+        }
+        try:
+            await self._notify_admin(item)
+            return {"ok": True, "id": item["id"]}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
 
     async def api_list(self):
         items = list(self._load())

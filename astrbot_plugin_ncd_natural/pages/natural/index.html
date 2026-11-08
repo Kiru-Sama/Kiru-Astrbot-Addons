@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>更自然的对话</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root {
+    --bg:#f6f7f9; --card:#fff; --border:#e5e8ee; --text:#1f2329;
+    --muted:#8a919b; --accent:#3b82f6; --ok:#16a34a; --bad:#dc2626;
+    --track:#f1f3f6; --soft:#eef2f8;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif; padding:16px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:14px; flex-wrap:wrap; }
+  h1 { font-size:17px; margin:0; }
+  h2 { font-size:13px; margin:0 0 10px; }
+  .sub { color:var(--muted); font-size:12px; }
+  .spacer { flex:1; }
+  button { font:inherit; border:1px solid var(--border); border-radius:8px;
+    padding:7px 14px; background:var(--card); color:var(--text); cursor:pointer; }
+  button:hover { background:var(--track); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.primary:hover { filter:brightness(.95); }
+  input[type=number] { width:80px; font:inherit; padding:5px 8px;
+    border:1px solid var(--border); border-radius:8px; }
+  .cards { display:grid; grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:12px; margin-bottom:12px; }
+  @media (max-width:900px) { .cards { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+  .card { background:var(--card); border:1px solid var(--border);
+    border-radius:12px; padding:12px; }
+  .kpi .num { font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .kpi .label { color:var(--muted); font-size:12px; }
+  .tune { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    background:var(--card); border:1px solid var(--border); border-radius:12px;
+    padding:12px; margin-bottom:12px; }
+  .tune label { color:var(--muted); font-size:12px; }
+  table { width:100%; border-collapse:collapse; background:var(--card);
+    border:1px solid var(--border); border-radius:12px; overflow:hidden; }
+  th, td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border);
+    font-size:12.5px; }
+  th { color:var(--muted); font-size:11px; font-weight:600; background:var(--soft); }
+  tr:last-child td { border-bottom:none; }
+  .num { font-variant-numeric:tabular-nums; }
+  .name { font-weight:600; }
+  .badge { display:inline-block; font-size:11px; padding:1px 8px; border-radius:999px;
+    background:var(--track); color:var(--muted); }
+  .badge.ok { background:#eaf7ee; color:var(--ok); }
+  .badge.bad { background:#fdecec; color:var(--bad); }
+  .badge.blue { background:#eaf2ff; color:#1d4ed8; }
+  .status { font-size:12px; color:var(--muted); margin-top:10px; min-height:18px; }
+  .row-cur { background:#f7fbff; }
+  .preview { color:var(--muted); font-size:11.5px; max-width:420px;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .section { margin-bottom:14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>更自然的对话</h1>
+  <span class="sub">动态检索层 · 所有人格都有「更自然的对话」副本</span>
+  <span class="spacer"></span>
+  <button id="toggle" class="primary">…</button>
+</header>
+
+<div class="cards">
+  <div class="card kpi"><div class="label">总开关</div><div class="num" id="k-enabled">—</div></div>
+  <div class="card kpi"><div class="label">当前数据包</div><div class="num" id="k-current">—</div></div>
+  <div class="card kpi"><div class="label">检索条数</div><div class="num" id="k-k">—</div></div>
+  <div class="card kpi"><div class="label">注入上限</div><div class="num" id="k-max">—</div></div>
+</div>
+
+<div class="tune">
+  <label>每轮检索 <input type="number" id="in-k" min="1" max="10" step="1" /> 条</label>
+  <label>注入上限 <input type="number" id="in-max" min="200" max="8000" step="100" /> 字符</label>
+  <button id="save" class="primary">保存调参</button>
+</div>
+
+<div class="section card" style="padding:0;border:none;background:transparent;">
+  <h2>已录入的对话数据</h2>
+  <table>
+    <thead><tr><th>数据包</th><th>对象</th><th>原话对</th><th>消息数</th><th>大小</th></tr></thead>
+    <tbody id="packs"></tbody>
+  </table>
+</div>
+
+<div class="section card" style="padding:0;border:none;background:transparent;">
+  <h2>每轮运行记录（最近 20 条）</h2>
+  <table>
+    <thead><tr><th>时间</th><th>类型</th><th>会话</th><th>条数</th><th>内容预览</th></tr></thead>
+    <tbody id="rounds"></tbody>
+  </table>
+</div>
+
+<div class="card">
+  <div class="label" style="color:var(--muted);font-size:12px;">怎么用</div>
+  <div style="margin-top:6px;line-height:1.9;font-size:13px;">
+    ① 这里打开总开关<br>
+    ② 在 <b>/人格</b> 列表里选「涩涩丝瓜 更自然的对话」（任意人格都有对应副本）<br>
+    ③ 发消息时：检索 N 条最像的原话，拼在你这句话前面；回复不带引用、多行自动分条<br>
+    数据就是集合包（所有语料合并，新数据自动并入）<br>切回原人格 → 完全恢复，一行都不注入
+  </div>
+</div>
+
+<div class="status" id="status"></div>
+
+<div id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);
+  z-index:50;align-items:center;justify-content:center;padding:24px;">
+  <div style="background:var(--card);border-radius:14px;max-width:900px;width:100%;
+    max-height:82vh;display:flex;flex-direction:column;overflow:hidden;">
+    <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;
+      border-bottom:1px solid var(--border);">
+      <b style="font-size:14px;">完整注入内容</b>
+      <span class="sub" id="modal-sub"></span>
+      <span style="flex:1;"></span>
+      <button id="modal-close">关闭</button>
+    </div>
+    <pre id="modal-body" style="margin:0;padding:14px 16px;overflow:auto;
+      font:12.5px/1.7 Consolas,monospace;white-space:pre-wrap;word-break:break-word;"></pre>
+  </div>
+</div>
+
+<script>
+const P = window.AstrBotPluginPage;
+const $ = (id) => document.getElementById(id);
+let state = null;
+
+function setStatus(text) { $("status").textContent = text || ""; }
+function fmt(ts) {
+  if (!ts) return "—";
+  const d = new Date(Number(ts) * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return p(d.getHours()) + ":" + p(d.getMinutes()) + ":" + p(d.getSeconds());
+}
+
+async function load() {
+  try {
+    state = await P.apiGet("/ncd-natural/status");
+    render();
+  } catch (e) {
+    setStatus("读取失败：" + (e && e.message ? e.message : e));
+  }
+}
+
+function render() {
+  if (!state) return;
+  $("k-enabled").textContent = state.enabled ? "开" : "关";
+  $("k-enabled").style.color = state.enabled ? "var(--ok)" : "var(--bad)";
+  $("k-current").textContent = state.current || "无";
+  $("k-k").textContent = state.k;
+  $("k-max").textContent = state.max_chars;
+  if (document.activeElement !== $("in-k")) $("in-k").value = state.k;
+  if (document.activeElement !== $("in-max")) $("in-max").value = state.max_chars;
+  $("toggle").textContent = state.enabled ? "关闭总开关" : "打开总开关";
+
+  const tb = $("packs");
+  tb.innerHTML = "";
+  (state.packs || []).forEach((p) => {
+    const tr = document.createElement("tr");
+    if (p.id === state.current) tr.className = "row-cur";
+    tr.innerHTML =
+      '<td class="name">' + p.id + "</td>" +
+      "<td>" + (p.name || "") + "</td>" +
+      '<td class="num">' + p.pairs + "</td>" +
+      '<td class="num">' + (p.messages ?? "—") + "</td>" +
+      '<td class="num">' + p.kb + " KB</td>";
+    tb.appendChild(tr);
+  });
+
+  const rb = $("rounds");
+  rb.innerHTML = "";
+  (state.rounds || []).forEach((r) => {
+    const tr = document.createElement("tr");
+    const kind = r.kind === "send"
+      ? '<span class="badge blue">发送</span>'
+      : '<span class="badge ok">注入</span>';
+    const umo = String(r.umo || "").split(":").slice(1).join(":") || r.umo || "";
+    tr.innerHTML =
+      '<td class="num">' + fmt(r.ts) + "</td>" +
+      "<td>" + kind + "</td>" +
+      '<td class="preview">' + umo + "</td>" +
+      '<td class="num">' + (r.k ?? "—") + "</td>" +
+      '<td class="preview" title="' + (r.preview || "").replace(/"/g, "&quot;") + '">'
+        + (r.preview || "") + "</td>";
+    if (r.full) {
+      tr.style.cursor = "pointer";
+      tr.title = "点击查看完整注入内容";
+      tr.addEventListener("click", () => showFull(r));
+    }
+    rb.appendChild(tr);
+  });
+}
+
+$("toggle").addEventListener("click", async () => {
+  if (!state) return;
+  try {
+    const r = await P.apiPost("/ncd-natural/toggle", { enabled: !state.enabled });
+    await load();
+    setStatus((r && r.enabled ? "已打开" : "已关闭") + "总开关");
+  } catch (e) {
+    setStatus("切换失败：" + (e && e.message ? e.message : e));
+  }
+});
+
+$("save").addEventListener("click", async () => {
+  try {
+    const k = Number($("in-k").value);
+    const max = Number($("in-max").value);
+    const r = await P.apiPost("/ncd-natural/config", { k, max_chars: max });
+    await load();
+    setStatus("已保存：每条消息检索 " + r.k + " 条，上限 " + r.max_chars + " 字符");
+  } catch (e) {
+    setStatus("保存失败：" + (e && e.message ? e.message : e));
+  }
+});
+
+function showFull(r) {
+  document.getElementById("modal-sub").textContent = fmt(r.ts) + " · " + (r.persona || "") + " · 检索 " + (r.k ?? "-") + " 条";
+  document.getElementById("modal-body").textContent = r.full || "（无内容）";
+  document.getElementById("modal").style.display = "flex";
+}
+document.getElementById("modal-close").addEventListener("click", () => {
+  document.getElementById("modal").style.display = "none";
+});
+document.getElementById("modal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("modal")) {
+    document.getElementById("modal").style.display = "none";
+  }
+});
+
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>

@@ -15,6 +15,8 @@
 
 from __future__ import annotations
 
+import re
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
@@ -129,6 +131,12 @@ class NcdPersonaPlugin(Star):
             return
 
         name = str(arg or "").strip()
+        # ★ 2026-11-09：GreedyStr 有时只给第一个词（“涩涩丝瓜 更自然的对话”只剩“涩涩丝瓜”），
+        #   从原始消息里重新取完整参数
+        msg = str(getattr(event, "message_str", "") or "").strip()
+        stripped = re.sub(r"^[/／]?(?:人格|persona|换人格)\s*", "", msg).strip()
+        if stripped:
+            name = stripped
         cfg = await self._read_cfg(umo)
         current = self._current_persona(cfg)
 
