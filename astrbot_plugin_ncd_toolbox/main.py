@@ -336,7 +336,7 @@ MENU_TOOL = "ncd_tools"
 #   （2026-10-22：清掉已下线的独立绘图插件 ncd_draw 的四个旧工具名，避免误导）
 FOREIGN_KEEP = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status",
                 "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help",
-                "comfy_tag_lookup", "comfy_find_lora", "comfy_download_lora",
+                "comfy_tag_lookup",
                 "memory_write", "memory_search", "memory_forget",
                 "extend_turns", "read_attachment",
                   "feedback_submit")

@@ -316,24 +316,133 @@
   .kvlist .kv:last-child { border-bottom: none; }
   .kv .v.wrap { text-align: right; word-break: break-all; max-width: 62%; }
 
-  /* ---- 宿主机资源：每秒刷新 + 每条 3 分钟趋势 ---- */
+  /* ---- 宿主机资源：温度优先，手机 / 笔记本分组，实时 + 7 天 ----
+     ★ 2026-11-13 重排：手机组和笔记本组各带「机器 + 采集来源」标题，
+       温度速览固定 2×2 / 4×1 两种排法，不再出现 3+1 的断行。
+     ★ 容器查询按【卡片自身宽度】切换，而不是视口宽度：
+       这张卡在 g2 网格里，视口 736px 时卡片只有 ~315px 内容宽 ——
+       用视口断点会算错；不支持容器查询的旧浏览器退回 2×2，同样不会 3+1。 */
+  .card[data-card="resources"] { container-type: inline-size; container-name: rescard; }
+
+  /* 分组标题：左侧色条 + 右侧来源/状态，先把「哪台机器」讲清楚 */
+  .res-grp {
+    display: flex; align-items: baseline; justify-content: space-between;
+    gap: 8px; flex-wrap: wrap;
+    margin: 12px 0 4px; padding-top: 10px;
+    border-top: 1px dashed var(--border);
+    font-size: 12px;
+  }
+  .res-grp.res-grp-top { margin-top: 0; padding-top: 0; border-top: 0; }
+  .res-grp .g-name {
+    font-weight: 650; color: var(--text);
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .res-grp .g-name::before {
+    content: ""; width: 3px; height: 12px; border-radius: 2px;
+    background: var(--accent);
+  }
+  .res-grp.g-pc .g-name::before { background: var(--ok); }
+  .res-grp .g-src {
+    color: var(--muted); font-size: 10.5px; font-weight: 400;
+    text-align: right; overflow-wrap: anywhere;
+  }
+  .res-rows { display: grid; }
   .res-row {
-    display: flex; align-items: center; gap: 9px;
-    padding: 4px 0; border-bottom: 1px dashed var(--border);
+    display: grid; grid-template-columns: 44px minmax(0, 1fr) 64px;
+    align-items: center; column-gap: 9px;
+    padding: 3px 0; border-bottom: 1px dashed var(--border);
     font-size: 13px;
   }
-  .res-row:last-of-type { border-bottom: none; }
-  .res-k { flex: none; width: 40px; color: var(--muted); }
-  .res-spark { flex: 1; height: 26px; min-width: 50px; display: block; }
+  .res-row:last-child { border-bottom: none; }
+  .res-row [hidden] { display: none !important; }
+  .res-k { color: var(--muted); white-space: nowrap; }
+  .res-spark { width: 100%; height: 26px; min-width: 40px; display: block; }
+  .res-na {
+    font-size: 10px; line-height: 1.4; color: var(--muted);
+    overflow-wrap: anywhere;
+  }
   .res-v {
-    flex: none; min-width: 48px; text-align: right;
-    font-variant-numeric: tabular-nums; font-weight: 600;
+    text-align: right; font-variant-numeric: tabular-nums;
+    font-weight: 650; white-space: nowrap;
   }
-  .res-sub {
-    margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border);
-    font-size: 11.5px; color: var(--muted);
+  .res-foot {
+    margin-top: 6px; font-size: 10.5px; color: var(--muted);
+    line-height: 1.5;
   }
-  .res-note { font-size: 11.5px; color: var(--muted); padding: 3px 0; }
+  /* 失败 / 诊断条：只补一行说明，不覆盖已经有内容的区块 */
+  .res-err {
+    margin: 6px 0 2px; padding: 5px 8px; border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--bad) 33%, transparent);
+    background: color-mix(in srgb, var(--bad) 7%, transparent);
+    font-size: 11px; line-height: 1.5; color: var(--text);
+    overflow-wrap: anywhere;
+  }
+
+  /* 7 天统计：峰值胶囊 > 温度曲线 > 占用曲线 > 每日概览 */
+  .hs-chart-t {
+    margin-top: 6px; font-size: 10.5px; font-weight: 600; color: var(--muted);
+    letter-spacing: .03em;
+  }
+  .hs-canvas { width: 100%; height: 62px; display: block; margin-top: 2px; }
+  .hs-legend {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 3px 12px;
+    font-size: 10.5px; color: var(--muted); margin-top: 3px;
+  }
+  .hs-legend .lg { display: inline-flex; align-items: center; gap: 5px; }
+  .hs-legend .lg i {
+    width: 9px; height: 3px; border-radius: 2px; flex: none; display: inline-block;
+  }
+  .hs-legend .lg.off { opacity: .55; }
+  .hs-legend .lg b { color: var(--text); font-weight: 650; font-variant-numeric: tabular-nums; }
+  .hs-axis {
+    display: flex; justify-content: space-between; gap: 8px;
+    font-size: 10px; color: var(--muted); margin-top: 1px;
+  }
+  .hs-peaks { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0 2px; }
+  .hs-peak {
+    font-size: 10.5px; padding: 2px 6px; border-radius: 6px;
+    background: var(--soft, #f5f7fa); border: 1px solid var(--border);
+    font-variant-numeric: tabular-nums;
+  }
+  .hs-peak b { font-weight: 650; color: var(--text); }
+  .hs-peak.t { border-color: color-mix(in srgb, var(--bad) 25%, var(--border)); }
+  .hs-days { margin-top: 6px; font-size: 10.5px; color: var(--muted); }
+  .hs-day {
+    padding: 3px 0; border-bottom: 1px dashed var(--border);
+    display: flex; justify-content: space-between; gap: 10px;
+  }
+  .hs-day:last-child { border-bottom: none; }
+  .hs-day .d { color: var(--text); flex: none; font-variant-numeric: tabular-nums; }
+  .hs-day .b { min-width: 0; text-align: right; overflow-wrap: anywhere; }
+  .hs-empty { font-size: 11.5px; color: var(--muted); padding: 5px 0; line-height: 1.5; }
+
+  /* ---- 温度速览：2×2 起步，卡片够宽才排 4 枚（容器查询） ---- */
+  .temp-chips {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px; margin: 2px 0;
+  }
+  @container rescard (min-width: 480px) {
+    .temp-chips { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  }
+  .temp-chip {
+    border: 1px solid var(--border); border-radius: 10px;
+    padding: 7px 9px; background: var(--card); min-width: 0;
+  }
+  .temp-chip .t-k { font-size: 10.5px; color: var(--muted); white-space: nowrap; }
+  .temp-chip .t-v {
+    font-size: 22px; font-weight: 700; line-height: 1.2;
+    font-variant-numeric: tabular-nums; margin-top: 1px;
+  }
+  .temp-chip .t-v small { font-size: 11.5px; font-weight: 600; margin-left: 1px; }
+  .temp-chip .t-s {
+    font-size: 10px; color: var(--muted); line-height: 1.4; margin-top: 1px;
+    overflow-wrap: anywhere;
+  }
+  .temp-chip.c-ok .t-v { color: #16a34a; }
+  .temp-chip.c-warn .t-v { color: #d97706; }
+  .temp-chip.c-bad .t-v { color: #dc2626; }
+  .temp-chip.c-none .t-v { color: var(--muted); }
+  .temp-chip.c-none .t-v small { display: none; }
 
   /* ---- 各会话上下文占用 ----
      统一成一套 6 列网格：会话 / 进度 / 消息 / Token / 占比 / 缓存。
@@ -1551,8 +1660,12 @@
       <div id="modelBox"></div>
     </div>
     <div class="card" data-card="resources" data-title="宿主机资源">
-      <h2>宿主机资源 <span class="h2sub">每秒刷新 · 3 分钟趋势</span></h2>
+      <h2>宿主机资源 <span class="h2sub">温度优先 · 每秒实时 · 10 秒落盘 · 滚动 7 天</span></h2>
+      <div class="res-grp res-grp-top"><span class="g-name">温度速览</span><span class="g-src">笔记本（linkd） + 手机（sysfs） · 实时</span></div>
+      <div id="tempChips" class="temp-chips"></div>
       <div id="resBox"></div>
+      <div id="pcBox"></div>
+      <div id="hostStatsBox"></div>
     </div>
   </div>
 
@@ -1686,6 +1799,45 @@
 <script>
 const P = window.AstrBotPluginPage;
 let first = true;
+
+/* ---------- tick 性能自测 & 数据签名 ----------
+   ★ 手机 WebView 里最贵的不是 JS 计算，而是「innerHTML 重建 + 强制重排」。
+     之前 tick 每轮无条件重画十几张卡，可数据多数根本没变 —— 每 10 秒那一顿
+     就是这么来的。现在每张卡先比一个【数据签名】，没变就整段跳过，DOM 一个
+     节点都不碰。
+   ★ 签名只取该卡真正读取的字段，绝不 stringify 整个 overview —— 里面的
+     server_time / uptime_sec 每拍都变，会把所有卡都误判成"变了"。 */
+const PERF_LOG_MS = 120;
+function nowMs() {
+  return (window.performance && performance.now) ? performance.now() : Date.now();
+}
+function sigOf(v) {
+  try {
+    const s = JSON.stringify(v);
+    // JSON.stringify(undefined) 返回 undefined，会和"签名缓存还没初始化"混淆，
+    // 导致首轮缺字段时整张卡被跳过 —— 归一成字符串。
+    return s === undefined ? "undefined" : s;
+  } catch (e) { return "!" + String(v); }
+}
+const _sigCache = Object.create(null);
+/* 数据签名没变 → 返回 -1 跳过；变了才执行 fn，并返回本次渲染耗时（ms）。
+   渲染抛错时不记签名，下一拍会重试 —— 免得一次偶发异常把卡片永久冻住。 */
+function renderIfChanged(key, sig, fn) {
+  if (_sigCache[key] === sig) return -1;
+  const t = nowMs();
+  try {
+    fn();
+    _sigCache[key] = sig;
+    return nowMs() - t;
+  } catch (e) {
+    console.error("[monitor]", key, e);
+    return -1;
+  }
+}
+/* 让出一个宏任务：把后续渲染挪到下一拍，避免同一帧里连续重排 */
+function nextTask() {
+  return new Promise(function (resolve) { setTimeout(resolve, 0); });
+}
 
 const fmtNum = (n) => (n === null || n === undefined) ? "—" : Number(n).toLocaleString();
 // 紧凑 token 数：1,400 -> 1.4K；3,888,825,330 -> 3.9B（构成图例用）
@@ -2237,11 +2389,87 @@ function renderModel(d) {
      要探测 LM Studio / SnowLuma，1 秒拉一次太重。所以单独开一个
      【只读内存】的 /sysinfo —— 采样在后端按固定 1 秒节奏跑。
    ★ 好处：刷新页面不会把曲线清零，后端还留着最近 N 个点。            */
+/* ---------- 失败态诊断 ----------
+   ★ 只写「读取失败，60 秒后重试」等于没写：下面把 404（路由没注册）、
+     网络错误（请求没到后端）、超时、5xx、空/格式异常分开，给出该去查什么。
+   ★ 桥接 SDK 不同版本抛出的字段不一样（status / statusCode / response.status，
+     有的只有 message），这里逐个探测，拿不到就退化成原始 message —— 不吞诊断。 */
+function describeResError(e) {
+  let msg = "";
+  try { msg = e && e.message ? String(e.message) : String(e || ""); } catch (x) { msg = "无法读取错误对象"; }
+  let status = null;
+  try {
+    if (e && (typeof e.status === "number" || typeof e.status === "string")) status = e.status;
+    else if (e && (typeof e.statusCode === "number" || typeof e.statusCode === "string")) status = e.statusCode;
+    else if (e && e.response && typeof e.response.status === "number") status = e.response.status;
+  } catch (x) { status = null; }
+  const code = status === null ? null : (parseInt(String(status), 10) || null);
+  const probe = (code === null ? "" : String(code) + " ") + msg;
+  if (code === 404 || /404|not\s*found|未注册|no\s*route/i.test(probe)) {
+    return { kind: "404", label: "接口 404（路由未注册）" };
+  }
+  if (code === 401 || code === 403) return { kind: "auth", label: "HTTP " + code + "（鉴权失败）" };
+  if (code === 500 || code === 502 || code === 503) return { kind: "server", label: "HTTP " + code + "（后端异常）" };
+  if (/timeout|timed?\s*out|超时/i.test(probe)) return { kind: "timeout", label: "请求超时" };
+  if (/failed to fetch|networkerror|network request failed|load failed|econn|enotfound|断网|offline/i.test(probe)) {
+    return { kind: "network", label: "网络错误（请求没到后端）" };
+  }
+  return { kind: "unknown", label: "读取失败" + (msg ? "：" + msg.slice(0, 120) : "") };
+}
+
+/* 把诊断条插到对应容器里：有分组标题就插在标题【下面】（别把分组顶掉），
+   没有标题就插最前面；已有内容一个字都不动 */
+function setResDiag(boxId, diagId, text) {
+  const box = document.getElementById(boxId);
+  if (!box) return;
+  let el = document.getElementById(diagId);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = diagId;
+    el.className = "res-err";
+    const head = box.firstElementChild;
+    if (head && head.classList && head.classList.contains("res-grp")) {
+      box.insertBefore(el, head.nextSibling);
+    } else {
+      box.insertBefore(el, box.firstChild);
+    }
+  }
+  el.textContent = text;
+}
+function clearResDiag(diagId) {
+  const el = document.getElementById(diagId);
+  if (el && el.parentNode) el.parentNode.removeChild(el);
+}
+
+function sysinfoFailText(e) {
+  const info = describeResError(e);
+  const kept = _resSeries.length ? "已保留上次成功数据，1 秒后自动重试。" : "1 秒后自动重试。";
+  if (info.kind === "404") return "资源接口 404：/ncd-monitor/sysinfo 没注册 —— 插件可能没重载到该路由的版本，去 AstrBot 插件管理重载 ncd-monitor 后再看。" + kept;
+  if (info.kind === "network") return "资源接口网络失败（请求没到 AstrBot 后端）：确认面板与后端连接正常、AstrBot 没在重启。" + kept;
+  if (info.kind === "timeout") return "资源接口请求超时：后端采样线程被占住或系统卡顿，通常下一拍就恢复。" + kept;
+  if (info.kind === "auth") return "资源接口鉴权失败（" + info.label + "）：确认当前登录账号有插件页访问权限。" + kept;
+  if (info.kind === "server") return "资源接口后端报错（" + info.label + "）：查 AstrBot 日志里 ncd-monitor 的异常栈。" + kept;
+  return "资源接口读取失败（" + info.label + "）。" + kept;
+}
+
+function hostStatsFailText(e) {
+  const info = describeResError(e);
+  const kept = "60 秒后自动重试；已显示的是上一次成功的数据（如果有）。";
+  if (info.kind === "404") return "7 天统计接口 404：/ncd-monitor/host-stats 没注册 —— 插件可能没重载到含 host-stats 的版本，去插件管理重载后再看。" + kept;
+  if (info.kind === "network") return "7 天统计网络失败（请求没到 AstrBot 后端）：AstrBot 可能在重启，或面板 iframe 与后端断开。" + kept;
+  if (info.kind === "timeout") return "7 天统计请求超时：后端首次聚合 7 天 JSONL 较慢（数据越多越慢），稍等会自动出结果。" + kept;
+  if (info.kind === "auth") return "7 天统计鉴权失败（" + info.label + "）：确认当前登录账号有插件页访问权限。" + kept;
+  if (info.kind === "server") return "7 天统计后端报错（" + info.label + "）：查 AstrBot 日志里 host-stats 的异常栈。" + kept;
+  return "7 天统计读取失败（" + info.label + "）。" + kept;
+}
+
+/* 手机组：CPU / 内存是真实采样；GPU / 显存手机侧没有 nvidia-smi，
+   仍列出但显示「—」+ 原因，不画空曲线。 */
 const RES_METRICS = [
-  { key: "cpu",  label: "CPU",  color: "--accent" },
-  { key: "gpu",  label: "GPU",  color: "--ok" },
-  { key: "vram", label: "显存", color: "--warn" },
-  { key: "mem",  label: "内存", color: "--bad" },
+  { key: "cpu",  label: "CPU",  color: "--accent", unit: "pct" },
+  { key: "mem",  label: "内存", color: "--bad",    unit: "pct" },
+  { key: "gpu",  label: "GPU",  color: "--ok",     unit: "pct", na: "手机侧没有 nvidia-smi，读不到 GPU 占用" },
+  { key: "vram", label: "显存", color: "--warn",   unit: "pct", na: "手机侧没有独立显存；笔记本的显存在下一组" },
 ];
 let _resSeries = [];
 let _resBuilt = false;
@@ -2280,14 +2508,34 @@ function fmtPct(v) {
 }
 
 /* 迷你趋势图：固定 0~100% 量程，只看形状，不画坐标轴 */
+/* 量一次尺寸缓存 2 秒：每帧读 clientWidth 会把刚改过的样式强制 flush 一次布局 */
+function cvSize(cv, defW, defH) {
+  const now = (window.performance && performance.now) ? performance.now() : Date.now();
+  if (!cv._sz || now - (cv._szAt || 0) > 2000) {
+    cv._sz = [cv.clientWidth || defW, cv.clientHeight || defH];
+    cv._szAt = now;
+  }
+  return cv._sz;
+}
+
+function fitCanvas(cv, W, H, dpr) {
+  const wpx = Math.max(1, Math.round(W * dpr));
+  const hpx = Math.max(1, Math.round(H * dpr));
+  if (cv.width !== wpx || cv.height !== hpx) {
+    cv.width = wpx;
+    cv.height = hpx;
+  }
+}
+
 function drawSpark(cv, values, stroke) {
   if (!cv) return;
   const dpr = window.devicePixelRatio || 1;
-  const W = cv.clientWidth || 120;
-  const H = cv.clientHeight || 26;
-  cv.width = Math.max(1, Math.round(W * dpr));
-  cv.height = Math.max(1, Math.round(H * dpr));
+  const sz = cvSize(cv, 120, 26);
+  const W = sz[0];
+  const H = sz[1];
   const g = cv.getContext("2d");
+  if (!g) return;
+  fitCanvas(cv, W, H, dpr);
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, W, H);
 
@@ -2325,84 +2573,513 @@ function drawSpark(cv, values, stroke) {
   g.fill();
 }
 
+/* ---------- 分组 / 行骨架（手机组与笔记本组共用）---------- */
+function resGrpHtml(name, src, cls) {
+  return '<div class="res-grp' + (cls ? " " + cls : "") + '">' +
+    '<span class="g-name">' + esc(name) + "</span>" +
+    '<span class="g-src">' + esc(src) + "</span></div>";
+}
+function resRowHtml(label, key) {
+  return '<div class="res-row">' +
+    '<span class="res-k">' + esc(label) + "</span>" +
+    '<canvas class="res-spark" data-spark="' + key + '"></canvas>' +
+    '<span class="res-na" data-na="' + key + '" hidden></span>' +
+    '<span class="res-v" data-val="' + key + '">—</span>' +
+    "</div>";
+}
+/* 前值填充：采样刚启动时个别字段缺一拍，直接 filter 会让曲线时间轴被压缩。
+   只用于百分比曲线；温度曲线保留 null，让缺数据的段断开（见 drawTrendSeries）。 */
+function carrySeries(raw) {
+  const out = [];
+  let carry = null;
+  for (let i = 0; i < raw.length; i++) {
+    if (typeof raw[i] === "number") carry = raw[i];
+    if (carry !== null) out.push(carry);
+  }
+  return out;
+}
+function lastNumOf(arr) {
+  for (let i = arr.length - 1; i >= 0; i--) {
+    if (typeof arr[i] === "number") return arr[i];
+  }
+  return null;
+}
+function anyNum(arr) {
+  for (let i = 0; i < arr.length; i++) {
+    if (typeof arr[i] === "number") return true;
+  }
+  return false;
+}
+
 /* 行只建一次 —— 每秒 innerHTML 重建会让曲线闪、也浪费 */
 function buildResRows() {
   const box = document.getElementById("resBox");
   if (!box) return;
   box.innerHTML =
-    RES_METRICS.map(
-      (m) =>
-        '<div class="res-row">' +
-        '<span class="res-k">' + esc(m.label) + "</span>" +
-        '<canvas class="res-spark" data-metric="' + m.key + '"></canvas>' +
-        '<span class="res-v" data-val="' + m.key + '">—</span>' +
-        "</div>"
-    ).join("") + '<div class="res-sub" id="resSub">采样中…</div>';
+    resGrpHtml("手机", "AstrBot 宿主 · psutil + sysfs · 1 秒采样") +
+    '<div class="res-rows">' +
+    RES_METRICS.map(function (m) { return resRowHtml(m.label, m.key); }).join("") +
+    "</div>" +
+    '<div class="res-foot" id="resSub">正在等第一个采样点…</div>';
   _resBuilt = true;
 }
 
 function paintRes() {
   if (!_resBuilt) return;
-  RES_METRICS.forEach((m) => {
-    // ★ 前值填充，而不是 filter 掉缺失值：
-    //   采样刚启动的那 1 个样本可能还没有 GPU（nvidia-smi 第一行要 ~50ms 才到），
-    //   直接 filter 会让数组变短、曲线的时间轴被压缩，看起来像"数据错位"。
-    const vals = [];
-    let carry = null;
-    for (const s of _resSeries) {
-      const v = s[m.key];
-      if (typeof v === "number") carry = v;
-      if (carry !== null) vals.push(carry);
-    }
+  const series = Array.isArray(_resSeries) ? _resSeries : [];
+  RES_METRICS.forEach(function (m) {
+    const raw = series.map(function (s) { return s ? s[m.key] : null; });
+    const hasAny = anyNum(raw);
+    const vals = carrySeries(raw);
     const cur = vals.length ? vals[vals.length - 1] : null;
     const valEl = document.querySelector('#resBox .res-v[data-val="' + m.key + '"]');
+    const cv = document.querySelector('#resBox .res-spark[data-spark="' + m.key + '"]');
+    const na = document.querySelector('#resBox .res-na[data-na="' + m.key + '"]');
     if (valEl) {
-      valEl.textContent = fmtPct(cur);
+      valEl.textContent = cur === null ? "—" : fmtPct(cur);
       valEl.style.color = cur === null ? "var(--muted)" : cssVar(m.color, "#3b82f6");
     }
-    drawSpark(
-      document.querySelector('#resBox .res-spark[data-metric="' + m.key + '"]'),
-      vals,
-      cssVar(m.color, "#3b82f6")
-    );
+    if (cv) cv.hidden = !hasAny;
+    if (!hasAny) {
+      if (na) {
+        na.hidden = false;
+        na.textContent = m.na || "等待首个采样点（1 秒）…";
+      }
+      return;
+    }
+    if (na) na.hidden = true;
+    drawSpark(cv, vals, cssVar(m.color, "#3b82f6"));
   });
 }
 
 function renderSys(d) {
-  _resSeries = d.series || [];
+  if (!d || typeof d !== "object" || !Array.isArray(d.series)) {
+    if (!_resBuilt) buildResRows();
+    setResDiag("resBox", "resDiag", "资源接口返回格式异常：缺 series 数组（插件版本可能不匹配）。1 秒后自动重试。");
+    return false;
+  }
+  _resSeries = d.series;
   if (!_resBuilt) buildResRows();
   paintRes();
+  clearResDiag("resDiag");
 
-  // 副行：GPU 型号 / 温度 / 功耗 + 显存与内存的绝对值
+  // 副行：内存绝对值 / 温度 / 已采点数 —— 百分比之外的「绝对量」补充
   const last = d.latest || {};
   const bits = [];
-  if (last.gpu_name) bits.push(esc(last.gpu_name));
-  if (last.gpu_temp !== undefined) bits.push(last.gpu_temp + "°C");
-  if (last.gpu_power !== undefined) bits.push(esc(String(last.gpu_power)) + "W");
-  if (last.vram_used !== undefined) {
-    bits.push("显存 " + last.vram_used + " / " + last.vram_total + " MiB");
-  }
-  if (last.mem_used_gb !== undefined) {
+  if (typeof last.mem_used_gb === "number" && typeof last.mem_total_gb === "number") {
     bits.push("内存 " + last.mem_used_gb + " / " + last.mem_total_gb + " GB");
   }
+  if (typeof last.temp === "number") bits.push("SoC " + last.temp + "°C");
+  if (typeof last.temp_ph_batt === "number") bits.push("电池 " + last.temp_ph_batt + "°C");
+  if (typeof last.temp_ph_shell === "number") bits.push("外壳 " + last.temp_ph_shell + "°C");
+  if (!_resSeries.length) bits.push("首个采样点还没出现（约 1 秒）");
+  else bits.push("已采 " + _resSeries.length + " 点 · 1 秒/点");
   const sub = document.getElementById("resSub");
+  if (sub) sub.textContent = bits.join(" · ");
+
+  paintPc(d);
+  renderTempChips(d);
+  return true;
+}
+
+/* ---------- 温度速览：笔记本 GPU/CPU + 手机 SoC/电池 ----------
+   温度是本卡第一优先级：4 枚固定顺序（宽卡片一行 4 枚、窄卡片 2×2）。
+   没数据的那枚显示「—」+ 一句「为什么没有」，不单独留空白。 */
+function tempClass(t) {
+  if (typeof t !== "number") return "c-none";
+  if (t >= 80) return "c-bad";
+  if (t >= 60) return "c-warn";
+  return "c-ok";
+}
+
+function tempWord(t) {
+  if (typeof t !== "number") return "无数据";
+  if (t >= 80) return "过热";
+  if (t >= 60) return "偏高";
+  return "正常";
+}
+
+let _chipEls = null;
+function renderTempChips(d) {
+  const box = document.getElementById("tempChips");
+  if (!box) return;
+  const latest = (d && d.latest) || {};
+  const pc = (d && d.pc) || {};
+  const gpu = pc.gpu || {};
+  const pcOk = !!(d && d.pc_ok);
+  const chips = [
+    {
+      k: "笔记本 GPU", t: gpu.temp, src: "nvidia-smi",
+      miss: pcOk ? "linkd 已连，但 nvidia-smi 没给温度" : "笔记本未连接（linkd 未上报）",
+    },
+    {
+      k: "笔记本 CPU", t: pc.cpu_temp,
+      src: pc.cpu_temp_src ? "来源 " + pc.cpu_temp_src : "LHM/AIDA64 类驱动",
+      miss: "需 LHM/AIDA64 类驱动读 CPU 温度（笔记本默认不暴露）",
+    },
+    {
+      k: "手机 SoC", t: latest.temp, src: "sysfs · soc_thermal",
+      miss: "sysfs 里没有可读的 SoC 温度节点",
+    },
+    {
+      k: "手机电池", t: latest.temp_ph_batt, src: "sysfs · power_supply",
+      miss: "sysfs 里没有电池温度节点（或机型不支持）",
+    },
+  ];
+  // ★ 结构只建一次：每秒重建 innerHTML 会让整卡排版重算，是卡顿主因之一
+  if (!_chipEls || _chipEls.length !== chips.length) {
+    box.innerHTML = chips.map(function () {
+      return '<div class="temp-chip c-none">' +
+        '<div class="t-k"></div>' +
+        '<div class="t-v"><span class="t-n">—</span><small>°C</small></div>' +
+        '<div class="t-s"></div>' +
+        '</div>';
+    }).join("");
+    _chipEls = Array.prototype.slice.call(box.querySelectorAll(".temp-chip")).map(function (el) {
+      return {
+        root: el,
+        k: el.querySelector(".t-k"),
+        n: el.querySelector(".t-n"),
+        s: el.querySelector(".t-s"),
+      };
+    });
+  }
+  chips.forEach(function (c, i) {
+    const e = _chipEls[i];
+    if (!e) return;
+    const has = typeof c.t === "number";
+    const cls = "temp-chip " + tempClass(c.t);
+    if (e.root.className !== cls) e.root.className = cls;
+    if (e.k.textContent !== c.k) e.k.textContent = c.k;
+    const numTxt = has ? String(Math.round(c.t * 10) / 10) : "—";
+    if (e.n.textContent !== numTxt) e.n.textContent = numTxt;
+    const note = has ? tempWord(c.t) + " · " + c.src : "无数据：" + c.miss;
+    if (e.s.textContent !== note) e.s.textContent = note;
+  });
+}
+
+/* ---------- 笔记本（ComfyUI 宿主，走 linkd /sysinfo）----------
+   手机本身没有 nvidia-smi，所以笔记本的 GPU/显存/温度要从电脑侧拉。
+   数据由后端每 10 秒采样一次，这里画最近 20 分钟（120 点）的迷你曲线。 */
+const PC_METRICS = [
+  { key: "cpu",      label: "CPU",   color: "--accent", unit: "pct" },
+  { key: "gpu",      label: "GPU",   color: "--ok",     unit: "pct" },
+  { key: "vram",     label: "显存",  color: "--warn",   unit: "pct" },
+  { key: "mem",      label: "内存",  color: "--bad",    unit: "pct" },
+  { key: "gpu_temp", label: "GPU温", color: "--bad",    unit: "temp" },
+  { key: "cpu_temp", label: "CPU温", color: "--warn",   unit: "temp",
+    na: "需 LHM/AIDA64 类驱动读 CPU 温度（笔记本默认不暴露该传感器）" },
+];
+let _pcBuilt = false;
+
+/* 通用折线：支持任意量程（温度不是 0~100，不能复用 drawSpark） */
+function drawTrend(cv, values, stroke, lo, hi) {
+  drawTrendSeries(cv, [{ values: values, color: stroke }], lo, hi);
+}
+
+/* 多条线一次画：7 天温度对比 + 笔记本温度曲线。
+   ★ 支持数组里的 null：缺数据的段直接断开（pen = false），
+     绝不把缺口当 0 / 当最小值，画出一条假的掉线。 */
+function drawTrendSeries(cv, seriesList, lo, hi) {
+  if (!cv) return;
+  const dpr = window.devicePixelRatio || 1;
+  const sz = cvSize(cv, 320, 64);
+  const W = sz[0];
+  const H = sz[1];
+  const g = cv.getContext("2d");
+  if (!g) return;
+  fitCanvas(cv, W, H, dpr);
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const pad = 3;
+  const plotH = H - pad * 2;
+  const span = Math.max(1e-6, hi - lo);
+  const yOf = function (v) { return pad + plotH * (1 - Math.max(0, Math.min(1, (v - lo) / span))); };
+  (seriesList || []).forEach(function (s) {
+    const vals = s.values || [];
+    const n = vals.length;
+    if (n < 2) return;
+    const stepX = W / (n - 1);
+    g.strokeStyle = s.color;
+    g.lineWidth = s.width || 1.5;
+    g.lineJoin = "round";
+    g.setLineDash(s.dash || []);
+    g.beginPath();
+    let pen = false;
+    for (let i = 0; i < n; i++) {
+      const v = vals[i];
+      if (typeof v !== "number") { pen = false; continue; }
+      const x = i * stepX;
+      const y = yOf(v);
+      if (!pen) { g.moveTo(x, y); pen = true; }
+      else { g.lineTo(x, y); }
+    }
+    g.stroke();
+  });
+  g.setLineDash([]);
+}
+
+function buildPcRows() {
+  const box = document.getElementById("pcBox");
+  if (!box) return;
+  box.innerHTML =
+    resGrpHtml("笔记本", "ComfyUI 宿主 · linkd /sysinfo · 10 秒采样", "g-pc") +
+    '<div class="res-rows">' +
+    PC_METRICS.map(function (m) { return resRowHtml(m.label, m.key); }).join("") +
+    "</div>" +
+    '<div class="res-foot" id="pcSub"></div>';
+  _pcBuilt = true;
+}
+
+/* 笔记本 6 行：右侧数值 + 迷你曲线；没数据的行显示「—」+ 原因。
+   ★ 与旧实现不同：pc_ok=false 时不再把整块 innerHTML 换成一句提示，
+     只补一条可诊断说明，行结构与已经拿到的历史数据都保留。 */
+let _pcLastT = -1;
+function paintPc(d) {
+  const box = document.getElementById("pcBox");
+  if (!box) return;
+  const pcOk = !!(d && d.pc_ok);
+  if (!_pcBuilt) buildPcRows();
+  if (!pcOk) {
+    setResDiag("pcBox", "pcDiag",
+      "笔记本未连接：电脑侧 linkd 的 /sysinfo 拉不到。检查 linkd 是否在跑、monitor_pc_linkd 地址（默认 http://192.168.137.1:8201）与防火墙；恢复后 10 秒内自动出数。");
+  } else {
+    clearResDiag("pcDiag");
+  }
+  const series = (d && Array.isArray(d.pc_series)) ? d.pc_series : [];
+  // ★ 笔记本采样是 10 秒一条：只有时间戳变了才重画 6 条曲线
+  const lastT = series.length ? Number(series[series.length - 1].t || 0) : 0;
+  const needDraw = lastT !== _pcLastT;
+  if (needDraw) _pcLastT = lastT;
+  PC_METRICS.forEach(function (m) {
+    const raw = series.map(function (r) { return r ? r[m.key] : null; });
+    const hasAny = anyNum(raw);
+    const cur = raw.length && typeof raw[raw.length - 1] === "number" ? raw[raw.length - 1] : null;
+    const vEl = document.querySelector('#pcBox .res-v[data-val="' + m.key + '"]');
+    const cv = document.querySelector('#pcBox .res-spark[data-spark="' + m.key + '"]');
+    const na = document.querySelector('#pcBox .res-na[data-na="' + m.key + '"]');
+    if (vEl) {
+      vEl.textContent = cur === null ? "—"
+        : (m.unit === "temp" ? Math.round(cur * 10) / 10 + "°C" : Math.round(cur * 10) / 10 + "%");
+      vEl.style.color = cur === null ? "var(--muted)" : cssVar(m.color, "#3b82f6");
+    }
+    if (cv) cv.hidden = !hasAny;
+    if (na) {
+      na.hidden = cur !== null;
+      if (cur === null) {
+        na.textContent = hasAny ? "本拍未读到（曲线是历史值）"
+          : (pcOk ? (m.na || "linkd 未提供该字段") : "linkd 未连接，没拿到数据");
+      }
+    }
+    if (!hasAny || !cv || !needDraw) return;
+    if (m.unit === "temp") {
+      const nums = raw.filter(function (v) { return typeof v === "number"; });
+      const lo = Math.max(0, Math.min.apply(null, nums) - 5);
+      const hi = Math.max.apply(null, nums) + 5;
+      drawTrend(cv, raw, cssVar(m.color, "#e11d48"), lo, hi);
+    } else {
+      drawSpark(cv, carrySeries(raw), cssVar(m.color, "#3b82f6"));
+    }
+  });
+  const sub = document.getElementById("pcSub");
   if (sub) {
-    sub.textContent = bits.length
-      ? bits.join(" · ") + " · 已采 " + _resSeries.length + " 点"
-      : "GPU 未检测到（nvidia-smi 不可用），只有 CPU / 内存";
+    const bits = [];
+    const pc = (d && d.pc) || {};
+    const gpu = pc.gpu || {};
+    if (gpu.name) bits.push(String(gpu.name));
+    if (typeof gpu.mem_used_mb === "number" && typeof gpu.mem_total_mb === "number") {
+      bits.push("显存 " + gpu.mem_used_mb + " / " + gpu.mem_total_mb + " MiB");
+    }
+    if (gpu.power !== undefined && gpu.power !== null && String(gpu.power) !== "") {
+      bits.push(String(gpu.power) + "W");
+    }
+    if (pc.cpu_temp_src) bits.push("CPU 温度来源：" + pc.cpu_temp_src);
+    if (d && typeof d.pc_age === "number") bits.push("linkd 数据 " + Math.round(d.pc_age) + " 秒前");
+    sub.textContent = pcOk
+      ? (bits.length ? bits.join(" · ") : "linkd 已连接，但没上报 GPU 信息（可能这台机器没有 NVIDIA 显卡）。")
+      : "linkd 未连接：以上「—」不是占位符，是确实没拿到数据。";
+  }
+}
+
+/* ---------- 7 天统计（每 10 秒一行，滚动保留）----------
+   ★ 温度三线在前、占用两线在后；某条整段没有数据就【不画】，
+     图例里写「无数据」，而不是拿 0 / 最小值补一条假曲线。 */
+const HS_PEAKS = [
+  ["pc_temp", "笔记本GPU最高", "°C"],
+  ["pc_cpu_temp", "笔记本CPU最高", "°C"],
+  ["ph_temp", "手机SoC最高", "°C"],
+  ["ph_gpu_temp", "手机GPU最高", "°C"],
+  ["pc_gpu", "GPU占用峰", "%"],
+  ["pc_vram", "显存峰值", "%"],
+  ["pc_cpu", "CPU占用峰", "%"],
+];
+
+function fmtHour(ts) {
+  const d = new Date(ts * 1000);
+  const p = (n) => (n < 10 ? "0" + n : "" + n);
+  return d.getMonth() + 1 + "-" + d.getDate() + " " + p(d.getHours()) + ":00";
+}
+
+function hsDayRow(r) {
+  const bits = [];
+  if (typeof r.pc_temp_max === "number") bits.push("GPU " + r.pc_temp_max + "°C");
+  if (typeof r.pc_cpu_temp_max === "number") bits.push("CPU " + r.pc_cpu_temp_max + "°C");
+  if (typeof r.ph_temp_max === "number") bits.push("手机 " + r.ph_temp_max + "°C");
+  if (typeof r.pc_gpu_max === "number") bits.push("GPU占用 " + r.pc_gpu_max + "%");
+  if (typeof r.pc_vram_max === "number") bits.push("显存 " + r.pc_vram_max + "%");
+  const at = r.pc_temp_max_at_str || r.pc_cpu_temp_max_at_str || "";
+  return '<div class="hs-day"><span class="d">' + esc(r.day || "") + "</span>" +
+    '<span class="b">' + (bits.length ? bits.join(" · ") : "无数据") +
+    (at ? " · 峰@" + esc(at) : "") + " · " + (r.samples || 0) + " 样本</span></div>";
+}
+
+/* 空响应 / 格式不对（和「还没攒够数据」是两回事），单独判出来 */
+function hsShapeProblem(d) {
+  if (!d || typeof d !== "object") return "接口返回为空（期望 JSON 对象）";
+  if (d.error) return "接口返回错误：" + String(d.error).slice(0, 160);
+  if (!Array.isArray(d.buckets)) return "返回格式异常：缺 buckets 数组（插件版本可能不匹配）";
+  return "";
+}
+
+function renderHostStats(d) {
+  const box = document.getElementById("hostStatsBox");
+  if (!box) return;
+
+  const problem = hsShapeProblem(d);
+  if (problem) {
+    if (!box.innerHTML.trim()) {
+      box.innerHTML = resGrpHtml("近 7 天", "10 秒采样 · 按小时汇总");
+    }
+    setResDiag("hostStatsBox", "hsDiag",
+      "7 天统计读取失败：" + problem + "。60 秒后自动重试，已保留上次内容。");
+    return;
+  }
+
+  const days = (typeof d.days === "number" && d.days > 0) ? d.days : 7;
+  const buckets = d.buckets;
+  const samples = typeof d.samples === "number" ? d.samples : 0;
+  if (!buckets.length) {
+    const why = samples > 0
+      ? "有 " + samples + " 条样本，但都落在 " + days + " 天统计窗口之外（检查设备时间是否准确）。"
+      : "插件每 10 秒写一行、按小时汇总，约 1 分钟后出现第一段曲线，之后一直滚存 " + days + " 天。";
+    box.innerHTML = resGrpHtml("近 7 天", "10 秒采样 · 按小时汇总 · 滚动 " + days + " 天") +
+      '<div class="hs-empty">等待数据：' + esc(why) + "</div>";
+    return;
+  }
+
+  const pcOk = !!d.pc_ok;
+  const peaks = d.peaks || {};
+  const daily = Array.isArray(d.daily) ? d.daily : [];
+
+  // 峰值胶囊：温度在前、占用在后，每条都带发生时间；缺的跳过
+  const peakHtml = HS_PEAKS.map(function (item) {
+    const p = peaks[item[0]];
+    if (!p || typeof p.v !== "number") return "";
+    return '<span class="hs-peak' + (item[2] === "°C" ? " t" : "") + '">' +
+      esc(item[1]) + " <b>" + esc(String(p.v)) + esc(item[2]) + "</b> @" +
+      esc(p.t_str || "") + "</span>";
+  }).join("") || '<span class="hs-peak">这个窗口还没有峰值样本</span>';
+
+  const col = function (fn) { return buckets.map(fn); };
+  const num = function (v) { return typeof v === "number" ? v : null; };
+  const pcGpuT = col(function (b) { return num(typeof b.pc_temp_max === "number" ? b.pc_temp_max : b.pc_temp); });
+  const pcCpuT = col(function (b) { return num(typeof b.pc_cpu_temp_max === "number" ? b.pc_cpu_temp_max : b.pc_cpu_temp); });
+  const phCpuT = col(function (b) { return num(typeof b.ph_temp_max === "number" ? b.ph_temp_max : b.ph_temp); });
+  const gpuLoad = col(function (b) { return num(b.pc_gpu); });
+  const cpuLoad = col(function (b) { return num(b.pc_cpu); });
+
+  const tAll = [];
+  [pcGpuT, pcCpuT, phCpuT].forEach(function (arr) {
+    arr.forEach(function (v) { if (typeof v === "number") tAll.push(v); });
+  });
+  const tLo = tAll.length ? Math.max(0, Math.min.apply(null, tAll) - 5) : 20;
+  const tHi = tAll.length ? Math.max.apply(null, tAll) + 5 : 100;
+
+  const cBad = cssVar("--bad", "#dc2626");
+  const cWarn = cssVar("--warn", "#d97706");
+  const cOk = cssVar("--ok", "#16a34a");
+  const cAcc = cssVar("--accent", "#3b82f6");
+
+  const legendHtml = function (items) {
+    return '<div class="hs-legend">' + items.map(function (it) {
+      const v = lastNumOf(it.arr);
+      return '<span class="lg' + (v === null ? " off" : "") + '">' +
+        '<i style="background:' + it.color + '"></i>' + esc(it.name) +
+        (v === null ? " 无数据" : " <b>" + esc(String(v)) + esc(it.unit) + "</b>") +
+        "</span>";
+    }).join("") + "</div>";
+  };
+  const axisHtml = function () {
+    return '<div class="hs-axis"><span>' + esc(fmtHour(buckets[0].t)) + "</span>" +
+      "<span>共 " + buckets.length + " 个整点</span>" +
+      "<span>" + esc(fmtHour(buckets[buckets.length - 1].t)) + "</span></div>";
+  };
+
+  const tempSeries = [];
+  if (anyNum(pcGpuT)) tempSeries.push({ values: pcGpuT, color: cBad });
+  if (anyNum(pcCpuT)) tempSeries.push({ values: pcCpuT, color: cWarn, dash: [4, 3] });
+  if (anyNum(phCpuT)) tempSeries.push({ values: phCpuT, color: cOk });
+  const loadSeries = [];
+  if (anyNum(gpuLoad)) loadSeries.push({ values: gpuLoad, color: cOk });
+  if (anyNum(cpuLoad)) loadSeries.push({ values: cpuLoad, color: cAcc });
+
+  const tempLegend = legendHtml([
+    { name: "笔记本GPU", color: cBad, arr: pcGpuT, unit: "°C" },
+    { name: "笔记本CPU", color: cWarn, arr: pcCpuT, unit: "°C" },
+    { name: "手机SoC", color: cOk, arr: phCpuT, unit: "°C" },
+  ]);
+  const loadLegend = legendHtml([
+    { name: "GPU占用", color: cOk, arr: gpuLoad, unit: "%" },
+    { name: "CPU占用", color: cAcc, arr: cpuLoad, unit: "%" },
+  ]);
+
+  box.innerHTML =
+    resGrpHtml("近 7 天", samples + " 个样本 · " + days + " 天 · 10 秒聚合" + (pcOk ? "" : " · 笔记本未连接")) +
+    '<div class="hs-peaks">' + peakHtml + "</div>" +
+    (pcOk ? "" : '<div class="hs-empty">笔记本（linkd）当前未连接：7 天曲线只有手机侧数据。</div>') +
+    '<div class="hs-chart-t">温度 °C</div>' +
+    tempLegend +
+    (tempSeries.length
+      ? '<canvas id="hsTemp" class="hs-canvas"></canvas>' + axisHtml()
+      : '<div class="hs-empty">这 7 天没有任何温度样本（笔记本 linkd 未连接 / 手机温度传感器不可读）。</div>') +
+    '<div class="hs-chart-t" style="margin-top:8px">占用 %</div>' +
+    loadLegend +
+    (loadSeries.length
+      ? '<canvas id="hsLoad" class="hs-canvas"></canvas>' + axisHtml()
+      : '<div class="hs-empty">这 7 天没有占用样本。</div>') +
+    (daily.length ? '<div class="hs-days">' + daily.slice(-7).map(hsDayRow).join("") + "</div>" : "");
+
+  if (tempSeries.length) drawTrendSeries(document.getElementById("hsTemp"), tempSeries, tLo, tHi);
+  if (loadSeries.length) drawTrendSeries(document.getElementById("hsLoad"), loadSeries, 0, 100);
+}
+
+async function refreshHostStats() {
+  if (document.hidden) return;  /* 标签页不可见时不轮询，省电省 CPU */
+  try {
+    renderHostStats(await P.apiGet("/ncd-monitor/host-stats"));
+  } catch (e) {
+    console.error("[monitor] host-stats", e);
+    const box = document.getElementById("hostStatsBox");
+    if (!box) return;
+    if (!box.innerHTML.trim()) {
+      box.innerHTML = resGrpHtml("近 7 天", "10 秒采样 · 按小时汇总");
+    }
+    setResDiag("hostStatsBox", "hsDiag", hostStatsFailText(e));
   }
 }
 
 async function refreshSys() {
+  if (document.hidden) return;  /* 标签页不可见时不轮询，省电省 CPU */
   try {
     const d = await P.apiGet("/ncd-monitor/sysinfo");
-    renderSys(d);
-    renderLive(d.live, d.lives, d.gate);
+    const ok = renderSys(d);
+    if (ok && d && typeof d === "object") renderLive(d.live, d.lives, d.gate);
   } catch (e) {
-    if (!_resBuilt) {
-      const box = document.getElementById("resBox");
-      if (box) box.innerHTML = '<div class="res-note">资源接口读取失败，自动重试中…</div>';
-    }
+    console.error("[monitor] sysinfo", e);
+    if (!_resBuilt) buildResRows();
+    if (!_pcBuilt) buildPcRows();
+    setResDiag("resBox", "resDiag", sysinfoFailText(e));
+    setResDiag("pcBox", "pcDiag", "笔记本数据同样来自 /ncd-monitor/sysinfo，本次一起失败（原因见上方手机组）。");
   }
 }
 
@@ -2874,35 +3551,95 @@ const fmtMs = (ms) => {
   return ms >= 1000 ? (ms / 1000).toFixed(1) + " s" : ms + " ms";
 };
 
+/* ---------- 请求历史 ----------
+   ★ 大列表策略：最多显示最近 20 条（后端给 60 条，手机上全画没意义），
+     并且【行节点按位置复用】—— 只改 textContent / 显隐，不再每拍重建整张表。
+     表格整体重建触发整表 layout，是 10 秒顿挫里最贵的一块之一。 */
+const CALL_ROWS_MAX = 20;
+const _callRowPool = [];
+function _callRowAt(i) {
+  if (_callRowPool[i]) return _callRowPool[i];
+  const tr = document.createElement("tr");
+  const cells = [];
+  for (let k = 0; k < 8; k++) {
+    const td = document.createElement("td");
+    tr.appendChild(td);
+    cells.push(td);
+  }
+  cells[0].className = "nowrap";
+  cells[3].className = cells[4].className = cells[5].className = cells[6].className = "num";
+  const nameText = document.createTextNode("");
+  const active = document.createElement("span");
+  active.className = "pill active";
+  active.textContent = "主动";
+  active.hidden = true;
+  cells[1].appendChild(nameText);
+  cells[1].appendChild(document.createTextNode(" "));
+  cells[1].appendChild(active);
+  const prev = document.createElement("div");
+  prev.className = "prev";
+  const rep = document.createElement("div");
+  rep.className = "prev out";
+  const empty = document.createElement("span");
+  empty.style.color = "var(--muted)";
+  empty.textContent = "—";
+  cells[2].appendChild(prev);
+  cells[2].appendChild(rep);
+  cells[2].appendChild(empty);
+  const row = {
+    tr: tr, cells: cells, nameText: nameText, active: active,
+    prev: prev, rep: rep, empty: empty,
+  };
+  _callRowPool[i] = row;
+  return row;
+}
+
 function renderCalls(calls) {
   const tb = document.getElementById("calls");
+  if (!tb) return;
   if (!calls || !calls.length) {
-    tb.innerHTML = `<tr><td colspan="8" style="color:var(--muted)">暂无数据</td></tr>`;
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 8;
+    td.style.color = "var(--muted)";
+    td.textContent = "暂无数据";
+    tr.appendChild(td);
+    tb.replaceChildren(tr);
     return;
   }
-  tb.innerHTML = calls.slice().reverse().map((c) => {
-    const tools = (c.tool_calls || []).map((t) => `<span class="pill tool">${esc(t)}</span>`).join("") || "—";
-    const active = c.is_active_reply ? '<span class="pill active">主动</span>' : "";
-    const prev = c.preview
-      ? `<div class="prev">${esc(c.preview)}</div>`
-      : "";
-    const rep = c.reply_preview
-      ? `<div class="prev out">${esc(c.reply_preview)}</div>`
-      : "";
-    return `<tr>
-      <td class="nowrap">${fmtTime(c.time)}</td>
-      <td>${esc(sourceLabel(c))} ${active}</td>
-      <td>
-        ${prev || '<span style="color:var(--muted)">—</span>'}
-        ${rep}
-      </td>
-      <td class="num">${fmtNum(c.input_tokens)}</td>
-      <td class="num">${fmtNum(c.output_tokens)}</td>
-      <td class="num">${fmtNum(c.cached_tokens)}</td>
-      <td class="num">${fmtMs(c.latency_ms)}</td>
-      <td>${tools}</td>
-    </tr>`;
-  }).join("");
+  const rows = calls.slice(-CALL_ROWS_MAX).reverse();
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < rows.length; i++) {
+    const c = rows[i];
+    const row = _callRowAt(i);
+    const cells = row.cells;
+    cells[0].textContent = fmtTime(c.time);
+    row.nameText.nodeValue = sourceLabel(c);
+    row.active.hidden = !c.is_active_reply;
+    row.prev.hidden = !c.preview;
+    row.prev.textContent = c.preview || "";
+    row.rep.hidden = !c.reply_preview;
+    row.rep.textContent = c.reply_preview || "";
+    row.empty.hidden = !!(c.preview || c.reply_preview);
+    cells[3].textContent = fmtNum(c.input_tokens);
+    cells[4].textContent = fmtNum(c.output_tokens);
+    cells[5].textContent = fmtNum(c.cached_tokens);
+    cells[6].textContent = fmtMs(c.latency_ms);
+    const list = c.tool_calls || [];
+    cells[7].textContent = "";
+    if (!list.length) {
+      cells[7].textContent = "—";
+    } else {
+      for (let k = 0; k < list.length; k++) {
+        const pill = document.createElement("span");
+        pill.className = "pill tool";
+        pill.textContent = list[k];
+        cells[7].appendChild(pill);
+      }
+    }
+    frag.appendChild(row.tr);
+  }
+  tb.replaceChildren(frag);
 }
 
 /* ---------- 统计小卡 ---------- */
@@ -3463,12 +4200,39 @@ ${esc(it.summary)}</div>`
   collectThumbs();
 }
 
+/* 上下文快照的便宜签名。
+   ★ 快照本身 append-only，但 response 会在请求结束后【回填】到同一条快照上
+     （main.py:_attach_snapshot_response），所以不能只看条数：还要带上每条的
+     response 文本/思考长度、usage 和 summary 长度，才能感知"回填"。
+   ★ 不 stringify 整包 —— 里面是完整聊天正文，几十 KB，序列化本身就是一种卡顿。 */
+function ctxItemsSig(items) {
+  if (!items || !items.length) return "0";
+  let out = String(items.length);
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i] || {};
+    const r = it.response || {};
+    out += "|" + it.id + "," + (it.kind || "") + "," + (it.message_count || 0) + "," +
+      (it.summary ? it.summary.length : 0) + "," +
+      (typeof r.text === "string" ? r.text.length : 0) + "," +
+      (typeof r.reasoning === "string" ? r.reasoning.length : 0) + "," +
+      (r.input_tokens || 0) + "," + (r.output_tokens || 0) + "," +
+      (r.cached_tokens || 0) + "," + ((r.tool_calls || []).length);
+  }
+  return out;
+}
+
+/* 返回本次【同步渲染】耗时 ms（-1 = 数据没变跳过）；nudgeContexts 忽略返回值。
+   把 HTTP 等待排除在耗时统计之外，perf 日志才反映真正的 DOM 阻塞。 */
 async function refreshContexts() {
   try {
     const r = await P.apiGet("/ncd-monitor/contexts");
-    renderContexts(r.items);
+    const items = (r && r.items) || [];
+    return renderIfChanged("contexts", ctxItemsSig(items), function () {
+      renderContexts(items);
+    });
   } catch (e) {
     console.error(e);
+    return -1;
   }
 }
 
@@ -3505,7 +4269,8 @@ function renderSearchBox(d) {
 
 async function refreshSearchBox() {
   try {
-    renderSearchBox(await P.apiGet("/ncd-monitor/search-stats"));
+    const d = await P.apiGet("/ncd-monitor/search-stats");
+    renderIfChanged("search", sigOf(d), function () { renderSearchBox(d); });
   } catch (e) {
     /* 统计拿不到不影响主面板 */
   }
@@ -3720,6 +4485,7 @@ async function loadGenThumbs() {
 }
 
 async function refreshComfy() {
+  if (document.hidden) return;  /* 标签页不可见时不轮询，省电省 CPU */
   try {
     const d = await P.apiGet("/ncd-monitor/state/comfy");
     renderComfy(d);
@@ -3729,39 +4495,102 @@ async function refreshComfy() {
   }
 }
 
-/* ---------- 工具调用（monitor 钩子记录） ---------- */
+/* ---------- 工具调用（monitor 钩子记录） ----------
+   ★ 与事件流同样的策略：摘要行 + 滚动容器只建一次，明细最多 30 行
+     （后端给 40 行），行节点按位置复用，只改 textContent。 */
+const TOOLS_ROWS_MAX = 30;
+const _toolRows = [];
+let _toolsScroll = null;
+let _toolsSummary = null;
+function _toolsSummaryAt() {
+  if (_toolsSummary) return _toolsSummary;
+  const el = document.createElement("div");
+  el.className = "kv";
+  const k = document.createElement("span");
+  k.className = "k";
+  k.textContent = "按工具";
+  const v = document.createElement("span");
+  v.className = "v";
+  el.appendChild(k);
+  el.appendChild(v);
+  _toolsSummary = { el: el, v: v };
+  return _toolsSummary;
+}
+function _toolRowAt(i) {
+  if (_toolRows[i]) return _toolRows[i];
+  const el = document.createElement("div");
+  el.className = "kv";
+  const k = document.createElement("span");
+  k.className = "k";
+  const name = document.createTextNode("");
+  const sub = document.createElement("span");
+  sub.className = "h2sub";
+  k.appendChild(name);
+  k.appendChild(document.createTextNode(" "));
+  k.appendChild(sub);
+  const v = document.createElement("span");
+  v.className = "v";
+  const args = document.createTextNode("");
+  const err = document.createElement("span");
+  err.style.color = "var(--bad)";
+  err.textContent = " 错误";
+  err.hidden = true;
+  const tail = document.createTextNode("");
+  v.appendChild(args);
+  v.appendChild(err);
+  v.appendChild(tail);
+  el.appendChild(k);
+  el.appendChild(v);
+  const row = { el: el, name: name, sub: sub, args: args, err: err, tail: tail };
+  _toolRows[i] = row;
+  return row;
+}
 function renderTools(d) {
   const box = document.getElementById("toolsBox");
   if (!box) return;
   if (!d || !d.recent || !d.recent.length) {
+    _toolsScroll = null;
+    _toolsSummary = null;
+    _toolRows.length = 0;
     box.innerHTML = '<div class="empty">还没有工具调用。</div>';
     return;
+  }
+  if (!_toolsScroll || !_toolsSummary || !box.contains(_toolsScroll)) {
+    box.replaceChildren();
+    box.appendChild(_toolsSummaryAt().el);
+    _toolsScroll = document.createElement("div");
+    _toolsScroll.style.cssText = "max-height:260px;overflow-y:auto;padding-right:4px";
+    box.appendChild(_toolsScroll);
   }
   const stats = d.stats || {};
   const names = Object.keys(stats).sort(function (a, b) {
     return (stats[b].calls || 0) - (stats[a].calls || 0);
   }).slice(0, 8);
-  let html = '<div class="kv"><span class="k">按工具</span><span class="v">' +
-    names.map(function (n) {
-      return esc(n) + '×' + (stats[n].calls || 0) +
-        (stats[n].errors ? '(' + stats[n].errors + '错)' : '');
-    }).join(' · ') + '</span></div>';
-  html += '<div style="max-height:260px;overflow-y:auto;padding-right:4px">';
-  const rows = d.recent.slice().reverse();
-  rows.forEach(function (r) {
-    const ms = r.dur_ms != null ? r.dur_ms + 'ms' : '—';
-    const flag = (r.error ? ' <span style="color:var(--bad)">错误</span>' : '') +
-      ' · ' + fmtNum(r.result_len) + 'B';
-    html += '<div class="kv" title="' + esc(r.result_head || '') + '">' +
-      '<span class="k">' + esc(r.tool) + ' <span class="h2sub">' + ms + '</span></span>' +
-      '<span class="v">' + esc(String(r.args || '').slice(0, 80)) + flag + '</span></div>';
-  });
-  box.innerHTML = html + "</div>";
+  _toolsSummary.v.textContent = names.map(function (n) {
+    return n + "×" + (stats[n].calls || 0) +
+      (stats[n].errors ? "(" + stats[n].errors + "错)" : "");
+  }).join(" · ") || "—";
+  const rows = d.recent.slice(-TOOLS_ROWS_MAX).reverse();
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const row = _toolRowAt(i);
+    row.name.nodeValue = r.tool || "";
+    row.sub.textContent = r.dur_ms != null ? r.dur_ms + "ms" : "—";
+    row.args.nodeValue = String(r.args || "").slice(0, 80);
+    row.err.hidden = !r.error;
+    row.tail.nodeValue = " · " + fmtNum(r.result_len) + "B";
+    row.el.title = r.result_head || "";
+    frag.appendChild(row.el);
+  }
+  _toolsScroll.replaceChildren(frag);
 }
 
 async function refreshTools() {
-  try { renderTools(await P.apiGet("/ncd-monitor/tools")); }
-  catch (e) { /* 单卡失败不影响其它卡 */ }
+  try {
+    const d = await P.apiGet("/ncd-monitor/tools");
+    renderIfChanged("tools", sigOf(d), function () { renderTools(d); });
+  } catch (e) { /* 单卡失败不影响其它卡 */ }
 }
 
 /* ---------- 思考内容（仅后台） ---------- */
@@ -3783,32 +4612,98 @@ function renderThinking(d) {
 }
 
 async function refreshThinking() {
-  try { renderThinking(await P.apiGet("/ncd-monitor/thinking")); }
-  catch (e) { /* 单卡失败不影响其它卡 */ }
+  try {
+    const d = await P.apiGet("/ncd-monitor/thinking");
+    const items = (d && d.items) || [];
+    const last = items.length ? items[items.length - 1] : null;
+    // 思考内容可能几十 KB，签名只看条数/尾条即可（后端只 append 不修改）
+    const sig = items.length + "|" + ((last && last.ts) || 0) + "|" + ((last && last.chars) || 0);
+    renderIfChanged("thinking", sig, function () { renderThinking(d); });
+  } catch (e) { /* 单卡失败不影响其它卡 */ }
 }
 
-/* ---------- 事件流 ---------- */
+/* ---------- 事件流 ----------
+   ★ 最多画最近 50 条（后端给 120 条），行节点复用；
+     滚动容器只建一次，不随数据替换。
+     原来每拍整段 innerHTML 重建，既分配一堆节点，又把 300px 高的滚动区
+     整体 relayout —— 这也是 10 秒顿挫的一部分。 */
+const TIMELINE_ROWS_MAX = 50;
+const _timelineRows = [];
+let _timelineScroll = null;
+function _timelineRowAt(i) {
+  if (_timelineRows[i]) return _timelineRows[i];
+  const el = document.createElement("div");
+  el.className = "kv";
+  const k = document.createElement("span");
+  k.className = "k";
+  k.style.whiteSpace = "nowrap";
+  const v = document.createElement("span");
+  v.className = "v";
+  const kind = document.createElement("span");
+  const text = document.createTextNode("");
+  v.appendChild(kind);
+  v.appendChild(document.createTextNode(" · "));
+  v.appendChild(text);
+  el.appendChild(k);
+  el.appendChild(v);
+  const row = { el: el, k: k, kind: kind, text: text };
+  _timelineRows[i] = row;
+  return row;
+}
 function renderTimeline(d) {
   const box = document.getElementById("timelineBox");
   if (!box) return;
   const items = (d && d.items) || [];
-  if (!items.length) { box.innerHTML = '<div class="empty">还没有事件。</div>'; return; }
+  if (!items.length) {
+    _timelineScroll = null;
+    _timelineRows.length = 0;
+    box.innerHTML = '<div class="empty">还没有事件。</div>';
+    return;
+  }
+  if (!_timelineScroll || !box.contains(_timelineScroll)) {
+    box.replaceChildren();
+    _timelineScroll = document.createElement("div");
+    _timelineScroll.style.cssText = "max-height:300px;overflow-y:auto;padding-right:4px";
+    box.appendChild(_timelineScroll);
+    _timelineRows.length = 0;
+  }
   const color = { "llm.request": "var(--accent)", "llm.response": "var(--ok)", "tool": "var(--warn)" };
-  const rows = items.slice().reverse();
-  let html = '<div style="max-height:300px;overflow-y:auto;padding-right:4px">';
-  rows.forEach(function (it) {
-    const when = new Date((it.ts || 0) * 1000).toLocaleTimeString();
-    const c = color[it.kind] || "var(--muted)";
-    html += '<div class="kv"><span class="k" style="white-space:nowrap">' + when + '</span>' +
-      '<span class="v"><span style="color:' + c + '">' + esc(it.kind) + '</span> · ' +
-      esc(it.text || "") + '</span></div>';
-  });
-  box.innerHTML = html + "</div>";
+  const rows = items.slice(-TIMELINE_ROWS_MAX).reverse();
+  const frag = document.createDocumentFragment();
+  for (let i = 0; i < rows.length; i++) {
+    const it = rows[i];
+    const row = _timelineRowAt(i);
+    row.k.textContent = new Date((it.ts || 0) * 1000).toLocaleTimeString();
+    row.kind.textContent = it.kind || "";
+    row.kind.style.color = color[it.kind] || "var(--muted)";
+    row.text.nodeValue = it.text || "";
+    frag.appendChild(row.el);
+  }
+  _timelineScroll.replaceChildren(frag);
 }
 
 async function refreshTimeline() {
-  try { renderTimeline(await P.apiGet("/ncd-monitor/timeline")); }
-  catch (e) { /* 单卡失败不影响其它卡 */ }
+  try {
+    const d = await P.apiGet("/ncd-monitor/timeline");
+    const items = (d && d.items) || [];
+    const last = items.length ? items[items.length - 1] : null;
+    // 后端只 append（deque 满 120 后滚动），条数固定时看尾条时间戳即可
+    const sig = items.length + "|" + ((last && last.ts) || 0) + "|" +
+      ((last && last.kind) || "") + "|" + String((last && last.text) || "").length;
+    renderIfChanged("timeline", sig, function () { renderTimeline(d); });
+  } catch (e) { /* 单卡失败不影响其它卡 */ }
+}
+
+/* ---------- 非关键卡片的低频刷新 ----------
+   ★ 事件流 / 思考 / 工具 / 搜索统计只在有人用机器人时才有变化，
+     10 秒一次纯属浪费；30 秒一次 + 数据签名（没变就一个节点都不碰）足够。
+     这一组【不进 tick】，tick 那一轮因此少了 4 个接口往返和 4 块 DOM 重建。 */
+function refreshSecondary() {
+  if (document.hidden) return;
+  safe("tools", refreshTools);
+  safe("thinking", refreshThinking);
+  safe("timeline", refreshTimeline);
+  safe("search", refreshSearchBox);
 }
 
 /* ---------- 审核明细 + 点开大图 ---------- */
@@ -3931,47 +4826,138 @@ function safe(name, fn) {
   }
 }
 
+/* 一轮 tick 拆成 3 批，中间用 nextTask() 让出帧：
+     批 1  小卡片（上下文条 / 用量 / 模型 / 链路 / 统计）+ 顶部状态
+     批 2  图表 + 会话 / 压缩摘要 / 请求表 / 缓存诊断
+     批 3  最重的上下文快照（HTTP 返回后单独计时）
+   ★ 拆批的意义：就算 2~3 张卡同时有变化，也落在不同帧里，不会叠成一次
+     长任务把主线程占住 —— 手机 WebView 上单帧超过 ~50ms 就会明显顿。
+   ★ 正常情况下（没有新请求）所有卡签名都没变，三批全是空转：DOM 零改动。 */
+let _tickBusy = false;
+let _tickAgain = false;
+let _tickStartedAt = 0;
+let _tickGen = 0;
+
+function logTickPerf(seg) {
+  let total = 0;
+  let slowest = null;
+  const detail = {};
+  for (let i = 0; i < seg.length; i++) {
+    const name = seg[i][0];
+    const ms = seg[i][1];
+    total += ms;
+    detail[name] = Math.round(ms * 10) / 10;
+    if (!slowest || ms > slowest[1]) slowest = seg[i];
+  }
+  /* 只在真有慢轮时打一行，不常驻刷屏 */
+  if (!slowest || total <= PERF_LOG_MS) return;
+  console.log("[perf] tick 共 " + (Math.round(total * 10) / 10) + " ms, 最慢: " +
+    slowest[0] + " " + (Math.round(slowest[1] * 10) / 10) + " ms", detail);
+}
+
 async function tick() {
+  if (document.hidden) return;  /* 标签页不可见时不轮询，省电省 CPU */
+  /* 防重入：interval / visibilitychange / ready() 可能撞在一起，重入只会重复请求。
+     ★ 上一轮若卡超过 8 秒（桥没回包之类）就放弃它重新拉起，避免永久冻结。 */
+  if (_tickBusy && nowMs() - _tickStartedAt < 8000) { _tickAgain = true; return; }
+  _tickBusy = true;
+  _tickStartedAt = nowMs();
+  const gen = ++_tickGen;
+  const seg = [];
+  const run = function (name, fn) {
+    const t = nowMs();
+    safe(name, fn);
+    seg.push([name, nowMs() - t]);
+  };
+  const runIf = function (name, sig, fn) {
+    const ms = renderIfChanged(name, sig, fn);
+    if (ms >= 0) seg.push([name, ms]);
+  };
   try {
     const get = (path) => P.apiGet(path).catch((e) => {
       console.error("[monitor] api", path, e);
       return {};
     });
-    const [ov, hi, sm] = await Promise.all([
+    const [ovRaw, hiRaw, smRaw] = await Promise.all([
       get("/ncd-monitor/overview"),
       get("/ncd-monitor/history"),
       get("/ncd-monitor/summaries"),
     ]);
-    safe("links", () => renderLinks(ov));
-    safe("context", () => renderContext(ov));
-    safe("usage", () => renderUsage(ov));
-    safe("usageDaily", () => renderUsageDaily(ov.usage_daily));
-    safe("model", () => renderModel(ov));
+    // 桥在异常/空响应时可能给 null/undefined，统一兜底成对象，后面的签名不会炸
+    const ov = ovRaw || {};
+    const hi = hiRaw || {};
+    const sm = smRaw || {};
+    const astr = (ov && ov.astrbot) || {};
+    const ctx = (ov && ov.context) || {};
+    const calls = (hi && Array.isArray(hi.llm_calls)) ? hi.llm_calls : [];
+    const series = (hi && Array.isArray(hi.context_series)) ? hi.context_series : [];
+    const sumItems = (sm && Array.isArray(sm.items)) ? sm.items : [];
+    const lastSeries = series.length ? series[series.length - 1] : null;
+
+    /* 每轮只算一次签名；都是小对象，绝不 stringify 整个 ov
+       （server_time / uptime_sec 每拍都变，会把所有卡误判成"变了"） */
+    const sigLinks = sigOf({
+      s: ov.snowluma, l: ov.lm_studio, g: (ov.system || {}).gpus,
+      // 卡片 <1 小时时显示到"秒"、之后只显示到"分"：按对应的粒度比签名，
+      // 既不漏显示变化，也不至于每拍都因为 uptime 变化而重画整张卡
+      u: (astr.uptime_sec || 0) < 3600
+        ? (astr.uptime_sec || 0)
+        : Math.floor((astr.uptime_sec || 0) / 60),
+    });
+    const sigContext = sigOf({
+      c: ctx, lc: ov.live_context, bd: ov.context_breakdown,
+      n: astr.compression_count, kr: astr.keep_reasoning_in_context,
+      rs: astr.reasoning_stripped_segments, rc: astr.reasoning_stripped_chars,
+    });
+    const sigUsage = sigOf(ov.usage);
+    const sigUsageDaily = sigOf(ov.usage_daily);
+    const sigModel = sigOf({
+      m: astr.model, mo: astr.modalities, mx: astr.max_context_tokens,
+      ceb: astr.custom_extra_body, cc: astr.compression_config,
+      gm: astr.group_message_max_cnt, rt: ov.llm_runtime,
+    });
+    const sigSL = sigOf(ov.snowluma);
+    const sigSessions = sigOf({ s: ov.sessions, m: ctx.max, t: ctx.threshold_tokens });
+    const sigSummaries = sumItems.length
+      ? sigOf(sumItems)
+      : sigOf({ lc: ov.live_context, c: ov.context });  // 空态提示也依赖上下文数字
+    const sigCalls = sigOf(calls);
+    const sigStats = sigOf(ov.stats);
+    const sigChart = series.length + "|" +
+      ((lastSeries && lastSeries.time) || 0) + "|" +
+      ((lastSeries && lastSeries.tokens) || 0) + "|" + (ctx.max || 0);
+
+    /* —— 第 1 批：轻量/关键的小卡片（同一帧；steady state 下基本全跳过）—— */
+    runIf("links", sigLinks, function () { renderLinks(ov); });
+    runIf("context", sigContext, function () { renderContext(ov); });
+    runIf("usage", sigUsage, function () { renderUsage(ov); });
+    runIf("usageDaily", sigUsageDaily, function () { renderUsageDaily(ov.usage_daily); });
+    runIf("model", sigModel, function () { renderModel(ov); });
     // 资源卡不在这里渲染 —— 它走 1 秒的 refreshSys()，
     // 这里再写一次 #resBox 会把它的趋势图和数据一起冲掉
-    safe("sl", () => renderSL(ov));
-    safe("sessions", () => renderSessions(ov));
-    safe("summaries", () => renderSummaries(sm.items, ov));
-    safe("calls", () => renderCalls(hi.llm_calls));
-    safe("cacheDiag", () => renderCacheDiag(hi.llm_calls));
-    safe("stats", () => renderStats(ov));
-    safe("tools", refreshTools);
-    safe("thinking", refreshThinking);
-    safe("timeline", refreshTimeline);
-    safe("search", refreshSearchBox);
-    window.__maxCtx = (ov.context || {}).max || 32768;
-    _ctxSeries = hi.context_series || [];
-    safe("chart", drawChart);
-
-    // 上下文快照单独拉（数据大）
-    await refreshContexts().catch((e) => console.error("[monitor] contexts", e));
-
-    safe("meta", () => {
+    runIf("sl", sigSL, function () { renderSL(ov); });
+    runIf("stats", sigStats, function () { renderStats(ov); });
+    window.__maxCtx = ctx.max || 32768;
+    _ctxSeries = series;
+    run("meta", function () {
       document.getElementById("meta").textContent =
-        `更新于 ${fmtTime(ov.server_time)} · 每 5 秒自动刷新`;
+        `更新于 ${fmtTime(ov.server_time)} · 每 10 秒自动刷新`;
       document.getElementById("liveDot").style.background = "var(--ok)";
     });
     first = false;
+
+    /* —— 第 2 批：图表 + 中等列表（下一帧，避免和批 1 挤同一帧）—— */
+    await nextTask();
+    runIf("sessions", sigSessions, function () { renderSessions(ov); });
+    runIf("summaries", sigSummaries, function () { renderSummaries(sumItems, ov); });
+    runIf("calls", sigCalls, function () { renderCalls(calls); });
+    runIf("cacheDiag", sigCalls, function () { renderCacheDiag(calls); });
+    runIf("chart", sigChart, drawChart);
+
+    /* —— 第 3 批：最重的上下文快照（再让一帧；只计同步渲染，不含 HTTP 等待）—— */
+    await nextTask();
+    const ctxMs = await refreshContexts();
+    if (ctxMs >= 0) seg.push(["contexts", ctxMs]);
   } catch (e) {
     console.error(e);
     try {
@@ -3979,6 +4965,14 @@ async function tick() {
         "拉取失败：" + (e && e.message ? e.message : e);
       document.getElementById("liveDot").style.background = "var(--bad)";
     } catch (_) { /* 页面被旧缓存弄坏时也不要再抛 */ }
+  } finally {
+    /* 只有"当前这一代"才允许清掉忙标记：被 8 秒 stale 逃逸顶替的旧轮不清 */
+    if (gen === _tickGen) _tickBusy = false;
+  }
+  logTickPerf(seg);
+  if (_tickAgain) {
+    _tickAgain = false;
+    tick();
   }
 }
 
@@ -3987,12 +4981,29 @@ async function tick() {
    ready() 到达后再补一次（拿主题/语言）。 */
 if (window.AstrBotPluginPage) {
   tick();
-  setInterval(tick, 5000);
+  // ★ tick 已拆成 3 批 + 每卡数据签名：10 秒一轮，没有新数据时几乎零 DOM 改动
+  setInterval(tick, 10000);
   // 资源卡单独 1 秒一次（只读后端内存，很便宜）
   refreshSys();
   setInterval(refreshSys, 1000);
+  // 7 天统计：落盘粒度 10 秒，前端 60 秒拉一次就够
+  refreshHostStats();
+  setInterval(refreshHostStats, 60000);
   refreshComfy();
-  setInterval(refreshComfy, 1000);
+  // ★ 降频：ComfyUI 状态 2 秒一次足够，1 秒会让 iframe 每秒多一次跨窗口往返
+  setInterval(refreshComfy, 2000);
+  // 非关键卡（事件流 / 思考 / 工具 / 搜索）：30 秒一拍，且数据没变不重绘
+  refreshSecondary();
+  setInterval(refreshSecondary, 30000);
+  // 页面重新可见时立刻补一轮，避免回来看到的是旧数据
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) {
+      refreshSys();
+      refreshComfy();
+      refreshSecondary();
+      tick();
+    }
+  });
   P.ready()
     .then(() => tick())
     .catch((e) => console.warn("bridge ready 失败:", e));

@@ -641,6 +641,18 @@ class Main(star.Star):
         self._sys_task: Any = None      # asyncio.Task，惰性启动
         self._gpu_proc: Any = None      # 常驻 nvidia-smi 进程
         self._gpu_latest: dict[str, Any] | None = None
+        # ---- 宿主机统计（手机 + 笔记本，10 秒一行，7 天滚动）----
+        self._host_recent: deque[dict[str, Any]] = deque(
+            maxlen=self.HOST_STATS_RECENT
+        )
+        self._host_stats_task: Any = None
+        self._host_stats_cache: tuple[float, dict[str, Any]] | None = None
+        self._pc_sysinfo: dict[str, Any] | None = None
+        self._pc_sysinfo_at = 0.0
+        self._host_prune_at = 0.0
+        self._temp_tick = 0
+        self._phone_temp: float | None = None
+        self._phone_thermal: dict[str, Any] = {}
 
         # ---- 注册 Web API（前端用 AstrBotPluginPage.apiGet 调用）----
         # 注意路由格式：/<插件目录名>/<自定义路径>
@@ -686,6 +698,18 @@ class Main(star.Star):
                 self.api_sysinfo,
                 ["GET"],
                 "宿主机资源（CPU/GPU/显存/内存）1 秒采样 + 趋势",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/temp-probe",
+                self.api_temp_probe,
+                ["GET"],
+                "温度探针：手机 sysfs 传感器清单 + 笔记本温度来源",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/host-stats",
+                self.api_host_stats,
+                ["GET"],
+                "宿主机资源历史（手机 + 笔记本，10 秒聚合，滚动 7 天）",
             )
             self.context.register_web_api(
                 f"/{PLUGIN_DIR_NAME}/ncd-monitor/search-stats",
@@ -829,6 +853,7 @@ class Main(star.Star):
         而 /sysinfo 一定会被前端调到 —— 两条路都走这个函数，跑起来就不会重复起。
         """
         if self._sys_task is not None and not self._sys_task.done():
+            self._ensure_host_stats()
             return
         try:
             self._sys_task = asyncio.create_task(self._sample_system_loop())
@@ -839,6 +864,21 @@ class Main(star.Star):
         except RuntimeError as exc:
             # 没有运行中的事件循环（比如在同步上下文里被调到）
             logger.warning(f"[ncd-monitor] 启动采样任务失败: {exc}")
+            return
+        self._ensure_host_stats()
+
+    def _ensure_host_stats(self) -> None:
+        """惰性启动「10 秒聚合 + 7 天落盘」任务（幂等）。"""
+        if self._host_stats_task is not None and not self._host_stats_task.done():
+            return
+        try:
+            self._host_stats_task = asyncio.create_task(self._host_stats_loop())
+            logger.info(
+                f"[ncd-monitor] 宿主机统计已启动（{self.HOST_STATS_INTERVAL:.0f}s 一行，"
+                f"滚动保留 {self._host_stats_days()} 天）"
+            )
+        except RuntimeError as exc:
+            logger.warning(f"[ncd-monitor] 启动宿主机统计失败: {exc}")
 
     async def _gpu_stream_loop(self) -> None:
         """常驻一个 `nvidia-smi -lms 1000`，每秒读一行。
@@ -937,6 +977,19 @@ class Main(star.Star):
                         sample["mem"] = vm.percent
                         sample["mem_used_gb"] = round(vm.used / 1024**3, 1)
                         sample["mem_total_gb"] = round(vm.total / 1024**3, 1)
+                    # 手机（Linux sysfs）温度：10 秒读一次就够，别每秒读文件
+                    self._temp_tick += 1
+                    if self._temp_tick % 10 == 1:
+                        self._phone_thermal = _thermal_snapshot()
+                    _th = getattr(self, "_phone_thermal", None) or {}
+                    if _th.get("cpu") is not None:
+                        sample["temp"] = _th["cpu"]
+                    if _th.get("gpu") is not None:
+                        sample["temp_ph_gpu"] = _th["gpu"]
+                    if _th.get("battery") is not None:
+                        sample["temp_ph_batt"] = _th["battery"]
+                    if _th.get("shell") is not None:
+                        sample["temp_ph_shell"] = _th["shell"]
                     g = self._gpu_latest
                     if g:
                         sample["gpu"] = g["util"]
@@ -958,6 +1011,347 @@ class Main(star.Star):
                 await asyncio.sleep(self.SYS_SAMPLE_INTERVAL)
         finally:
             gpu_task.cancel()
+
+    # =================================================================
+    #  一之四、宿主机统计：10 秒聚合 + 滚动 7 天（手机 + 笔记本）
+    # =================================================================
+
+    def _conf_int(self, key: str, default: int = 0) -> int:
+        """取一个整数配置项（手改过 JSON 可能是字符串，认不出来退回 default）。"""
+        try:
+            raw = self._conf.get(key)
+        except Exception:  # noqa: BLE001
+            return default
+        if raw is None:
+            return default
+        try:
+            return int(float(str(raw).strip()))
+        except (TypeError, ValueError):
+            return default
+
+    def _host_stats_days(self) -> int:
+        return max(1, min(self._conf_int("host_stats_days", self.HOST_STATS_DEFAULT_DAYS), 30))
+
+    def _host_stats_dir(self) -> Path:
+        # ★ ASTRBOT_ROOT 是 str：必须显式转 Path，否则 / 运算直接 TypeError
+        return Path(ASTRBOT_ROOT) / "data" / "plugin_data" / "ncd_monitor" / "host_stats"
+
+    def _pc_linkd_url(self) -> str:
+        return self._conf_str("monitor_pc_linkd", "http://192.168.137.1:8201").strip().rstrip("/")
+
+    def _fetch_pc_sysinfo(self) -> dict[str, Any] | None:
+        """同步拉笔记本的 /sysinfo（在 to_thread 里跑，超时 3 秒）。"""
+        base = self._pc_linkd_url()
+        if not base:
+            return None
+        try:
+            req = urllib.request.Request(
+                base + "/sysinfo", headers={"User-Agent": "ncd-monitor"}
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+            if not isinstance(data, dict):
+                return None
+            self._pc_sysinfo = data
+            self._pc_sysinfo_at = time.time()
+            return data
+        except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _agg(vals: list[float]) -> tuple[float | None, float | None]:
+        if not vals:
+            return None, None
+        return round(sum(vals) / len(vals), 1), round(max(vals), 1)
+
+    async def _host_stats_tick(self) -> None:
+        now = time.time()
+        since = now - self.HOST_STATS_INTERVAL - 1.0
+        window = [s for s in self.sys_samples if float(s.get("t") or 0) >= since]
+        if not window:
+            return
+
+        def nums(key: str) -> list[float]:
+            out: list[float] = []
+            for s in window:
+                v = s.get(key)
+                if isinstance(v, (int, float)):
+                    out.append(float(v))
+            return out
+
+        ph_cpu, ph_cpu_max = self._agg(nums("cpu"))
+        ph_mem, ph_mem_max = self._agg(nums("mem"))
+        ph_temp, ph_temp_max = self._agg(nums("temp"))
+        ph_gpu_temp, ph_gpu_temp_max = self._agg(nums("temp_ph_gpu"))
+        ph_batt, ph_batt_max = self._agg(nums("temp_ph_batt"))
+        ph_shell, ph_shell_max = self._agg(nums("temp_ph_shell"))
+        gpu, gpu_max = self._agg(nums("gpu"))
+        vram, vram_max = self._agg(nums("vram"))
+        gpu_temp, gpu_temp_max = self._agg(nums("gpu_temp"))
+
+        pc = await asyncio.to_thread(self._fetch_pc_sysinfo)
+        rec: dict[str, Any] = {
+            "t": round(now),
+            "ph": {
+                "cpu": ph_cpu,
+                "cpu_max": ph_cpu_max,
+                "mem": ph_mem,
+                "mem_max": ph_mem_max,
+                "temp": ph_temp,
+                "temp_max": ph_temp_max,
+                "gpu_temp": ph_gpu_temp,
+                "gpu_temp_max": ph_gpu_temp_max,
+                "batt": ph_batt,
+                "shell": ph_shell,
+            },
+        }
+        if pc:
+            pg = pc.get("gpu") or {}
+            rec["pc"] = {
+                "cpu": (round(float(pc.get("cpu")), 1) if isinstance(pc.get("cpu"), (int, float)) else None),
+                "mem": (round(float(pc.get("ram_pct")), 1) if isinstance(pc.get("ram_pct"), (int, float)) else None),
+                "gpu": (round(float(pg.get("util")), 1) if isinstance(pg.get("util"), (int, float)) else None),
+                "vram": (
+                    round(float(pg["mem_used_mb"]) / float(pg["mem_total_mb"]) * 100, 1)
+                    if pg.get("mem_total_mb")
+                    else None
+                ),
+                "temp": (round(float(pg["temp"]), 1) if isinstance(pg.get("temp"), (int, float)) else None),
+                # ★ 别名：前端按 gpu_temp 取 GPU 温度（temp 保留给旧逻辑）
+                "gpu_temp": (round(float(pg["temp"]), 1) if isinstance(pg.get("temp"), (int, float)) else None),
+                "cpu_temp": (round(float(pc["cpu_temp"]), 1) if isinstance(pc.get("cpu_temp"), (int, float)) else None),
+                "cpu_temp_src": str(pc.get("cpu_temp_src") or ""),
+                "power": pg.get("power"),
+            }
+        # 内存最近 30 分钟（供 /sysinfo 画 10 秒粒度曲线）
+        self._host_recent.append(rec)
+        self._host_stats_cache = None  # 有新点，历史缓存作废
+        self._append_host_stats(rec)
+
+    def _append_host_stats(self, rec: dict[str, Any]) -> None:
+        try:
+            d = self._host_stats_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            day = time.strftime("%Y-%m-%d", time.localtime(float(rec["t"])))
+            path = d / f"{day}.jsonl"
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[ncd-monitor] 宿主机统计落盘失败（忽略）: {exc}")
+        # 每小时清一次过期文件
+        if time.time() - self._host_prune_at > 3600:
+            self._host_prune_at = time.time()
+            self._prune_host_stats()
+
+    def _prune_host_stats(self) -> None:
+        """删掉超出保留天数的日文件（按文件名里的日期判断，比 mtime 准）。"""
+        try:
+            d = self._host_stats_dir()
+            if not d.is_dir():
+                return
+            keep_days = self._host_stats_days()
+            # 文件名是 YYYY-MM-DD.jsonl（ISO 字符串可直接比大小）
+            cutoff = time.strftime(
+                "%Y-%m-%d", time.localtime(time.time() - (keep_days - 1) * 86400)
+            )
+            for p in d.glob("*.jsonl"):
+                stem = p.stem
+                if len(stem) == 10 and stem < cutoff:
+                    try:
+                        p.unlink()
+                    except OSError:
+                        continue
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _host_stats_loop(self) -> None:
+        await asyncio.sleep(3)  # 等 sys_samples 攒出第一窗口
+        self._prune_host_stats()
+        while True:
+            try:
+                await self._host_stats_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[ncd-monitor] 宿主机统计失败（忽略）: {exc}")
+            await asyncio.sleep(self.HOST_STATS_INTERVAL)
+
+    def _aggregate_host_stats(self, days: int) -> dict[str, Any]:
+        """读近 N 天的 JSONL → 按小时聚合 + 峰值 + 每日概览（60 秒缓存）。"""
+        now = time.time()
+        cache = self._host_stats_cache
+        if cache and now - cache[0] < 60:
+            return cache[1]
+        days = max(1, min(int(days or self._host_stats_days()), 30))
+        cutoff = now - days * 86400
+        buckets: dict[int, dict[str, Any]] = {}
+        day_rows: dict[str, dict[str, Any]] = {}
+        peaks: dict[str, dict[str, Any]] = {}
+        total = 0
+
+        def bump_peak(key: str, val: Any, ts: float) -> None:
+            if not isinstance(val, (int, float)):
+                return
+            # ★ 温度只认 5~110°C：早期版本把内核占位值 0.04°C 也写了进去，
+            #   这里兜底过滤，避免「手机GPU最高 0.0°C」这种脏峰值。
+            if "temp" in key and not (5.0 <= float(val) <= 110.0):
+                return
+            cur = peaks.get(key)
+            if cur is None or float(val) > float(cur["v"]):
+                peaks[key] = {"v": float(val), "t": ts}
+
+        def acc(hour: int, name: str, val: Any, is_max: bool = False) -> None:
+            if not isinstance(val, (int, float)):
+                return
+            if "temp" in name and not (5.0 <= float(val) <= 110.0):
+                return
+            b = buckets.setdefault(hour, {})
+            s = b.setdefault(name, [0.0, 0]) if not is_max else None
+            if is_max:
+                b[name] = max(float(b.get(name, val)), float(val))
+            else:
+                b.setdefault(name, [0.0, 0])[0] += float(val)
+                b[name][1] += 1
+
+        paths = []
+        d = self._host_stats_dir()
+        if d.is_dir():
+            paths = sorted(d.glob("*.jsonl"))
+        for path in paths:
+            try:
+                fh = path.open("r", encoding="utf-8")
+            except OSError:
+                continue
+            with fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        ts = float(rec.get("t") or 0)
+                    except (ValueError, TypeError):
+                        continue
+                    if ts < cutoff:
+                        continue
+                    total += 1
+                    day = time.strftime("%Y-%m-%d", time.localtime(ts))
+                    day_row = day_rows.setdefault(day, {"day": day, "samples": 0})
+                    day_row["samples"] += 1
+                    hour = int(ts // 3600) * 3600
+                    ph = rec.get("ph") or {}
+                    pc = rec.get("pc") or {}
+                    acc(hour, "ph_cpu", ph.get("cpu"))
+                    acc(hour, "ph_mem", ph.get("mem"))
+                    acc(hour, "ph_temp_max", ph.get("temp"), is_max=True)
+                    acc(hour, "ph_temp", ph.get("temp"))
+                    acc(hour, "ph_gpu_temp", ph.get("gpu_temp"))
+                    acc(hour, "ph_gpu_temp_max", ph.get("gpu_temp"), is_max=True)
+                    acc(hour, "ph_batt", ph.get("batt"))
+                    acc(hour, "ph_shell", ph.get("shell"))
+                    acc(hour, "pc_cpu", pc.get("cpu"))
+                    acc(hour, "pc_mem", pc.get("mem"))
+                    acc(hour, "pc_gpu", pc.get("gpu"))
+                    acc(hour, "pc_vram", pc.get("vram"))
+                    acc(hour, "pc_temp", pc.get("temp"))
+                    acc(hour, "pc_temp_max", pc.get("temp"), is_max=True)
+                    acc(hour, "pc_cpu_temp", pc.get("cpu_temp"))
+                    acc(hour, "pc_cpu_temp_max", pc.get("cpu_temp"), is_max=True)
+                    # 每日峰值
+                    for k, v in (
+                        ("pc_temp_max", pc.get("temp")),
+                        ("pc_cpu_temp_max", pc.get("cpu_temp")),
+                        ("ph_temp_max", ph.get("temp")),
+                        ("ph_gpu_temp_max", ph.get("gpu_temp")),
+                        ("pc_gpu_max", pc.get("gpu")),
+                        ("pc_cpu_max", pc.get("cpu")),
+                        ("pc_vram_max", pc.get("vram")),
+                    ):
+                        if "_temp" in k and (
+                            not isinstance(v, (int, float))
+                            or not (5.0 <= float(v) <= 110.0)
+                        ):
+                            continue
+                        if isinstance(v, (int, float)) and float(v) > float(day_row.get(k) or -1):
+                            day_row[k] = float(v)
+                            if k == "pc_temp_max":
+                                day_row["pc_temp_max_at"] = ts
+                            if k == "ph_temp_max":
+                                day_row["ph_temp_max_at"] = ts
+                    # 全局峰值
+                    bump_peak("pc_temp", pc.get("temp"), ts)
+                    bump_peak("pc_cpu_temp", pc.get("cpu_temp"), ts)
+                    bump_peak("ph_temp", ph.get("temp"), ts)
+                    bump_peak("ph_gpu_temp", ph.get("gpu_temp"), ts)
+                    bump_peak("pc_gpu", pc.get("gpu"), ts)
+                    bump_peak("pc_cpu", pc.get("cpu"), ts)
+                    bump_peak("pc_vram", pc.get("vram"), ts)
+
+        out_buckets = []
+        for hour in sorted(buckets):
+            b = buckets[hour]
+            row: dict[str, Any] = {"t": hour}
+            for name, val in b.items():
+                if isinstance(val, list) and len(val) == 2 and val[1]:
+                    row[name] = round(val[0] / val[1], 1)
+                elif isinstance(val, (int, float)):
+                    row[name] = round(float(val), 1)
+            out_buckets.append(row)
+
+        day_list = sorted(day_rows.values(), key=lambda r: r["day"])
+        for row in day_list:
+            # 峰值配时间（列表里只留最近一条对应时间，够用）
+            for k in ("pc_temp_max", "pc_cpu_temp_max", "ph_temp_max", "ph_gpu_temp_max"):
+                at = row.get(f"{k}_at")
+                if isinstance(at, (int, float)):
+                    row[f"{k}_at_str"] = time.strftime("%m-%d %H:%M", time.localtime(at))
+        result = {
+            "days": days,
+            "samples": total,
+            "interval": self.HOST_STATS_INTERVAL,
+            "buckets": out_buckets,
+            "peaks": {
+                k: {
+                    "v": round(float(v["v"]), 1),
+                    "t": v["t"],
+                    "t_str": time.strftime("%m-%d %H:%M", time.localtime(v["t"])),
+                }
+                for k, v in peaks.items()
+            },
+            "daily": day_list,
+            "latest": self._host_recent[-1] if self._host_recent else None,
+            "pc_ok": bool(self._pc_sysinfo),
+            "pc_age": (round(time.time() - self._pc_sysinfo_at, 1) if self._pc_sysinfo_at else None),
+            "now": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self._host_stats_cache = (time.time(), result)
+        return result
+
+    async def api_temp_probe(self, **kwargs):
+        """温度探针：返回手机 sysfs 实际能读到的所有传感器 + 笔记本侧温度来源。"""
+        snap = _thermal_snapshot()
+        return json_response(
+            {
+                "platform": os.sys.platform,
+                "phone": snap,
+                "diag": _thermal_diagnose(),
+                "pc": {
+                    "cpu_temp": (self._pc_sysinfo or {}).get("cpu_temp"),
+                    "cpu_temp_src": (self._pc_sysinfo or {}).get("cpu_temp_src"),
+                    "gpu_temp": ((self._pc_sysinfo or {}).get("gpu") or {}).get("temp"),
+                    "age": (round(time.time() - self._pc_sysinfo_at, 1) if self._pc_sysinfo_at else None),
+                },
+                "now": time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+        )
+
+    async def api_host_stats(self, **kwargs):
+        """宿主机资源历史：按小时聚合的近 N 天序列 + 峰值 + 每日概览。"""
+        days = self._host_stats_days()
+        raw = str((kwargs or {}).get("days") or "").strip()
+        if raw.isdigit():
+            days = int(raw)
+        return json_response(await asyncio.to_thread(self._aggregate_host_stats, days))
 
 
     # =================================================================
@@ -1423,6 +1817,10 @@ class Main(star.Star):
     # 宿主机资源采样节奏：1 秒一次，保留 180 个 = 3 分钟趋势
     SYS_SAMPLE_INTERVAL = 1.0
     SYS_SAMPLE_KEEP = 180
+    # ---- 宿主机统计（手机 + 笔记本）----
+    HOST_STATS_INTERVAL = 10.0   # 落盘聚合粒度：10 秒一行
+    HOST_STATS_RECENT = 180      # 内存里保留 30 分钟（180 × 10s）
+    HOST_STATS_DEFAULT_DAYS = 7  # 滚动保留天数
 
     # AstrBot 往上下文里塞的图片占位文本，形如：
     #   [图片]
@@ -5048,6 +5446,16 @@ class Main(star.Star):
                 "keep": self.SYS_SAMPLE_KEEP,
                 "latest": self.sys_samples[-1] if self.sys_samples else None,
                 "series": list(self.sys_samples),
+                "pc": self._pc_sysinfo,
+                "pc_ok": bool(self._pc_sysinfo),
+                "pc_age": (round(time.time() - self._pc_sysinfo_at, 1) if self._pc_sysinfo_at else None),
+                # ★ 只回最近 120 个（20 分钟）就够画迷你曲线；这条路由 1 秒拉一次，
+                #   返回完整 180 条会让手机每秒多解析几十 KB。
+                "pc_series": [
+                    {"t": r.get("t"), **(r.get("pc") or {})}
+                    for r in list(self._host_recent)[-120:]
+                    if r.get("pc")
+                ],
                 "live": self._live_payload(),
                 # 多路实时输出（按会话分）：前端做「并发」切换用
                 "lives": self._lives_payload(),
@@ -5549,3 +5957,261 @@ class Main(star.Star):
             + f"{(uptime % 3600) // 60} 分"
         )
         yield event.plain_result("\n".join(lines))
+
+
+# ===========================================================================
+#  手机温度读取（模块级：供 1 秒采样循环调用，10 秒读一次即可）
+# ===========================================================================
+
+
+def _thermal_snapshot() -> dict[str, Any]:
+    """扫描手机/主机的温度传感器（不依赖 psutil）。
+
+    ★ 为什么不能只靠 psutil：Android proot 里 /sys/class/thermal 的 zone 类型
+      是厂商自定义的（cpu-thermal / soc-thermal / gpu-thermal / mtktscpu…），
+      psutil 某些版本读不到或直接返回空。所以这里直接读 sysfs，自己分类。
+
+    返回：
+      {"cpu": float|None, "gpu": float|None, "battery": float|None,
+       "zones": [{"zone","type","c"}...], "source": "sysfs"|"psutil"|""}
+    """
+    out: dict[str, Any] = {
+        "cpu": None, "gpu": None, "battery": None, "shell": None,
+        "zones": [], "source": "",
+    }
+
+    # 明确排除：射频功放(pa_*)、晶振(dcxo0 常报 120°C)、无线、充电口、
+    # modem、usb、supply、bat_raw —— 它们不是 CPU/GPU 温度，混进来会把峰值顶到 120。
+    _EXCLUDE = (
+        "pa_", "pa0", "pa1", "dcxo", "wireless", "wifi", "modem",
+        "charger", "usb", "supply", "bat_raw", "cam", "flash",
+        "pmic", "vbat", "sdr", "gps",
+    )
+
+    def _classify(ztype: str) -> str:
+        z = (ztype or "").strip().lower()
+        if not z:
+            return "other"
+        if any(k in z for k in _EXCLUDE):
+            return "excluded"
+        if any(k in z for k in ("batt", "battery")):
+            return "battery"
+        if any(k in z for k in ("shell", "skin", "frame", "back", "front", "surface")):
+            return "shell"
+        if any(k in z for k in ("gpu", "g3d", "mali", "kgsl", "adreno")):
+            return "gpu"
+        if any(
+            k in z
+            for k in (
+                "cpu", "soc", "tscpu", "cpuss", "cluster", "ap_", "ap-",
+                "big", "little", "silver", "gold", "prime", "core",
+            )
+        ):
+            return "cpu"
+        return "other"
+
+    # ① thermal_zone*：Android 上 /sys/class/thermal 常被 SELinux 拒绝，
+    #    但真实路径 /sys/devices/virtual/thermal 可读 —— 两条都试。
+    seen_zone: set[str] = set()
+    for base in ("/sys/class/thermal", "/sys/devices/virtual/thermal"):
+        try:
+            names = sorted(os.listdir(base))
+        except Exception:  # noqa: BLE001
+            continue
+        for name in names:
+            if not name.startswith("thermal_zone") or name in seen_zone:
+                continue
+            try:
+                raw = Path(base, name, "temp").read_text(
+                    encoding="ascii", errors="ignore"
+                ).strip()
+                c = float(raw) / 1000.0
+            except Exception:  # noqa: BLE001
+                continue
+            # ★ 0.04°C 这类是内核占位值：必须用 5~110 的有效区间，否则会混进榜里
+            if not (5.0 <= c <= 110.0):
+                continue
+            ztype = ""
+            try:
+                ztype = Path(base, name, "type").read_text(
+                    encoding="ascii", errors="ignore"
+                ).strip()
+            except Exception:  # noqa: BLE001
+                pass
+            seen_zone.add(name)
+            out["zones"].append({"zone": name, "type": ztype, "c": round(c, 1)})
+
+    # ② hwmon temp*_input（有些设备只在这里）
+    seen_hw: set[str] = set()
+    for base in ("/sys/class/hwmon", "/sys/devices/virtual/hwmon"):
+        try:
+            names = sorted(os.listdir(base))
+        except Exception:  # noqa: BLE001
+            continue
+        for hw in names:
+            if hw in seen_hw:
+                continue
+            hdir = Path(base, hw)
+            label = ""
+            try:
+                label = (hdir / "name").read_text(
+                    encoding="ascii", errors="ignore"
+                ).strip()
+            except Exception:  # noqa: BLE001
+                pass
+            for f in sorted(hdir.glob("temp*_input")):
+                try:
+                    c = float(
+                        f.read_text(encoding="ascii", errors="ignore").strip()
+                    ) / 1000.0
+                except Exception:  # noqa: BLE001
+                    continue
+                if not (5.0 <= c <= 110.0):
+                    continue
+                try:
+                    lbl = f.with_name(f.name.replace("_input", "_label")).read_text(
+                        encoding="ascii", errors="ignore"
+                    ).strip()
+                except Exception:  # noqa: BLE001
+                    lbl = ""
+                out["zones"].append(
+                    {"zone": hw + "/" + f.name, "type": (label + " " + lbl).strip(), "c": round(c, 1)}
+                )
+            seen_hw.add(hw)
+
+    # ②.5 power_supply 电池温度（Android 上 /sys/class/power_supply 也可能被拒）
+    seen_ps: set[str] = set()
+    for ps_base in ("/sys/class/power_supply", "/sys/devices/virtual/power_supply"):
+        try:
+            names = sorted(os.listdir(ps_base))
+        except Exception:  # noqa: BLE001
+            continue
+        for pname in names:
+            if pname in seen_ps:
+                continue
+            pdir = Path(ps_base, pname)
+            try:
+                raw = (pdir / "temp").read_text(
+                    encoding="ascii", errors="ignore"
+                ).strip()
+                rawf = float(raw)
+            except Exception:  # noqa: BLE001
+                continue
+            c = rawf / 10.0 if rawf < 1000 else rawf / 1000.0
+            if 0 < c < 100:
+                out["zones"].append(
+                    {"zone": "power_supply:" + pname, "type": "battery", "c": round(c, 1)}
+                )
+            seen_ps.add(pname)
+
+    # ③ 分类取最大值
+    buckets: dict[str, list[float]] = {
+        "cpu": [], "gpu": [], "battery": [], "shell": [], "other": [], "excluded": []
+    }
+    for z in out["zones"]:
+        bucket = _classify(str(z.get("type") or ""))
+        z["cat"] = bucket
+        buckets[bucket].append(float(z["c"]))
+    for key in ("cpu", "gpu", "battery", "shell"):
+        if buckets[key]:
+            out[key] = round(max(buckets[key]), 1)
+    # ④ 分类都没命中但有 other → 用 other 里最高的当 CPU 温度（总比没有好）
+    if out["cpu"] is None and buckets["other"]:
+        out["cpu"] = round(max(buckets["other"]), 1)
+    if out["zones"]:
+        out["source"] = "sysfs"
+        return out
+
+    # ⑤ 兜底：psutil
+    try:
+        import psutil
+
+        temps = psutil.sensors_temperatures() or {}
+        vals: list[float] = []
+        for entries in temps.values():
+            for e in entries:
+                try:
+                    cur = float(getattr(e, "current", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if 0 < cur < 150:
+                    vals.append(cur)
+        if vals:
+            out["cpu"] = round(max(vals), 1)
+            out["source"] = "psutil"
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _thermal_diagnose() -> dict[str, Any]:
+    """温度探针：逐条检查候选路径是否可访问，并给出真实错误（供排障用）。"""
+    diag: dict[str, Any] = {"paths": [], "tools": {}, "notes": []}
+
+    def check(path: str, kind: str = "dir") -> None:
+        entry = {"path": path, "kind": kind, "ok": False, "error": ""}
+        try:
+            if kind == "dir":
+                names = os.listdir(path)
+                entry["ok"] = True
+                entry["count"] = len(names)
+                entry["sample"] = names[:8]
+            else:
+                val = Path(path).read_text(encoding="ascii", errors="ignore").strip()
+                entry["ok"] = True
+                entry["value"] = val[:60]
+        except Exception as exc:  # noqa: BLE001
+            entry["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        diag["paths"].append(entry)
+
+    check("/sys/class/thermal")
+    check("/sys/class/thermal/thermal_zone0/temp", "file")
+    check("/sys/class/thermal/thermal_zone0/type", "file")
+    check("/sys/class/hwmon")
+    check("/sys/class/power_supply")
+    check("/sys/class/power_supply/battery/temp", "file")
+    check("/sys/class/power_supply/battery/capacity", "file")
+    check("/sys/devices/virtual/thermal")
+    check("/sys/devices/virtual/power_supply")
+    check("/sys/devices/virtual/hwmon")
+    check("/sys/kernel/debug")
+    for tool in ("termux-sensor", "termux-battery-status", "getprop", "dumpsys"):
+        import shutil as _sh
+
+        diag["tools"][tool] = _sh.which(tool) or ""
+    diag["notes"].append(
+        "Android 11+ 的 SELinux 默认禁止普通应用读 /sys/class/thermal，"
+        "AIDA64 能显示温度通常靠系统 API（电池温度）或已获得权限/root；"
+        "本插件的采集运行在用户态，能读到的才会显示。"
+    )
+    return diag
+
+
+def _read_thermal_temp() -> float | None:
+    """取 CPU 温度（保留旧接口，采样循环用）。"""
+    snap = _thermal_snapshot()
+    val = snap.get("cpu")
+    return round(float(val), 1) if isinstance(val, (int, float)) else None
+
+    try:
+        out = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "(Get-CimInstance -Namespace root/wmi -ClassName "
+                "MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | "
+                "Select-Object -First 1).CurrentTemperature",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout.strip()
+        if out.isdigit():
+            c = int(out) / 10.0 - 273.15
+            if 0 < c < 150:
+                return round(c, 1)
+    except Exception:  # noqa: BLE001
+        pass
+    return None

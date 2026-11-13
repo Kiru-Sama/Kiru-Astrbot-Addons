@@ -12,6 +12,7 @@
     --warn:#d97706; --track:#f1f3f6; --soft:#eef2f8;
   }
   * { box-sizing:border-box; }
+  html, body { height:auto; min-height:100%; overflow-y:auto; }
   body { margin:0; background:var(--bg); color:var(--text);
     font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif; padding:16px; }
   header { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
@@ -26,6 +27,12 @@
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   button.primary:hover { filter:brightness(1.05); }
   button.danger { color:var(--bad); border-color:#f3c3c3; }
+  /* 「请求重启 ComfyUI」的二次点击确认态：变红 + 红框，旁边出现「取消」 */
+  .restart-wrap { display:flex; gap:8px; align-items:stretch; min-width:0; }
+  .restart-wrap > #btnRestart { flex:1 1 auto; }
+  .restart-wrap > #btnRestartCancel { flex:0 0 auto; }
+  button.danger.armed { background:#fdecec; border-color:var(--bad); font-weight:600;
+    box-shadow:0 0 0 2px rgba(220,38,38,.14); }
   .statusbar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
   .pill { background:var(--card); border:1px solid var(--border); border-radius:999px;
     padding:5px 12px; font-size:12px; display:flex; gap:6px; align-items:center; }
@@ -176,6 +183,33 @@
   #quotaApp .ctrls { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
 
+/* ============ LoRA 画风模板（作用域：#loraStylesApp 内部） ============ */
+#loraStylesApp .ls-tip { color:var(--muted); font-size:12px; margin-bottom:10px; line-height:1.65; }
+#loraStylesApp .ls-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+#loraStylesApp .ls-status { color:var(--muted); font-size:12px; margin-left:auto; }
+#loraStylesApp .ls-status.ok { color:var(--ok); }
+#loraStylesApp .ls-status.err { color:var(--bad); }
+#loraStylesApp .ls-empty { color:var(--muted); text-align:center; padding:22px 8px; font-size:13px; }
+#loraStylesApp .ls-style { border:1px solid var(--border); border-radius:12px; padding:12px;
+  background:#fbfcfe; margin-bottom:10px; }
+#loraStylesApp .ls-head { display:grid; grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);
+  gap:10px; align-items:end; }
+#loraStylesApp .ls-field { margin-bottom:0; }
+#loraStylesApp .ls-rows { margin:10px 0 8px; display:flex; flex-direction:column; gap:8px; }
+#loraStylesApp .ls-rowhead { display:grid; grid-template-columns:minmax(0,1fr) 96px 72px;
+  gap:8px; color:var(--muted); font-size:11px; padding:0 2px; }
+#loraStylesApp .ls-row { display:grid; grid-template-columns:minmax(0,1fr) 96px 72px;
+  gap:8px; align-items:center; }
+#loraStylesApp .ls-row select, #loraStylesApp .ls-row input { width:100%; }
+#loraStylesApp .ls-weight { text-align:right; font-variant-numeric:tabular-nums; }
+#loraStylesApp .ls-foot { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+#loraStylesApp .ls-count { color:var(--muted); font-size:11px; margin-left:auto; }
+#loraStylesApp button.mini { font-size:12px; padding:4px 9px; }
+@media (max-width:640px) {
+  #loraStylesApp .ls-head { grid-template-columns:1fr; }
+  #loraStylesApp .ls-row, #loraStylesApp .ls-rowhead { grid-template-columns:minmax(0,1fr) 82px 64px; }
+}
+
 </style>
 </head>
 <body>
@@ -195,28 +229,22 @@
   <div id="presetBox" class="grid2"></div>
 </details>
 
-<details open>
-  <summary>LoRA 市场<span class="n">搜索 / 下载 / bot下载配额</span></summary>
-  <div class="grid2" style="margin-bottom:10px">
-    <div class="field"><label>搜索关键词</label><input id="loraQuery" placeholder="角色名 / 画风 / 作者" /></div>
-    <div class="field"><label>排序</label>
-      <select id="loraSort">
-        <option value="hot">下载量最高</option>
-        <option value="new">最新发布</option>
-        <option value="liked">点赞最多</option>
-      </select>
+<details id="detLoraStyles" data-card="lora-styles" data-title="LoRA 画风模板">
+  <summary>LoRA 画风模板<span class="n" id="loraStyleInfo">下拉选 LoRA · 权重 0~2 · 步进 0.05</span></summary>
+  <div id="loraStylesApp">
+    <div class="ls-tip">
+      把常用画风存成模板：一个模板 = 若干「LoRA 文件 + 权重」，bot 出图时按模板名套用。
+      下拉按 LoRA 文件名第一段目录（如 Moss / anima / sdxl）分组；保存的是完整文件名（含目录前缀）。
     </div>
-    <div class="field"><label>底模（可空）</label>
-      <input id="loraBase" placeholder="Anima / MOSS / Illustrious …" />
+    <div class="ls-toolbar">
+      <button id="loraRefresh" type="button">刷新</button>
+      <button id="loraNew" type="button">+ 新建模板</button>
+      <button id="loraSaveAll" class="primary" type="button">保存全部</button>
+      <span class="ls-status" id="loraStatus">展开时加载…</span>
     </div>
-    <div class="field" style="display:flex;align-items:flex-end">
-      <button class="primary" id="btnSearchLora" style="width:100%">搜索 LoRA</button>
-    </div>
+    <div class="ls-tip" id="loraCodex">法典状态：展开时读取…</div>
+    <div id="loraStylesList"></div>
   </div>
-  <div id="loraQuota" class="muted" style="margin-bottom:8px"></div>
-  <table id="loraTable"><thead><tr>
-    <th>名字</th><th>底模</th><th>大小</th><th>发布</th><th>下载量</th><th>操作</th>
-  </tr></thead><tbody></tbody></table>
 </details>
 
 <details>
@@ -332,7 +360,11 @@
   <summary>系统操作</summary>
   <div class="grid2">
     <button id="btnClean">清理模型/预设缓存</button>
-    <button id="btnRestart" class="danger">请求重启 ComfyUI</button>
+    <span class="restart-wrap">
+      <button id="btnRestart" class="danger">请求重启 ComfyUI</button>
+      <button id="btnRestartCancel" type="button" hidden>取消</button>
+    </span>
+    <button id="btnClearQueue" class="danger">清空 ComfyUI 排队</button>
   </div>
   <div class="muted" style="margin-top:8px" id="sysInfo"></div>
 </details>
@@ -405,32 +437,16 @@ function renderState() {
   bar.appendChild(pill("", "地址", (link.host || "?") + ":" + (link.port || "?")));
   const q = state.quota || {};
   bar.appendChild(pill(q.enforce ? "ok" : "warn", "额度", q.enforce ? "生效" : "关闭"));
-  const lb = state.lora_bot || {};
-  bar.appendChild(pill(lb.free_low ? "warn" : (lb.over_limit ? "bad" : "ok"),
-    "bot下载", (lb.used_text || "?") + " / " + (lb.limit_text || "8 GB")));
-  bar.appendChild(pill(lb.free_low ? "warn" : "ok", "磁盘", lb.free_text || "?"));
-  const g = state.gallery || {};
-  bar.appendChild(pill("", "图库", (g.sessions || 0) + " 会话 · " + (g.images || 0) + " 张"));
 
   const cards = $("cards");
+  if (!cards) return;
   cards.replaceChildren();
   const cur = (state.presets || []).find((p) => p.name === state.default_preset) || {};
   const card1 = el("div", "card kpi");
   card1.append(el("div", "num", cur.label || state.default_preset || "—"));
   card1.append(el("div", "label", "当前默认预设"));
-  card1.append(el("div", "hint", (cur.model || "模型未知")));
+  card1.append(el("div", "hint", cur.model || "模型未知"));
   cards.appendChild(card1);
-
-  const card2 = el("div", "card kpi");
-  card2.append(el("div", "num", (lb.count || 0) + " 个"));
-  card2.append(el("div", "label", "bot 下载 LoRA"));
-  const pct = lb.limit_bytes ? Math.min(1, (lb.used_bytes || 0) / lb.limit_bytes) : 0;
-  const b2 = el("div", "bar" + (pct > 0.9 ? " over" : pct > 0.7 ? " hot" : ""));
-  const i2 = el("i");
-  i2.style.width = (pct * 100).toFixed(1) + "%";
-  b2.appendChild(i2);
-  card2.appendChild(b2);
-  cards.appendChild(card2);
 
   const card3 = el("div", "card kpi");
   const topRow = (state.quota && state.quota.ranking && state.quota.ranking[0]) || null;
@@ -477,12 +493,6 @@ function renderState() {
   qbox.appendChild(tbl);
   $("quotaInfo").textContent = "前 10 名";
 
-  // bot下载配额
-  const lq = $("loraQuota");
-  lq.textContent = "bot下载：" + (lb.used_text || "?") + " / " + (lb.limit_text || "8 GB")
-    + " · 磁盘剩余 " + (lb.free_text || "?") + (lb.over_limit ? " · 已超上限，下载被禁用" : "");
-  if (lb.over_limit || lb.free_low) lq.className = "badge bad";
-  else lq.className = "muted";
 
   $("sysInfo").textContent = (state.link && state.link.remote ? "远程模式：" : "本地模式：")
     + (state.link && state.link.host ? state.link.host + ":" + state.link.port : "");
@@ -576,82 +586,6 @@ async function saveConfig() {
   }
 }
 
-async function searchLora() {
-  const q = $("loraQuery").value.trim();
-  if (!q) return toast("先填搜索词");
-  const tbl = $("loraTable").querySelector("tbody");
-  tbl.replaceChildren(el("tr", "", "搜索中…"));
-  try {
-    const raw = await P.apiPost("/ncd-comfy/console/action", {
-      action: "search_lora",
-      query: q,
-      sort: $("loraSort").value,
-      base_model: $("loraBase").value.trim(),
-      limit: 5,
-    });
-    const list = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
-    tbl.replaceChildren();
-    if (!Array.isArray(list) || !list.length) {
-      tbl.appendChild(el("tr", "", "没有结果"));
-      return;
-    }
-    list.forEach((d) => {
-      const tr = el("tr");
-      const tdName = el("td", "", d.name || "?");
-      if (d.sha256) {
-        const b = el("span", "badge", d.sha256.slice(0, 8));
-        tdName.appendChild(b);
-      }
-      tr.appendChild(tdName);
-      tr.appendChild(el("td", "", d.base_model || "?"));
-      tr.appendChild(el("td", "", d.size_text || "?"));
-      tr.appendChild(el("td", "", (d.published_text || "?") + "（" + fmtAge(d.age_days) + "）"));
-      tr.appendChild(el("td", "", String(d.download_count || 0)));
-      const tdOp = el("td");
-      if (d.sha256 && d.mirror) {
-        const b = el("button", "primary", "下载");
-        b.addEventListener("click", () => downloadLora(d, b));
-        tdOp.appendChild(b);
-      } else {
-        tdOp.appendChild(el("span", "muted", "无 HF 镜像"));
-      }
-      tr.appendChild(tdOp);
-      tbl.appendChild(tr);
-    });
-  } catch (e) {
-    tbl.replaceChildren(el("tr", "", "搜索失败：" + e.message));
-  }
-}
-
-async function downloadLora(d, btn) {
-  if (!confirm("确认下载这个 LoRA 到 bot下载 目录？\n\n" + (d.name || ""))) return;
-  btn.disabled = true;
-  btn.textContent = "下载中…";
-  try {
-    const raw = await P.apiPost("/ncd-comfy/console/action", {
-      action: "download_lora",
-      name: d.name,
-      base_model: d.base_model,
-      published_at: d.published_at,
-      download_count: d.download_count,
-      sha256: d.sha256,
-      size_bytes: d.size_bytes,
-      mirror: d.mirror,
-      filename: d.filename,
-      tags: d.tags || [],
-    });
-    const res = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
-    if (!res || res.ok === false) throw new Error((res && res.message) || "下载失败");
-    toast("下载完成：" + ((res && res.message) || ""), 4000);
-    loadState();
-  } catch (e) {
-    toast("下载失败：" + e.message, 4000);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "下载";
-  }
-}
-
 async function doAction(action) {
   try {
     const raw = await P.apiPost("/ncd-comfy/console/action", { action });
@@ -662,12 +596,112 @@ async function doAction(action) {
   }
 }
 
+/* ---------- 「请求重启 ComfyUI」：页面内二次点击确认 ----------
+   ★ 为什么不用浏览器原生弹窗：插件页 iframe 的 sandbox 只有 allow-scripts /
+     allow-forms / allow-downloads，没有 allow-modals。浏览器会静默忽略原生
+     确认弹窗并返回 false —— 旧实现等于点了永远不执行。
+   ★ 交互：第一次点进入确认态（文案变红、3 秒内有效、旁边出现「取消」）；
+     3 秒内再点一次才真正请求；超时 / 点页面别处 / 点「取消」都会复原。
+     全程不阻塞页面其它操作。 */
+const RESTART_LABEL = "请求重启 ComfyUI";
+const RESTART_ARMED_LABEL = "再点一次确认重启（3 秒内有效）";
+const RESTART_ARM_MS = 3000;
+let restartArmed = false;
+let restartTimer = null;
+
+function restartButton() { return $("btnRestart"); }
+function restartCancelButton() { return $("btnRestartCancel"); }
+
+function disarmRestart() {
+  restartArmed = false;
+  if (restartTimer) {
+    clearTimeout(restartTimer);
+    restartTimer = null;
+  }
+  const btn = restartButton();
+  if (btn) {
+    btn.textContent = RESTART_LABEL;
+    btn.classList.remove("armed");
+    btn.removeAttribute("aria-pressed");
+  }
+  const cancel = restartCancelButton();
+  if (cancel) cancel.hidden = true;
+}
+
+function armRestart() {
+  const btn = restartButton();
+  if (!btn) return;
+  restartArmed = true;
+  btn.textContent = RESTART_ARMED_LABEL;
+  btn.classList.add("armed");
+  btn.setAttribute("aria-pressed", "true");
+  const cancel = restartCancelButton();
+  if (cancel) cancel.hidden = false;
+  if (restartTimer) clearTimeout(restartTimer);
+  restartTimer = setTimeout(disarmRestart, RESTART_ARM_MS);
+}
+
+function onRestartClick(ev) {
+  /* 别让 document 上「点别处取消」的监听把这一次点击当成点别处 */
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  if (restartArmed) {
+    disarmRestart();
+    doAction("restart");
+    return;
+  }
+  armRestart();
+}
+
 $("btnRefresh").addEventListener("click", () => { loadState(); loadConfig(); });
 $("btnSave").addEventListener("click", saveConfig);
-$("btnSearchLora").addEventListener("click", searchLora);
 $("btnClean").addEventListener("click", () => doAction("clean_cache"));
-$("btnRestart").addEventListener("click", () => {
-  if (confirm("确定要请求重启 ComfyUI 吗？")) doAction("restart");
+
+/* 「清空 ComfyUI 排队」：iframe 沙箱没有 confirm，用「点两次」确认 */
+let clearQArmed = false;
+let clearQTimer = null;
+const CLEARQ_LABEL = "清空 ComfyUI 排队";
+const CLEARQ_ARMED = "再点一次确认清空（3 秒内有效）";
+function disarmClearQueue() {
+  clearQArmed = false;
+  clearTimeout(clearQTimer);
+  const b = $("btnClearQueue");
+  if (b) { b.textContent = CLEARQ_LABEL; b.classList.remove("armed"); }
+}
+$("btnClearQueue").addEventListener("click", (ev) => {
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  if (!clearQArmed) {
+    clearQArmed = true;
+    const b = $("btnClearQueue");
+    if (b) { b.textContent = CLEARQ_ARMED; b.classList.add("armed"); }
+    clearQTimer = setTimeout(disarmClearQueue, 3000);
+    return;
+  }
+  disarmClearQueue();
+  doAction("clear_queue");
+});
+document.addEventListener("click", (ev) => {
+  if (!clearQArmed) return;
+  if (ev.target === $("btnClearQueue")) return;
+  disarmClearQueue();
+});
+document.addEventListener("keydown", (ev) => {
+  if (clearQArmed && ev.key === "Escape") disarmClearQueue();
+});
+$("btnRestart").addEventListener("click", onRestartClick);
+$("btnRestartCancel").addEventListener("click", (ev) => {
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  disarmRestart();
+});
+/* 点页面别处 / 按 Esc 都算取消确认，恢复原按钮文案与样式 */
+document.addEventListener("click", (ev) => {
+  if (!restartArmed) return;
+  const btn = restartButton();
+  const cancel = restartCancelButton();
+  if (ev.target === btn || ev.target === cancel) return;
+  disarmRestart();
+});
+document.addEventListener("keydown", (ev) => {
+  if (restartArmed && ev.key === "Escape") disarmRestart();
 });
 
 /* ================= 内嵌完整图库：直接渲染，不再 iframe ================= */
@@ -1423,6 +1457,474 @@ $("btnRestart").addEventListener("click", () => {
   });
 
   window.NCDQuota = { reload: load };
+})();
+
+/* ================= LoRA 画风模板 =================
+   下拉挑 LoRA（按第一段目录分组）+ 权重，保存成「画风模板」给 bot 出图用。
+   ★ 懒加载：details 第一次展开才请求，不增加其它 cards 的负担。
+   ★ DOM 即编辑状态：只有「读取成功 / 保存成功」才整体重绘；保存失败绝不重绘，
+     用户正在改的内容原样保留。 */
+(function () {
+  "use strict";
+  const P = window.AstrBotPluginPage;
+  const byId = (id) => document.getElementById(id);
+  const root = byId("loraStylesApp");
+  if (!root) return;
+
+  function mk(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+  if (!P || typeof P.apiGet !== "function") {
+    root.appendChild(mk("div", "ls-empty", "插件页桥接未加载（P 不存在），无法取数。"));
+    return;
+  }
+
+  const API = "/ncd-comfy/lora/styles";
+  let loras = [];
+  let blocks = [];
+  let loaded = false;
+  let loading = false;
+  let saving = false;
+  let dirty = false;
+
+  function msgOf(err) {
+    if (!err) return "未知错误";
+    if (err.message) return String(err.message);
+    return String(err);
+  }
+  /* 后端返回两种可能：{status:"ok",data:{...}} 或直接 {...}（桥可能已剥一层） */
+  function unwrap(raw) {
+    if (raw && raw.status === "ok" && raw.data) return raw.data;
+    return raw;
+  }
+  function throwIfError(raw) {
+    if (raw && raw.status === "error") {
+      throw new Error(String(raw.message || "后端返回错误"));
+    }
+  }
+  function setStatus(text, cls) {
+    const node = byId("loraStatus");
+    if (!node) return;
+    node.textContent = text || "";
+    node.className = "ls-status" + (cls ? " " + cls : "");
+  }
+  let codexInfo = {};
+  function setSummary(count) {
+    const info = byId("loraStyleInfo");
+    if (info) info.textContent = "下拉选 LoRA · 权重 0~2 · 步进 0.05";
+    updateCodexLine(count);
+  }
+  /* 统一状态行：模板数 / LoRA 数 / 法典加载状态（不动 bot token） */
+  function updateCodexLine(count) {
+    const el = byId("loraCodex");
+    if (!el) return;
+    const n = typeof count === "number" ? count : blocks.length;
+    if (!loaded) {
+      el.textContent = "状态：等待读取…";
+      el.style.color = "";
+      return;
+    }
+    const parts = ["模板 " + n + " 个 · LoRA " + loras.length + " 个"];
+    const cod = codexInfo || {};
+    if (cod.loaded) {
+      parts.push(
+        "法典已加载：sfw " + cod.sfw_lines + " 行 / nsfw " + cod.nsfw_lines +
+        " 行 · 章节 " + (cod.chapters || 0) + " 个（bot 用 comfy_prompt_help 查）"
+      );
+      el.style.color = "";
+    } else {
+      parts.push(
+        "法典未加载：bot 的 comfy_prompt_help 会查不到内容（检查 comfy_codex_dir / 插件数据目录 codex）" +
+        (cod.error ? " · " + cod.error : "")
+      );
+      el.style.color = "var(--bad)";
+    }
+    el.textContent = parts.join(" ｜ ");
+  }
+  function markDirty() {
+    dirty = true;
+    setStatus("有未保存的修改", "");
+  }
+  function genId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  }
+  /* 分组键 = LoRA 文件名第一段目录；同时兼容反斜杠（ComfyUI loras 目录）与正斜杠 */
+  function groupOf(name) {
+    const parts = String(name || "").split(/[\\/]/);
+    if (parts.length > 1 && parts[0]) return parts[0];
+    return "未分组";
+  }
+  function weightText(v) {
+    const n = Number(v);
+    if (v === undefined || v === null || v === "" || !isFinite(n)) return "1";
+    return String(Math.round(Math.max(0, Math.min(2, n)) * 100) / 100);
+  }
+
+  function buildLoraSelect(current) {
+    const sel = mk("select");
+    const ph = mk("option", "", loras.length ? "— 选择 LoRA —" : "— 没读到可用 LoRA —");
+    ph.value = "";
+    sel.appendChild(ph);
+    const groups = {};
+    loras.forEach(function (l) {
+      const name = String((l && l.name) || "");
+      if (!name) return;
+      const dir = groupOf(name);
+      if (!groups[dir]) groups[dir] = [];
+      groups[dir].push(name);
+    });
+    const cur = String(current || "");
+    let curKnown = false;
+    Object.keys(groups).forEach(function (dir) {
+      if (groups[dir].indexOf(cur) >= 0) curKnown = true;
+    });
+    const dirs = Object.keys(groups).sort(function (a, b) {
+      if (a === "未分组") return 1;
+      if (b === "未分组") return -1;
+      return a.localeCompare(b);
+    });
+    dirs.forEach(function (dir) {
+      const og = mk("optgroup");
+      og.label = dir;
+      groups[dir].forEach(function (name) {
+        const opt = mk("option", "", name);
+        opt.value = name;
+        og.appendChild(opt);
+      });
+      sel.appendChild(og);
+    });
+    /* 历史模板里的 LoRA 可能已被删/改名：单独列出来，别让用户"看不见"而丢数据 */
+    if (cur && !curKnown) {
+      const og = mk("optgroup");
+      og.label = "（当前值，不在文件列表）";
+      const opt = mk("option", "", cur + "（不在文件列表）");
+      opt.value = cur;
+      og.appendChild(opt);
+      sel.appendChild(og);
+    }
+    sel.value = cur;
+    sel.title = "选择 LoRA 文件（保存完整文件名，含目录前缀）";
+    return sel;
+  }
+
+  function buildRow(rec, item) {
+    const row = mk("div", "ls-row");
+    const sel = buildLoraSelect(item ? item.lora : "");
+    const weight = mk("input");
+    weight.type = "number";
+    weight.min = "0";
+    weight.max = "2";
+    weight.step = "0.05";
+    weight.className = "ls-weight";
+    weight.title = "权重 0~2，步进 0.05";
+    weight.value = weightText(item ? item.weight : 1);
+    weight.addEventListener("input", markDirty);
+    const del = mk("button", "danger mini", "删除行");
+    del.type = "button";
+    const entry = { row: row, sel: sel, weight: weight };
+    rec.rows.push(entry);
+    sel.addEventListener("change", function () {
+      markDirty();
+      if (rec.syncCount) rec.syncCount();
+    });
+    del.addEventListener("click", function () {
+      const at = rec.rows.indexOf(entry);
+      if (at >= 0) rec.rows.splice(at, 1);
+      if (row.parentNode) row.parentNode.removeChild(row);
+      if (rec.syncCount) rec.syncCount();
+      markDirty();
+    });
+    row.appendChild(sel);
+    row.appendChild(weight);
+    row.appendChild(del);
+    return row;
+  }
+
+  function buildField(labelText, placeholder, value, maxLen) {
+    const field = mk("div", "field ls-field");
+    field.appendChild(mk("label", "", labelText));
+    const input = mk("input");
+    input.type = "text";
+    if (placeholder) input.placeholder = placeholder;
+    if (maxLen) input.maxLength = maxLen;
+    input.value = value === undefined || value === null ? "" : String(value);
+    input.addEventListener("input", markDirty);
+    field.appendChild(input);
+    return { field: field, input: input };
+  }
+
+  function buildBlock(style) {
+    const data = style || {};
+    const block = mk("div", "ls-style");
+    const rec = { id: String(data.id || genId()), node: block, rows: [], syncCount: null };
+    const head = mk("div", "ls-head");
+    const nameF = buildField("模板名（必填，bot 按这个名字用）", "例如：默认画风", data.name, 40);
+    const descF = buildField("说明（可选）", "例如：Moss 底模常用的柔和画风", data.desc, 120);
+    const delTpl = mk("button", "danger mini", "删除模板");
+    delTpl.type = "button";
+    head.appendChild(nameF.field);
+    head.appendChild(descF.field);
+    rec.nameInput = nameF.input;
+    rec.descInput = descF.input;
+
+    const rowsBox = mk("div", "ls-rows");
+    const headRow = mk("div", "ls-rowhead");
+    headRow.appendChild(mk("span", "", "LoRA 文件"));
+    headRow.appendChild(mk("span", "", "权重"));
+    headRow.appendChild(mk("span", "", ""));
+    rowsBox.appendChild(headRow);
+    const items = Array.isArray(data.items) ? data.items : [];
+    if (items.length) {
+      items.forEach(function (it) {
+        rowsBox.appendChild(buildRow(rec, it));
+      });
+    } else {
+      /* 新建/后端存了空 items：先给一行空行，避免"没地方填" */
+      rowsBox.appendChild(buildRow(rec, { lora: "", weight: 1 }));
+    }
+    rec.rowsBox = rowsBox;
+
+    const foot = mk("div", "ls-foot");
+    const addRow = mk("button", "mini", "+ 添加一行");
+    addRow.type = "button";
+    foot.appendChild(addRow);
+    foot.appendChild(delTpl);
+    const count = mk("span", "ls-count", "");
+    foot.appendChild(count);
+    rec.countEl = count;
+    rec.syncCount = function () {
+      let picked = 0;
+      for (let i = 0; i < rec.rows.length; i++) {
+        if (String(rec.rows[i].sel.value || "").trim()) picked++;
+      }
+      count.textContent = picked
+        ? picked + " / " + rec.rows.length + " 行已选"
+        : (rec.rows.length ? "还没有选中 LoRA" : "这一行都没有了");
+    };
+    addRow.addEventListener("click", function () {
+      rowsBox.appendChild(buildRow(rec, { lora: "", weight: 1 }));
+      rec.syncCount();
+      markDirty();
+    });
+    let delArmed = false;
+    let delArmTimer = null;
+    delTpl.addEventListener("click", function () {
+      /* ★ 插件页 iframe 的 sandbox 没开 allow-modals，浏览器原生确认弹窗会被静默
+         忽略且返回 false，所以删除用「再点一次」二次确认，不依赖原生弹窗。 */
+      if (!delArmed) {
+        delArmed = true;
+        delTpl.textContent = "再点一次删除";
+        setStatus("再点一次「删除模板」确认；点「保存全部」后才会真正删除", "");
+        delArmTimer = setTimeout(function () {
+          delArmed = false;
+          delTpl.textContent = "删除模板";
+          if (dirty) setStatus("有未保存的修改", "");
+        }, 3000);
+        return;
+      }
+      delArmed = false;
+      clearTimeout(delArmTimer);
+      delTpl.textContent = "删除模板";
+      const at = blocks.indexOf(rec);
+      if (at >= 0) blocks.splice(at, 1);
+      if (block.parentNode) block.parentNode.removeChild(block);
+      markDirty();
+      setSummary(blocks.length);
+    });
+
+    block.appendChild(head);
+    block.appendChild(rowsBox);
+    block.appendChild(foot);
+    rec.syncCount();
+    return rec;
+  }
+
+  function renderAll(styles) {
+    blocks = [];
+    const list = byId("loraStylesList");
+    if (!list) return;
+    list.replaceChildren();
+    const arr = Array.isArray(styles) ? styles : [];
+    if (!arr.length) {
+      list.appendChild(mk("div", "ls-empty",
+        "还没有画风模板。点「+ 新建模板」开始：填模板名 → 添加 LoRA 行（选文件、填权重）→ 保存全部。"));
+      setSummary(0);
+      return;
+    }
+    arr.forEach(function (s) {
+      const rec = buildBlock(s);
+      blocks.push(rec);
+      list.appendChild(rec.node);
+    });
+    setSummary(arr.length);
+  }
+
+  function addTemplate() {
+    const list = byId("loraStylesList");
+    if (!list) return;
+    if (!blocks.length) list.replaceChildren();   /* 清掉空态提示 */
+    const rec = buildBlock({ name: "", desc: "", items: [] });
+    blocks.push(rec);
+    list.appendChild(rec.node);
+    markDirty();
+    setSummary(blocks.length);
+    if (rec.nameInput && rec.nameInput.focus) rec.nameInput.focus();
+    if (rec.node.scrollIntoView) rec.node.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  function collect() {
+    const out = [];
+    const seen = {};
+    for (let i = 0; i < blocks.length; i++) {
+      const rec = blocks[i];
+      const name = String(rec.nameInput.value || "").trim();
+      if (!name) {
+        if (rec.nameInput.focus) rec.nameInput.focus();
+        throw new Error("第 " + (i + 1) + " 个模板还没填名称");
+      }
+      const key = name.toLowerCase();
+      if (seen[key]) {
+        if (rec.nameInput.focus) rec.nameInput.focus();
+        throw new Error("模板名重复：「" + name + "」（后端会按名字去重，请先改名）");
+      }
+      seen[key] = true;
+      const items = [];
+      for (let k = 0; k < rec.rows.length; k++) {
+        const row = rec.rows[k];
+        const lora = String(row.sel.value || "").trim();
+        if (!lora) continue;             /* 未选文件的空行不提交 */
+        let w = parseFloat(row.weight.value);
+        if (!isFinite(w)) w = 1;
+        w = Math.round(Math.max(0, Math.min(2, w)) * 100) / 100;
+        items.push({ lora: lora, weight: w });
+      }
+      out.push({
+        id: rec.id,
+        name: name,
+        desc: String(rec.descInput.value || "").trim(),
+        items: items,
+      });
+    }
+    return out;
+  }
+
+  async function load() {
+    if (loading) return;
+    loading = true;
+    setStatus("读取中…", "");
+    try {
+      const raw = await P.apiGet(API);
+      throwIfError(raw);
+      const data = unwrap(raw);
+      if (!data || typeof data !== "object" || !Array.isArray(data.styles)) {
+        throw new Error("返回结构不对：缺 styles 数组");
+      }
+      loras = Array.isArray(data.loras) ? data.loras : [];
+      loaded = true;
+      codexInfo = (data && data.codex) || {};
+      if (dirty && blocks.length) {
+        /* 极窄竞态：读取还没回来用户就点新建并开始编辑 → 不覆盖正在编辑的内容 */
+        setSummary(blocks.length);
+        setStatus("已载入 LoRA 清单（保留你正在编辑的模板，未覆盖）", "ok");
+      } else {
+        dirty = false;
+        renderAll(data.styles);
+        setStatus("已载入", "ok");
+      }
+    } catch (err) {
+      setStatus("读取失败：" + msgOf(err), "err");
+      toast("LoRA 模板读取失败：" + msgOf(err));
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function saveAll() {
+    if (saving) return;
+    let styles;
+    try {
+      styles = collect();
+    } catch (err) {
+      setStatus("无法保存：" + msgOf(err), "err");
+      toast(msgOf(err));
+      return;
+    }
+    saving = true;
+    const btn = byId("loraSaveAll");
+    if (btn) btn.disabled = true;
+    setStatus("保存中…", "");
+    try {
+      const raw = await P.apiPost(API, { styles: styles });
+      throwIfError(raw);
+      const data = unwrap(raw);
+      if (!data || !Array.isArray(data.styles)) {
+        throw new Error("保存返回结构不对：缺 styles 数组");
+      }
+      loaded = true;
+      dirty = false;
+      /* 顺手把「再点一次丢弃修改」的确认态收回（用户可能先点了刷新又去保存） */
+      refreshArm = false;
+      if (refreshArmTimer) clearTimeout(refreshArmTimer);
+      const rb = byId("loraRefresh");
+      if (rb) rb.textContent = "刷新";
+      renderAll(data.styles);
+      setStatus("已保存", "ok");
+      toast("已保存 " + data.styles.length + " 个模板");
+    } catch (err) {
+      /* ★ 失败不重绘：用户正在编辑的内容必须原样保留 */
+      setStatus("保存失败：" + msgOf(err), "err");
+      toast("保存失败：" + msgOf(err));
+    } finally {
+      saving = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  let refreshArm = false;
+  let refreshArmTimer = null;
+  const refreshBtn = byId("loraRefresh");
+  if (refreshBtn) {
+    refreshBtn.addEventListener("click", function () {
+      if (!dirty) {
+        load();
+        return;
+      }
+      /* 有未保存修改：二次点击确认（sandbox 没有 allow-modals，不能用浏览器原生弹窗） */
+      if (!refreshArm) {
+        refreshArm = true;
+        refreshBtn.textContent = "再点一次丢弃修改";
+        setStatus("有未保存的修改：再点一次「刷新」会丢弃它们", "err");
+        refreshArmTimer = setTimeout(function () {
+          refreshArm = false;
+          refreshBtn.textContent = "刷新";
+          if (dirty) setStatus("有未保存的修改", "");
+        }, 3000);
+        return;
+      }
+      refreshArm = false;
+      clearTimeout(refreshArmTimer);
+      refreshBtn.textContent = "刷新";
+      load();
+    });
+  }
+  const newBtn = byId("loraNew");
+  if (newBtn) newBtn.addEventListener("click", addTemplate);
+  const saveBtn = byId("loraSaveAll");
+  if (saveBtn) saveBtn.addEventListener("click", saveAll);
+
+  const det = byId("detLoraStyles");
+  if (det) {
+    det.addEventListener("toggle", function () {
+      if (det.open && !loaded && !loading) load();
+    });
+    if (det.open && !loaded && !loading) load();
+  }
+
+  /* 显式刷新入口，和 NCDGallery / NCDQuota 保持一致 */
+  window.NCDLoraStyles = { reload: load };
 })();
 
 // ---------- 生图 tips ----------

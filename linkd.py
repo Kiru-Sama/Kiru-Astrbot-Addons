@@ -23,8 +23,6 @@ import json
 import os
 import socket
 import subprocess
-import sys
-import urllib.request
 
 # ★ 2026-11-02：所有子进程都必须隐藏窗口，否则面板轮询会一直弹命令框
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -214,7 +212,7 @@ def _mem() -> dict:
 
 
 def _gpu() -> dict | None:
-    """nvidia-smi 查询（3 秒缓存）；没有显卡就返回 None。"""
+    """nvidia-smi 查询（5 秒缓存）；没有显卡就返回 None。"""
     now = time.time()
     if now - float(_gpu_cache["at"]) < 5.0:
         return _gpu_cache["data"]
@@ -225,7 +223,8 @@ def _gpu() -> dict | None:
         out = subprocess.run(
             [
                 "nvidia-smi",
-                "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                "--query-gpu=name,utilization.gpu,memory.used,memory.total,"
+                "temperature.gpu,power.draw",
                 "--format=csv,noheader,nounits",
             ],
             capture_output=True,
@@ -234,17 +233,117 @@ def _gpu() -> dict | None:
             creationflags=_NO_WINDOW,
         ).stdout.strip().splitlines()
         if out:
-            name, util, used, total = [x.strip() for x in out[0].split(",")]
-            data = {
-                "name": name,
-                "util": float(util),
-                "mem_used_mb": float(used),
-                "mem_total_mb": float(total),
-            }
+            parts = [x.strip() for x in out[0].split(",")]
+            if len(parts) >= 4:
+                data = {
+                    "name": parts[0],
+                    "util": float(parts[1]),
+                    "mem_used_mb": float(parts[2]),
+                    "mem_total_mb": float(parts[3]),
+                }
+                if len(parts) >= 5 and parts[4] not in ("N/A", "[N/A]", ""):
+                    try:
+                        data["temp"] = float(parts[4])
+                    except ValueError:
+                        pass
+                if len(parts) >= 6 and parts[5] not in ("N/A", "[N/A]", ""):
+                    data["power"] = parts[5]
     except Exception:
         data = None
     _gpu_cache.update({"at": now, "data": data})
     return data
+
+
+_cpu_temp_cache: dict = {"at": 0.0, "data": None}
+
+
+def _cpu_temp() -> tuple[float, str] | None:
+    """CPU 温度：返回 (摄氏温度, 来源)。
+
+    Windows 上 CPU 温度没有统一用户态接口：ACPI 热区很多笔记本不暴露。
+    AIDA64 / 游戏加加 之所以能读，是因为它们加载了 ring0 驱动直接读 MSR/SuperIO。
+    这里按现实可行的顺序找：
+      ① psutil（Linux / 部分主板）
+      ② WMI MSAcpi 热区（部分机器有）
+      ③ LibreHardwareMonitor / OpenHardwareMonitor 的 WMI（装了它们就有了）
+    都没有就返回 None —— 不是我们算错，是这台机器没提供。
+    """
+    now = time.time()
+    if now - float(_cpu_temp_cache["at"]) < 10.0:
+        return _cpu_temp_cache["data"]
+    res: tuple[float, str] | None = None
+    # ① psutil
+    try:
+        import psutil
+
+        temps = psutil.sensors_temperatures() or {}
+        vals: list[float] = []
+        for entries in temps.values():
+            for e in entries:
+                try:
+                    cur = float(getattr(e, "current", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if 0 < cur < 150:
+                    vals.append(cur)
+        if vals:
+            res = (round(max(vals), 1), "psutil")
+    except Exception:
+        pass
+    # ② WMI 热区（值单位是 0.1K）
+    if res is None:
+        try:
+            import subprocess
+
+            out = subprocess.run(
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    "(Get-CimInstance -Namespace root/wmi -ClassName "
+                    "MSAcpi_ThermalZoneTemperature -ErrorAction SilentlyContinue | "
+                    "Select-Object -First 1).CurrentTemperature",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=4,
+                creationflags=_NO_WINDOW,
+            ).stdout.strip()
+            if out.isdigit():
+                c = int(out) / 10.0 - 273.15
+                if 0 < c < 150:
+                    res = (round(c, 1), "acpi")
+        except Exception:
+            pass
+    # ③ LibreHardwareMonitor / OpenHardwareMonitor 的 WMI
+    if res is None:
+        for ns in ("root/LibreHardwareMonitor", "root/OpenHardwareMonitor"):
+            try:
+                import subprocess
+
+                ps = (
+                    f"$s = Get-CimInstance -Namespace '{ns}' -ClassName Sensor "
+                    "-ErrorAction SilentlyContinue | Where-Object { $_.SensorType -eq 'Temperature' "
+                    "-and ($_.Name -match 'CPU|Core|Package') } | "
+                    "Measure-Object -Property Value -Maximum; "
+                    "if ($s.Maximum) { [math]::Round($s.Maximum, 1) }"
+                )
+                out = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=_NO_WINDOW,
+                ).stdout.strip()
+                if out:
+                    c = float(out)
+                    if 0 < c < 150:
+                        res = (round(c, 1), "lhm")
+                        break
+            except Exception:
+                continue
+    _cpu_temp_cache.update({"at": now, "data": res})
+    return res
 
 
 def _sysinfo() -> dict:
@@ -252,54 +351,13 @@ def _sysinfo() -> dict:
     gpu = _gpu()
     if gpu:
         info["gpu"] = gpu
+        info["gpu_temp_src"] = "nvidia-smi"
+    ct = _cpu_temp()
+    if ct:
+        info["cpu_temp"] = ct[0]
+        info["cpu_temp_src"] = ct[1]
     return info
 
-
-
-# ---------------------------------------------------------------------------
-#  LoRA 下载（手机插件 → 电脑 linkd）
-# ---------------------------------------------------------------------------
-
-_PLUGIN_DIR = r"F:\NapCatDesk\ASTRBOT\data\plugins\astrbot_plugin_ncd_comfy"
-_MODS_DIR = r"F:\ComfyUI_portable\Mods In It"
-
-
-def _load_lora_module():
-    if _PLUGIN_DIR not in sys.path:
-        sys.path.insert(0, _PLUGIN_DIR)
-    import importlib
-
-    import lora_download as ld
-
-    return importlib.reload(ld) if "lora_download" in sys.modules else ld
-
-
-def _download_lora(payload: dict) -> dict:
-    try:
-        ld = _load_lora_module()
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "message": f"无法加载下载模块: {type(exc).__name__}: {exc}"}
-
-    sha = str(payload.get("sha256") or "").strip().lower()
-    mirror = str(payload.get("mirror") or "").strip()
-    if not sha or not mirror:
-        return {"ok": False, "message": "缺少 sha256 或 mirror"}
-    if not mirror.startswith("https://huggingface.co/"):
-        return {"ok": False, "message": "mirror 必须是 huggingface.co 直链"}
-
-    item = ld.LoraResult(
-        name=str(payload.get("name") or ""),
-        base_model=str(payload.get("base_model") or ""),
-        published_at=float(payload.get("published_at") or 0),
-        download_count=int(payload.get("download_count") or 0),
-        url="",
-        sha256=sha,
-        size_bytes=int(payload.get("size_bytes") or 0),
-        mirror=mirror,
-        filename=str(payload.get("filename") or ""),
-        tags=[str(x) for x in (payload.get("tags") or [])],
-    )
-    return ld.download_lora(item, _MODS_DIR)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -325,23 +383,6 @@ class Handler(BaseHTTPRequestHandler):
             elif path in ("/", "/link"):
                 html = "<meta charset=utf-8><h3>linkd 链路探针</h3><pre id=o>loading…</pre><script>fetch('/link/state').then(r=>r.json()).then(j=>o.textContent=JSON.stringify(j,null,2))</script>"
                 self._send(200, html.encode(), "text/html; charset=utf-8")
-            else:
-                self._send(404, b'{"error":"not found"}')
-        except Exception as exc:  # noqa: BLE001
-            self._send(500, json.dumps({"error": str(exc)}, ensure_ascii=False).encode())
-
-    def do_POST(self) -> None:  # noqa: N802
-        path = self.path.split("?")[0]
-        try:
-            if path == "/lora/download":
-                length = int(self.headers.get("Content-Length") or 0)
-                raw = self.rfile.read(length) if length > 0 else b"{}"
-                payload = json.loads(raw.decode("utf-8"))
-                result = _download_lora(payload)
-                self._send(
-                    200 if result.get("ok") else 400,
-                    json.dumps(result, ensure_ascii=False).encode(),
-                )
             else:
                 self._send(404, b'{"error":"not found"}')
         except Exception as exc:  # noqa: BLE001

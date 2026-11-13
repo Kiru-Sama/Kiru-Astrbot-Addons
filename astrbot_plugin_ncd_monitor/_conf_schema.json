@@ -82,5 +82,17 @@
     "description": "SnowLuma 身份库路径（用来把群号显示成群名）",
     "hint": "一般不用填 —— 填了 snowluma_dir 就会自动找 data\\<QQ号>\\snowluma_identity.db。找不到时群名退化成「群 <群号>」，不影响其它功能",
     "default": ""
+  },
+  "monitor_pc_linkd": {
+    "type": "string",
+    "description": "笔记本 linkd 地址（宿主机资源里显示笔记本数据）",
+    "hint": "例如 http://192.168.137.1:8201；留空=不统计笔记本。",
+    "default": "http://192.168.137.1:8201"
+  },
+  "host_stats_days": {
+    "type": "int",
+    "description": "宿主机统计保留天数",
+    "hint": "每 10 秒聚合一行，滚动保留这么多天；默认 7。",
+    "default": 7
   }
 }

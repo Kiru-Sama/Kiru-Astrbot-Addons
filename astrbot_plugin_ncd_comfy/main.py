@@ -25,7 +25,6 @@ import importlib.util as _ilu
 import os as _os_path
 import sys as _sys_path
 
-from . import lora_download as lora_dl
 
 _PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.path.abspath(__file__))
 
@@ -346,8 +345,6 @@ class NcdComfyPlugin(star.Star):
         self._last_model: str | None = None
         # 每个会话「上一轮生图」的完整参数（直出图复用，按会话隔离）
         self._last_gen_params: dict[str, dict] = {}
-        # LoRA 搜索缓存：sha256 -> LoraResult（下载工具靠它找回镜像信息）
-        self._lora_search_cache: dict[str, object] = {}
         # 上一张生成的图（reference="last" 做图生图时用）
         # 每个会话的“上一张图”（reference="last" 用；绝不能全局共用）
         self._last_image_bytes: dict[str, bytes] = {}
@@ -389,6 +386,10 @@ class NcdComfyPlugin(star.Star):
         self._img_user_order: list[str] = []
         self._img_worker: asyncio.Task | None = None
         self._img_current: dict | None = None
+        # ★ 已提交给 ComfyUI、还没等到结果的 prompt_id：
+        #   重载/异常退出时要删掉，否则远端队列会堆孤儿任务，
+        #   bot 读 comfy_status 就会误报「还有 N 张在排队」。
+        self._our_pids: set[str] = set()
         self._img_last_user = ""
         self._img_consecutive = 0
         self._img_seq = 0
@@ -447,6 +448,15 @@ class NcdComfyPlugin(star.Star):
                 )
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 主动发言循环启动失败（忽略）: {exc}")
+        # ★ 启动时清一次上次残留（重载/崩溃留下的 ComfyUI 队列孤儿任务）
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                task = loop.create_task(self._cleanup_own_prompts())
+                self._bg_tasks.add(task)
+                task.add_done_callback(self._bg_tasks.discard)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 启动清理残留任务调度失败（忽略）: {exc}")
 
     # ------------------------------------------------------------------
     #  配置
@@ -1120,6 +1130,40 @@ class NcdComfyPlugin(star.Star):
             )
 
     @filter.on_llm_request()
+    async def split_long_images(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
+        """长图自动截断分段：高宽比 > 1:3 且有一边 > 4096 的竖长图，切成多段给模型。"""
+        try:
+            urls = list(getattr(req, "image_urls", None) or [])
+            if not urls:
+                return
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            new_urls: list[str] = []
+            changed = False
+            for u in urls:
+                data = await self._image_url_bytes(u, umo)
+                if not data:
+                    new_urls.append(u)
+                    continue
+                segs = self._split_long_image(data)
+                if len(segs) <= 1:
+                    new_urls.append(u)
+                    continue
+                changed = True
+                for s in segs:
+                    new_urls.append(
+                        "data:image/jpeg;base64," + base64.b64encode(s).decode()
+                    )
+            if changed:
+                req.image_urls = new_urls
+                logger.info(
+                    f"[comfy] 长图已分段：{len(urls)} → {len(new_urls)} 段（每段≤3:1 且≤4096）"
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 长图分段失败（忽略）: {exc}")
+
+    @filter.on_llm_request()
     async def quota_count_speech(
         self, event: AstrMessageEvent, req: ProviderRequest
     ) -> None:
@@ -1307,12 +1351,6 @@ class NcdComfyPlugin(star.Star):
                 "群聊主动发言状态（调试用）",
             )
             self.context.register_web_api(
-                f"/{PLUGIN_DIR_NAME}/ncd-comfy/lora/status",
-                self.api_lora_status,
-                ["GET"],
-                "bot 下载 LoRA：目录用量与磁盘剩余",
-            )
-            self.context.register_web_api(
                 f"/{PLUGIN_DIR_NAME}/ncd-comfy/console/state",
                 self.api_console_state,
                 ["GET"],
@@ -1335,6 +1373,12 @@ class NcdComfyPlugin(star.Star):
                 self.api_console_tips,
                 ["GET", "POST"],
                 "操控台：生图 tips 读取/保存",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/lora/styles",
+                self.api_lora_styles,
+                ["GET", "POST"],
+                "LoRA 画风模板：读取（含可用 LoRA 清单）/ 保存",
             )
             self.context.register_web_api(
                 f"/{PLUGIN_DIR_NAME}/ncd-comfy/report-test",
@@ -1785,11 +1829,6 @@ class NcdComfyPlugin(star.Star):
             data["presets"] = []
             data["presets_error"] = str(exc)[:200]
         try:
-            mods = self._mods_root()
-            data["lora_bot"] = lora_dl.status(mods) if mods else {"error": "模型库未配置"}
-        except Exception as exc:  # noqa: BLE001
-            data["lora_bot"] = {"error": str(exc)[:200]}
-        try:
             gallery = await self.api_gallery()
             sessions = (gallery or {}).get("sessions") or []
             data["gallery"] = {
@@ -1843,6 +1882,49 @@ class NcdComfyPlugin(star.Star):
             return {"status": "ok", "data": {"items": items}}
         return {"status": "ok", "data": {"items": self._tips_load()}}
 
+    async def api_lora_styles(self):
+        """GET = 模板 + 可用 LoRA；POST {styles:[...]} = 整表保存。"""
+        try:
+            body = await request.json({}) or {}
+        except Exception:  # noqa: BLE001
+            body = {}
+        if isinstance(body, dict) and "styles" in body:
+            styles = self._styles_clean(body.get("styles"))
+            try:
+                self._styles_save(styles)
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": f"保存失败: {exc}"}
+            logger.info(f"[comfy] LoRA 画风模板已保存：{len(styles)} 个")
+            return {"status": "ok", "data": {"styles": styles}}
+        # GET：模板 + 下拉用的 LoRA 清单 + 法典加载状态（不占 bot token）
+        loras: list[dict] = []
+        try:
+            loras = [
+                {"name": str(m.get("name") or ""), "size_mb": m.get("size_mb") or 0}
+                for m in self._scan_loras(None)
+                if str(m.get("name") or "")
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 读取 LoRA 清单失败: {exc}")
+        codex: dict = {}
+        try:
+            sfw_lines = len(self._codex_lines("sfw"))
+            nsfw_lines = len(self._codex_lines("nsfw"))
+            codex = {
+                "loaded": bool(sfw_lines),
+                "sfw_lines": sfw_lines,
+                "nsfw_lines": nsfw_lines,
+                "chapters": len(self._codex_index(["sfw", "nsfw"], limit=400)),
+                "dir": str(self._codex_root()),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 读取法典状态失败（忽略）: {exc}")
+            codex = {"loaded": False, "error": str(exc)[:200]}
+        return {
+            "status": "ok",
+            "data": {"styles": self._styles_load(), "loras": loras, "codex": codex},
+        }
+
     async def api_console_action(self):
         try:
             body = await request.json({}) or {}
@@ -1850,46 +1932,61 @@ class NcdComfyPlugin(star.Star):
             body = {}
         action = str(body.get("action") or "").strip().lower()
 
-        if action == "search_lora":
-            try:
-                results = await asyncio.to_thread(
-                    lora_dl.search_loras,
-                    str(body.get("query") or ""),
-                    str(body.get("sort") or "hot"),
-                    "all",
-                    str(body.get("base_model") or ""),
-                    int(body.get("limit") or 5),
-                )
-                return {"status": "ok", "data": [r.as_dict() for r in results]}
-            except Exception as exc:  # noqa: BLE001
-                return {"status": "error", "message": str(exc)[:300]}
-
-        if action == "download_lora":
-            try:
-                mods = self._mods_root()
-                if not mods:
-                    return {"status": "error", "message": "模型库未配置"}
-                item = lora_dl.LoraResult(
-                    name=str(body.get("name") or ""),
-                    base_model=str(body.get("base_model") or ""),
-                    published_at=float(body.get("published_at") or 0),
-                    download_count=int(body.get("download_count") or 0),
-                    url="",
-                    sha256=str(body.get("sha256") or ""),
-                    size_bytes=int(body.get("size_bytes") or 0),
-                    mirror=str(body.get("mirror") or ""),
-                    filename=str(body.get("filename") or ""),
-                    tags=[str(x) for x in (body.get("tags") or [])],
-                )
-                res = await asyncio.to_thread(lora_dl.download_lora, item, mods)
-                return {"status": "ok" if res.get("ok") else "error", "data": res}
-            except Exception as exc:  # noqa: BLE001
-                return {"status": "error", "message": str(exc)[:300]}
-
         if action == "clean_cache":
             try:
                 self._scan_cache.clear()
                 return {"status": "ok", "data": {"message": "模型/预设缓存已清"}}
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "queue_status":
+            try:
+                client = self._client()
+                ids = await client.queue_ids()
+                ours = sorted(set(self._pids_load()) | set(self._our_pids or set()))
+                return {
+                    "status": "ok",
+                    "data": {
+                        "reachable": bool(ids.get("ok", True)),
+                        "running": sorted(ids.get("running") or []),
+                        "pending": sorted(ids.get("pending") or []),
+                        "ours": ours,
+                    },
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "codex_status":
+            # 调试用：法典是否加载、目录抽到了哪些章节
+            try:
+                idx = self._codex_index(["sfw", "nsfw"])
+                return {
+                    "status": "ok",
+                    "data": {
+                        "sfw_lines": len(self._codex_lines("sfw")),
+                        "nsfw_lines": len(self._codex_lines("nsfw")),
+                        "codex_dir": str(self._codex_root()),
+                        "index_count": len(idx),
+                        "index": idx,
+                        "styles": [s.get("name") for s in self._styles_load()],
+                    },
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "clear_queue":
+            try:
+                client = self._client()
+                res = await client.clear_queue()
+                if not res.get("ok"):
+                    return {
+                        "status": "error",
+                        "message": res.get("message") or "清空队列失败",
+                    }
+                return {
+                    "status": "ok",
+                    "data": {"message": "已中断当前任务并清空 ComfyUI 排队"},
+                }
             except Exception as exc:  # noqa: BLE001
                 return {"status": "error", "message": str(exc)[:300]}
 
@@ -1902,17 +1999,6 @@ class NcdComfyPlugin(star.Star):
                 return {"status": "error", "message": str(exc)[:300]}
 
         return {"status": "error", "message": f"未知操作: {action}"}
-
-    async def api_lora_status(self):
-        """bot 下载 LoRA 的配额状态（给面板用）。"""
-        mods = self._mods_root()
-        if not mods:
-            return {"status": "error", "message": "模型库路径未配置"}
-        try:
-            st = lora_dl.status(mods)
-        except Exception as exc:  # noqa: BLE001
-            return {"status": "error", "message": f"{type(exc).__name__}: {exc}"}
-        return {"status": "ok", "data": st}
 
     async def api_quota(self):
         try:
@@ -2547,16 +2633,6 @@ class NcdComfyPlugin(star.Star):
     def _categories(self, kind: str) -> list[Path]:
         """kind = checkpoints / diffusion_models / loras"""
         return model_paths.parse_yaml(self._yaml_path()).get(kind, [])
-
-    def _mods_root(self) -> str:
-        """模型库根目录（loras 的上一级）；拿不到返回空串（远程/未配置时）。"""
-        try:
-            dirs = self._categories("loras")
-            if dirs:
-                return str(Path(dirs[0]).parent)
-        except Exception:  # noqa: BLE001
-            pass
-        return ""
 
     def _remote_models(self, kind: str) -> list[dict] | None:
         """远程模式下从 ComfyUI 的 /object_info 拉模型清单。
@@ -3449,6 +3525,43 @@ class NcdComfyPlugin(star.Star):
             return "安全模块未加载"
         return _safety.public_url_error(url)
 
+    MAX_IMAGE_SIDE = 4096
+    LONG_IMAGE_RATIO = 3.0
+
+    def _is_long_image(self, im) -> bool:  # noqa: ANN001
+        """长图判定：高宽比 > 1:3 的竖长条，且最长边 > 4096。"""
+        try:
+            w, h = im.size
+        except Exception:  # noqa: BLE001
+            return False
+        if not w or not h or w <= 0 or h <= 0:
+            return False
+        return (h / w) > self.LONG_IMAGE_RATIO and max(w, h) > self.MAX_IMAGE_SIDE
+
+    def _split_long_image(self, data: bytes) -> list[bytes]:
+        """长图切段：每段保持 ≤1:3 且 ≤4096 高，返回多段 JPEG 字节。"""
+        from PIL import Image
+
+        try:
+            im = Image.open(io.BytesIO(data))
+        except Exception:  # noqa: BLE001
+            return [data]
+        if not self._is_long_image(im):
+            return [data]
+        w, h = im.size
+        # 段高：保持每段比例 ≤1:3，同时不超过 4096
+        seg_h = max(1, min(self.MAX_IMAGE_SIDE, int(w * self.LONG_IMAGE_RATIO)))
+        segs: list[bytes] = []
+        for top in range(0, h, seg_h):
+            try:
+                seg = im.crop((0, top, w, min(top + seg_h, h)))
+                buf = io.BytesIO()
+                seg.convert("RGB").save(buf, format="JPEG", quality=90)
+                segs.append(buf.getvalue())
+            except Exception:  # noqa: BLE001
+                return [data]
+        return segs
+
     async def _image_url_bytes(self, url: str, umo: str = "") -> bytes | None:
         """把历史里的 image_url（data URL / 本地路径 / http）变成字节。"""
         u = str(url or "").strip()
@@ -3889,6 +4002,166 @@ class NcdComfyPlugin(star.Star):
             return ""
         return _random.choice(items)
 
+    # ------------------------- LoRA 画风模板 ------------------------- #
+    def _styles_path(self):
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "lora_styles.json"
+        )
+
+    @staticmethod
+    def _styles_clean(raw) -> list[dict]:
+        """把任意输入洗成 [{id,name,desc,items:[{lora,weight}]}]。"""
+        out: list[dict] = []
+        if not isinstance(raw, list):
+            return out
+        seen: set[str] = set()
+        for idx, s in enumerate(raw):
+            if not isinstance(s, dict):
+                continue
+            name = str(s.get("name") or "").strip()[:40]
+            if not name or name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            items: list[dict] = []
+            for it in s.get("items") or []:
+                if not isinstance(it, dict):
+                    continue
+                lora = str(it.get("lora") or "").strip()
+                if not lora:
+                    continue
+                try:
+                    weight = float(it.get("weight", 1.0))
+                except (TypeError, ValueError):
+                    weight = 1.0
+                items.append(
+                    {"lora": lora, "weight": round(max(0.0, min(2.0, weight)), 2)}
+                )
+            out.append(
+                {
+                    "id": str(s.get("id") or f"style{idx + 1}").strip()[:40],
+                    "name": name,
+                    "desc": str(s.get("desc") or "").strip()[:120],
+                    "items": items,
+                }
+            )
+        return out
+
+    def _styles_load(self) -> list[dict]:
+        try:
+            p = self._styles_path()
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    data = data.get("styles") or []
+                return self._styles_clean(data)
+        except Exception:  # noqa: BLE001
+            pass
+        return []
+
+    def _styles_save(self, styles: list[dict]) -> None:
+        p = self._styles_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps({"styles": styles}, ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+
+    def _style_find(self, want: str) -> dict | None:
+        """按名字找模板（大小写不敏感）。"""
+        key = str(want or "").strip().lower()
+        if not key:
+            return None
+        for s in self._styles_load():
+            if str(s.get("name") or "").strip().lower() == key:
+                return s
+        return None
+
+    # ------------------------- ComfyUI 残留任务清理 ------------------------- #
+    def _pids_path(self):
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "pending_pids.json"
+        )
+
+    def _pids_load(self) -> set[str]:
+        try:
+            p = self._pids_path()
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    data = data.get("pids") or []
+                if isinstance(data, list):
+                    return {str(x).strip() for x in data if str(x).strip()}
+        except Exception:  # noqa: BLE001
+            pass
+        return set()
+
+    def _pids_save(self, pids: set[str]) -> None:
+        try:
+            p = self._pids_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_name(p.name + ".tmp")
+            tmp.write_text(
+                json.dumps({"pids": sorted(pids)}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            os.replace(tmp, p)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 保存 pending_pids 失败（忽略）: {exc}")
+
+    def _on_prompt_submitted(self, pid: str) -> None:
+        """backend.generate 提交成功后的回调：记住这个 prompt_id。"""
+        pid = str(pid or "").strip()
+        if not pid:
+            return
+        self._our_pids.add(pid)
+        self._pids_save(set(self._pids_load()) | self._our_pids)
+
+    def _on_prompt_done(self, pid: str) -> None:
+        pid = str(pid or "").strip()
+        if not pid:
+            return
+        self._our_pids.discard(pid)
+        self._pids_save(set(self._pids_load()) - {pid})
+
+    async def _cleanup_own_prompts(self) -> int:
+        """把自己提交过、但已经不该再跑的任务从 ComfyUI 队列里删掉。"""
+        stale = set(self._pids_load()) | set(self._our_pids or set())
+        if not stale:
+            return 0
+        client = self._client()
+        removed = 0
+        try:
+            ids = await client.queue_ids()
+        except Exception:  # noqa: BLE001
+            ids = {"ok": False, "running": set(), "pending": set()}
+        if not ids.get("ok", True):
+            logger.warning("[comfy] 清理残留任务：暂时读不到 ComfyUI 队列，保留记录下次再试")
+            return 0
+        pending = [p for p in stale if p in (ids.get("pending") or set())]
+        running = [p for p in stale if p in (ids.get("running") or set())]
+        if pending:
+            removed += await client.drop_prompts(pending)
+        for pid in running:
+            try:
+                await asyncio.to_thread(client.transport.cancel, pid)
+                removed += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 中断残留任务失败 {pid}: {exc}")
+        alive = set(pending) | set(running)
+        self._our_pids = alive
+        self._pids_save(alive)
+        if removed:
+            logger.info(f"[comfy] 已清理 {removed} 个残留出图任务（队列孤儿）")
+        return removed
+
     def _image_caption(
         self,
         used_model: str,
@@ -3910,7 +4183,7 @@ class NcdComfyPlugin(star.Star):
         blocks.append(str(used_model or "未知"))
 
         if loras:
-            blocks.append("LoRA：")
+            _lines: list[str] = []
             for l in loras:
                 raw = str(l.get("name") or "")
                 if not raw:
@@ -3920,7 +4193,12 @@ class NcdComfyPlugin(star.Star):
                 except (TypeError, ValueError):
                     strength = 0.0
                 tag = "（加速）" if accel and os.path.basename(raw) == accel else ""
-                blocks.append(f"{raw}:{strength:g}{tag}")
+                _lines.append(f"{raw}:{strength:g}{tag}")
+            if _lines:
+                # 数量写在标题里，并给每条加序号（方便用户按序号说「第几个换掉」）
+                blocks.append(f"LoRA（{len(_lines)} 个）：")
+                for _idx, _line in enumerate(_lines, 1):
+                    blocks.append(f"{_idx}. {_line}")
 
         if simple:
             return "\n".join(blocks)
@@ -3987,7 +4265,7 @@ class NcdComfyPlugin(star.Star):
             await self._notify(
                 event,
                 "⏳ 正在加载模型权重…出图后直接把图发你。"
-                + (f"\n（{_tip}）" if _tip else ""),
+                + (f"\nTips：{_tip}" if _tip else ""),
             )
 
     # ------------------------------------------------------------------
@@ -4752,10 +5030,9 @@ class NcdComfyPlugin(star.Star):
             )
             return
 
-        # 绕过 comfy_generate 的「先调 comfy_tools」前置门
-        umo = str(getattr(event, "unified_msg_origin", "") or "")
-        if umo:
-            self._revealed[umo] = time.time()
+        # ★ 2026-11-13（按用户要求）：直出图不再写入口标记 ——
+        #   直出图是独立指令，不算「bot 学会参数」；之后 bot 正常画图
+        #   仍然要主动调一次 comfy_tools（入口按 16 小时有效期自动过期）。
         # 复用「本会话上一轮生图」的参数（按 umo 隔离，别人的不影响）
         last = self._last_gen_params.get(umo) or {}
         kwargs: dict = {}
@@ -4773,12 +5050,19 @@ class NcdComfyPlugin(star.Star):
             kwargs["lora"] = last["lora"]
         if last.get("upscale"):
             kwargs["upscale"] = last["upscale"]
+        # 直出图临时绕过 gate：调完立刻删掉标记，不保留「入口已开」状态
+        umo2 = str(getattr(event, "unified_msg_origin", "") or "")
+        if umo2:
+            self._revealed[umo2] = time.time()
         try:
             result = await self.comfy_generate(event, prompt=prompt, **kwargs)
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[comfy] 直出图失败: {exc}", exc_info=True)
             yield event.plain_result(f"出图失败：{type(exc).__name__}: {exc}")
             return
+        finally:
+            if umo2:
+                self._revealed.pop(umo2, None)
         if result:
             yield event.plain_result(str(result))
 
@@ -5426,11 +5710,28 @@ class NcdComfyPlugin(star.Star):
     # ------------------------------------------------------------------
     #  工具入口
     # ------------------------------------------------------------------
+    def _reveal_ttl(self) -> float:
+        """入口标记有效期（秒）：超过这个时间要重新调 comfy_tools。"""
+        try:
+            hours = int(self._conf_int("comfy_reveal_ttl_hours", 16) or 16)
+        except Exception:  # noqa: BLE001
+            hours = 16
+        return max(1, hours) * 3600.0
+
+    def _reveal_fresh(self, umo: str) -> bool:
+        """这个会话的入口标记是否还在有效期内。"""
+        if not umo:
+            return False
+        ts = self._revealed.get(umo)
+        if not ts:
+            return False
+        return (time.time() - float(ts)) < self._reveal_ttl()
+
     def _gate(self, event: AstrMessageEvent, tool: str) -> str | None:
         umo = str(getattr(event, "unified_msg_origin", "") or "")
-        if umo in self._revealed:
+        if self._reveal_fresh(umo):
             return None
-        logger.info(f"[comfy] {tool} 被直接调用（未先调 comfy_tools），已返回指正")
+        logger.info(f"[comfy] {tool} 被直接调用（未先调 comfy_tools 或入口已过期），已返回指正")
         return GATE_ERROR.format(tool=tool)
 
     def _control_type_error(
@@ -5574,17 +5875,23 @@ class NcdComfyPlugin(star.Star):
             / "docs"
         )
         srcs = {
-            "sfw": legacy / "sfw" / "提示词常规法典.txt",
-            "nsfw": legacy / "nsfw" / "提示词色色法典.txt",
+            "sfw": [legacy / "sfw" / "提示词常规法典.txt"],
+            "nsfw": [legacy / "nsfw" / "提示词色色法典.txt"],
         }
+        # ★ 手机上没有旧绘图插件时，用插件包内置的副本兜底
+        bundled = Path(PLUGIN_DIR) / "codex_bundled"
+        for cat in files:
+            srcs.setdefault(cat, []).append(bundled / f"{cat}.txt")
         for cat, dst in files.items():
             if dst.exists() and dst.stat().st_size > 0:
                 continue
-            src = srcs.get(cat)
-            if src and src.is_file():
+            for src in srcs.get(cat) or []:
+                if not src.is_file():
+                    continue
                 try:
                     dst.write_bytes(src.read_bytes())
-                    logger.info(f"[comfy] 法典已复制：{cat} → {dst}")
+                    logger.info(f"[comfy] 法典已复制：{cat} ← {src.name} → {dst}")
+                    break
                 except OSError as exc:
                     logger.warning(f"[comfy] 法典复制失败 {cat}: {exc}")
         return files
@@ -5620,6 +5927,99 @@ class NcdComfyPlugin(star.Star):
                 logger.warning(f"[comfy] 读法典失败 {cat}: {exc}")
         cache[cat] = lines
         return lines
+
+    @staticmethod
+    def _codex_toc_titles(lines: list[str]) -> list[str]:
+        """从法典开头的「目录」段抽章节名（形如 "章节名\\t页码"）。"""
+        out: list[str] = []
+        start = -1
+        for i, raw in enumerate(lines[:6000]):
+            if str(raw or "").strip() in ("目录", "目 录", "目　录"):
+                start = i
+                break
+        if start < 0:
+            return out
+        for raw in lines[start + 1: start + 400]:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            if "以下正文" in text:
+                break
+            if "PS" in text[:3] or text.startswith(("PS", "ps")):
+                continue
+            if "\t" in text:
+                title = text.split("\t")[0].strip()
+            elif len(text) <= 40:
+                title = text
+            else:
+                continue
+            title = title.lstrip("\uf06c\u2022·●-— \u3000").strip()
+            if not title or len(title) > 40:
+                continue
+            if not re.search(r"[\u4e00-\u9fff]", title):
+                continue
+            out.append(title)
+        # 去重保序
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for t in out:
+            if t in seen:
+                continue
+            seen.add(t)
+            uniq.append(t)
+        return uniq
+
+    def _codex_index(self, cats: list[str], limit: int = 24) -> list[str]:
+        """从法典里抽章节标题，给 comfy_tools 顶部的显眼区展示。
+
+        优先解析开头的「目录」段（真正的章节名），解析不到再退回标题启发式。
+        缓存 key 里带 cats：群聊只查 sfw，私聊才是 sfw+nsfw，两者目录不同。
+        """
+        key = (tuple(cats or []), limit)
+        cache = getattr(self, "_codex_index_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        meta_skip = ("一些前言", "目录", "编纂者杂项", "编纂者常用画师组", "编纂者oc二则")
+        # 画图最常用的大类优先展示（法典目录有 80+ 章，只挑重点）
+        priority = (
+            "风格", "服装", "场景", "动作", "表情", "情感", "视角",
+            "质量词", "形象", "自然语言", "角色", "互动", "特殊画面",
+        )
+        seen: list[str] = []
+        try:
+            for cat in cats or ["sfw"]:
+                lines = self._codex_lines(cat)
+                titles = [t for t in self._codex_toc_titles(lines) if t not in meta_skip]
+                if titles:
+                    def _rank(t: str) -> int:
+                        for idx2, kw in enumerate(priority):
+                            if kw in t:
+                                return idx2
+                        return len(priority)
+
+                    titles = sorted(titles, key=_rank)
+                else:
+                    # 兜底：没有目录段就用标题启发式
+                    for raw in lines:
+                        text = str(raw or "").strip()
+                        if not text or len(text) > 40 or text in seen:
+                            continue
+                        if not promptlib.PromptLibrary._looks_like_heading(text):
+                            continue
+                        if promptlib.PromptLibrary._looks_like_tag_line(text):
+                            continue
+                        titles.append(text)
+                for t in titles:
+                    if len(seen) >= limit:
+                        break
+                    if t not in seen:
+                        seen.append(t[:40])
+                if len(seen) >= limit:
+                    break
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 法典目录提取失败（忽略）: {exc}")
+        self._codex_index_cache = (key, seen)
+        return seen
 
     async def _pc_link_state(self, force: bool = False) -> tuple[bool, str]:
         """链路状态的 async 入口：磁盘/网络探测都丢到线程池，不阻塞事件循环。
@@ -5720,7 +6120,7 @@ class NcdComfyPlugin(star.Star):
         """
         umo = str(getattr(event, "unified_msg_origin", "") or "")
         notice = self._take_reload_notice(umo)
-        already = umo in self._revealed
+        already = self._reveal_fresh(umo)
         logger.info(f"[comfy] 出图入口被调用：{umo or '（未知会话）'}")
         if already:
             return (
@@ -5748,10 +6148,34 @@ class NcdComfyPlugin(star.Star):
         lines = ["ComfyUI 出图入口已打开。四个工作流（用 preset 参数选，留空=默认）："]
         if notice:
             lines.insert(0, notice)
+
+        # ★★★ 显眼区（2026-11-13 v2）：只放「工具速查」。
+        #     用户明确要求：给的是「该调哪个工具」的提示，而且必须省 token ——
+        #     所以这里只列模板名 + 工具用途，不铺模板配比、也不铺法典 24 个章节。
+        try:
+            _style_names = [
+                str(s.get("name") or "") for s in self._styles_load() if s.get("name")
+            ][:8]
+        except Exception:  # noqa: BLE001
+            _style_names = []
+        lines.append("")
+        lines.append("★★ 工具速查（先看这里，按需调用）★★")
+        if _style_names:
+            lines.append(
+                "· 画风模板：「" + "」「".join(_style_names) + "」"
+                " —— lora 参数直接写模板名（可加 :权重）"
+            )
+        else:
+            lines.append("· 画风模板：暂无；lora 参数直接写 LoRA 文件名")
         lines.append(
-            "★ 动作/场景/构图/风格先查 comfy_prompt_help；"
-            "角色/服装/标签先查 comfy_tag_lookup(scope=character/tag)。"
+            "· 提示词：动作/场景/构图/风格 → comfy_prompt_help；"
+            "角色/服装/标签 → comfy_tag_lookup(scope=character/tag)"
         )
+        lines.append(
+            "· 出图：comfy_generate（异步，别等）｜进度/排队：comfy_status｜"
+            "翻旧图：comfy_gallery / comfy_output｜语音：comfy_say"
+        )
+        lines.append("")
         for name, meta in presets.PRESETS.items():
             try:
                 info = presets.summarize(presets.load_graph(name))
@@ -5785,16 +6209,6 @@ class NcdComfyPlugin(star.Star):
             "**CFG 压到 1 只在 moss 预设生效**，其他预设 CFG 仍是默认值。"
             "要风格就再用 lora 参数叠一个，会串在加速 LoRA 后面，**不会替换它**。",
             "非用户特别要求，别手动指定 model；4~14 步时也别把加速 LoRA 换掉。",
-            "",
-            "★ 找 / 下载 LoRA（这两个工具在任何模式下都可用）：",
-            "  用户说「找个 xxx 的 LoRA / 有没有 xxx 的 lora」→ 调 comfy_find_lora(query, sort)，",
-            "  它只搜索、不下载；把返回的 5 条列表原样发给用户"
-            "（名字/底模/大小/发布/下载量/链接/是否可下），让用户自己选。",
-            "  用户点名后（如「要第 2 个」）才调 comfy_download_lora(sha256=那条的 sha256)，",
-            "  下载会进 loras\\bot下载\\<底模>\\<种类>\\，成功后告诉用户放在哪里。",
-            "  ★ 用户没选之前绝对不许调下载；列表里标「没有 HF 镜像」的 bot 下不了，"
-            "让用户手动去原站下。",
-            "  sort 用法：用户说「最新的」用 new，「最热/下载最多」用 hot，「点赞最多」用 liked。",
             "",
             "绘图 SOP（按这个顺序判断，不要直接套模板）：",
             "1. 参考图先认人：先问清图上是谁/要画谁，不猜角色。",
@@ -5837,6 +6251,11 @@ class NcdComfyPlugin(star.Star):
             "★ 第一次出图、换工作流、换底模都会先往会话发一条加载提示。",
             "  进度提示：私聊两条（加载权重 / 开始采样），群聊只有「开始采样」一条。",
             "  调用后不用重复调用。",
+            "★ 任何生图需求都可以走反馈通道，主动反馈给管理员（不要只会说做不到）：",
+            "  · 触发场景：用户想画的角色/画风缺底模或 LoRA、想要新功能、觉得出图哪里不好用；",
+            "  · 调 feedback_submit(text=\"用用户自己的话说清想要什么\", category=\"底模|画风|功能|bug|其他\")；",
+            "  · 提交后告诉用户「已经记下来给管理员了」，不要承诺多久能加、也不要假装已经加好了；",
+            "  · 只是普通聊天抱怨、没有具体诉求时不要提交；绝对不要替用户编造需求。",
             f"★ 空闲 {self._conf_int('comfy_unload_timeout', 300) // 60} 分钟后 ComfyUI 会卸掉模型，",
             f"  {self._conf_int('comfy_idle_timeout', 1800) // 60} 分钟后关掉进程。",
         ]
@@ -6342,6 +6761,58 @@ class NcdComfyPlugin(star.Star):
                     if not spec:
                         continue
                     name_part, _, strength_part = spec.partition(":")
+                    # ★ 画风模板：lora 参数可以直接写模板名，自动展开成配比
+                    _tpl = self._style_find(name_part)
+                    if _tpl is not None:
+                        _mult = (
+                            float(strength_part) if strength_part.strip() else 1.0
+                        )
+                        _added = 0
+                        for _it in _tpl.get("items") or []:
+                            _want = str(_it.get("lora") or "")
+                            if not _want:
+                                continue
+                            _hit = next(
+                                (
+                                    m["name"]
+                                    for m in pool
+                                    if str(m["name"]).lower() == _want.lower()
+                                ),
+                                None,
+                            )
+                            if _hit is None:
+                                _base = os.path.basename(_want.replace("/", "\\")).lower()
+                                _hit = next(
+                                    (
+                                        m["name"]
+                                        for m in pool
+                                        if os.path.basename(m["name"]).lower() == _base
+                                    ),
+                                    None,
+                                )
+                            if _hit is None:
+                                logger.warning(
+                                    f"[comfy] 画风模板「{_tpl['name']}」里的 LoRA 不在本族：{_want}"
+                                )
+                                continue
+                            _w = max(
+                                0.0,
+                                min(
+                                    2.0,
+                                    float(_it.get("weight", 1.0)) * _mult,
+                                ),
+                            )
+                            loras.append({"name": _hit, "strength": _w})
+                            _added += 1
+                        if not _added:
+                            raise ComfyError(
+                                f"画风模板「{_tpl['name']}」里的 LoRA 都不在 "
+                                f"{meta['label']} 这一族，换一个模板或直接写 LoRA 文件名。"
+                            )
+                        logger.info(
+                            f"[comfy] 画风模板展开：{_tpl['name']} → {_added} 个 LoRA"
+                        )
+                        continue
                     try:
                         resolved = self._resolve_name(name_part, pool, "LoRA")
                     except ComfyError:
@@ -6612,7 +7083,7 @@ class NcdComfyPlugin(star.Star):
                     await self._notify(
                         event,
                         f"🖌️ 开始采样了…（{mode_label}）"
-                        + (f"\n（{_tip2}）" if _tip2 else ""),
+                        + (f"\nTips：{_tip2}" if _tip2 else ""),
                     )
 
                 self._job = {
@@ -6626,6 +7097,7 @@ class NcdComfyPlugin(star.Star):
                     final,
                     on_sampler_start=_on_sampler,
                     on_progress=self._on_progress,
+                    on_submit=self._on_prompt_submitted,
                 )
                 image = result["images"][0]
                 data = await client.fetch_image(image)
@@ -6637,6 +7109,10 @@ class NcdComfyPlugin(star.Star):
                 return self._comfy_error_hint(exc) + TOOL_RETRY_HINT
             finally:
                 # 成功/失败/超时都算这次任务结束；下一次同用户出队要看间隔。
+                try:
+                    self._on_prompt_done(str(getattr(client, "last_prompt_id", "") or ""))
+                except Exception:  # noqa: BLE001
+                    pass
                 self._quota_record_end(event)
 
         if await self._nsfw_blocked(event, data, image_prompt=text):
@@ -6864,122 +7340,6 @@ class NcdComfyPlugin(star.Star):
             "（脸、发色、服装、动作是否和用户要求一致），不对就调整描述重画；"
             "不要重复调用本工具，也不要声称看过图却描述不出细节。",
             data,
-        )
-
-    @filter.llm_tool(name="comfy_find_lora")
-    async def comfy_find_lora(
-        self,
-        event: AstrMessageEvent,
-        query: str,
-        sort: str = "hot",
-        base_model: str = "",
-    ) -> str:
-        """在 civarchive 上搜索 LoRA（★ 只搜索，不下载；必须把结果发给用户选择）。
-
-        ★ 用法：用户说「找个 xxx 的 LoRA / 有没有 xxx 的模型」时调它。
-        ★ 搜完把列表原样发给用户，让用户挑；用户选了之后再调 comfy_download_lora。
-        ★ 不要自己替用户决定下载。
-
-        Args:
-            query(string): 搜索词（角色名 / 画风 / 作者 / 关键词）
-            sort(string): hot=下载量最高 / new=最新发布 / liked=点赞最多
-            base_model(string): 底模过滤，如 Anima / MOSS / Illustrious / SDXL / NoobAI；留空=不限
-        """
-        mods = self._mods_root()
-        try:
-            results = await asyncio.to_thread(
-                lora_dl.search_loras, query, sort, "all", base_model, 5
-            )
-        except Exception as exc:  # noqa: BLE001
-            return f"搜索失败：{type(exc).__name__}: {exc}"
-        if not results:
-            return f"没有搜到「{query}」相关的 LoRA。"
-        # 缓存，供下载工具按 sha256 找回
-        try:
-            for r in results:
-                if r.sha256:
-                    self._lora_search_cache[r.sha256] = r
-            while len(self._lora_search_cache) > 100:
-                self._lora_search_cache.pop(next(iter(self._lora_search_cache)), None)
-        except Exception:  # noqa: BLE001
-            pass
-
-        lines = [f"当前时间：{lora_dl.now_text()}", ""]
-        for i, r in enumerate(results, 1):
-            d = r.as_dict()
-            ready = bool(d["sha256"] and d["mirror"])
-            lines.append(f"{i}. {d['name']}")
-            lines.append(
-                f"   底模：{d['base_model'] or '未知'} | 大小：{d['size_text']} | "
-                f"发布：{d['published_text']}（{d['age_days']} 天前）| 下载量：{d['download_count']}"
-            )
-            lines.append(f"   链接：{d['link']}")
-            lines.append(f"   下载：{'可以（HF 镜像）' if ready else '没有 HF 镜像，下不了'}")
-            if ready:
-                lines.append(f"   sha256：{d['sha256']}")
-        lines.append("")
-        lines.append(
-            "★ 把这份列表发给用户，让用户选。用户明确说要哪个之后，"
-            "才调 comfy_download_lora(sha256=对应条目那一串)。"
-        )
-        return "\n".join(lines)
-
-    @filter.llm_tool(name="comfy_download_lora")
-    async def comfy_download_lora(
-        self,
-        event: AstrMessageEvent,
-        sha256: str,
-    ) -> str:
-        """下载用户已经选定的 LoRA（★ 必须先由 comfy_find_lora 把列表给用户看过）。
-
-        ★ 只接受 comfy_find_lora 返回过的 sha256；用户没说下载哪个就不许调。
-        ★ 下载后自动校验是否 LoRA、自动归类到 loras\\bot下载\\<底模>\\<种类>\\。
-        ★ 不会覆盖已有文件，不会改名。
-
-        Args:
-            sha256(string): 用户选定条目的 sha256（comfy_find_lora 返回里那串）
-        """
-        sha = str(sha256 or "").strip().lower()
-        if not sha or len(sha) != 64:
-            return "下载失败：sha256 不合法。先调 comfy_find_lora 让用户选，再用返回的 sha256。"
-        item = self._lora_search_cache.get(sha)
-        if item is None:
-            return (
-                "下载失败：这个 sha256 不在本次搜索缓存里。\n"
-                "先发 / 或调 comfy_find_lora 重新搜一遍，把列表给用户选，再用新列表里的 sha256。"
-            )
-        # 手机写不了 F 盘：下载交给电脑侧 linkd 执行
-        try:
-            import urllib.request as _ur
-
-            host = str(self._conf_str("comfy_host") or "192.168.137.1")
-            port = int(self._conf_int("comfy_lora_download_port", 8201) or 8201)
-            payload = {
-                "sha256": item.sha256,
-                "mirror": item.mirror,
-                "filename": item.filename,
-                "size_bytes": item.size_bytes,
-                "name": item.name,
-                "base_model": item.base_model,
-                "published_at": item.published_at,
-                "download_count": item.download_count,
-                "tags": item.tags,
-            }
-            req = _ur.Request(
-                f"http://{host}:{port}/lora/download",
-                data=json.dumps(payload, ensure_ascii=False).encode(),
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with _ur.urlopen(req, timeout=600) as resp:
-                res = json.loads(resp.read().decode("utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            return f"下载失败（电脑侧 linkd 不可用）：{type(exc).__name__}: {exc}"
-        if not res.get("ok"):
-            return f"下载失败：{res.get('message') or '未知错误'}"
-        return (
-            f"下载完成：{res['message']}\n"
-            "★ 告诉用户下载好了、放在哪个分类；下次出图可以在 lora 参数里点名它。"
         )
 
     @filter.llm_tool(name="comfy_tag_lookup")
@@ -7589,7 +7949,13 @@ class NcdComfyPlugin(star.Star):
                     emotion=emotion_val,
                     pause_seconds=self._conf_float("comfy_voice_pause", 1.0),
                 )
-                result = await client.generate(graph)
+                result = await client.generate(
+                    graph, on_submit=self._on_prompt_submitted
+                )
+                try:
+                    self._on_prompt_done(str(getattr(client, "last_prompt_id", "") or ""))
+                except Exception:  # noqa: BLE001
+                    pass
                 audio = result["images"][0]
                 data = await client.fetch_image(audio)
             except ComfyError as exc:
@@ -8114,6 +8480,11 @@ class NcdComfyPlugin(star.Star):
         self._bg_tasks.clear()
         self._bg_umo.clear()
         self._img_queues.clear()
+        # ★ 把自己提交过、仍在 ComfyUI 队列里的任务删掉，避免重载后变孤儿
+        try:
+            await self._cleanup_own_prompts()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 重载前清理残留任务失败（忽略）: {exc}")
         self._quota_sync_waiting.clear()
         self._img_user_order.clear()
         self._img_current = None

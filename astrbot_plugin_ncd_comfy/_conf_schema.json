@@ -637,5 +637,11 @@
     "description": "直出图每日次数（/生图提示词）",
     "hint": "每人每天可用 /生图提示词 直接出图几次；默认 3。额度照常计。",
     "default": 3
+  },
+  "comfy_reveal_ttl_hours": {
+    "type": "int",
+    "description": "画图入口有效期（小时）",
+    "hint": "comfy_tools 的参数说明过多久后必须重新调一次；默认 16 小时。直出图（/生图提示词）不计入。",
+    "default": 16
   }
 }

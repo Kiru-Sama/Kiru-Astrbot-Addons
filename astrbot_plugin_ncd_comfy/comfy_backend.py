@@ -586,7 +586,9 @@ class ComfyClient:
     # ------------------------------------------------------------------
     #  出图
     # ------------------------------------------------------------------
-    async def generate(self, graph: dict, on_sampler_start=None, on_progress=None) -> dict:
+    async def generate(
+        self, graph: dict, on_sampler_start=None, on_progress=None, on_submit=None
+    ) -> dict:
         """提交工作流并等结果。返回 {"images": [{filename, subfolder, type}], "seconds": float}。"""
         await self.ensure_server()
         self._last_used = time.time()
@@ -620,6 +622,11 @@ class ComfyClient:
             holder["prompt_id"] = prompt_id
             self.last_prompt_id = prompt_id
             logger.info(f"[comfy] 已提交 prompt_id={prompt_id}")
+            if on_submit is not None:
+                try:
+                    on_submit(prompt_id)
+                except Exception:  # noqa: BLE001
+                    logger.debug("[comfy] on_submit 回调失败（忽略）")
             try:
                 outputs = await self._wait_history(prompt_id)
                 # ★ 收尾补一发 100%：WS 事件可能比 /history 晚到，监听任务会被取消
@@ -960,6 +967,56 @@ class ComfyClient:
             return await asyncio.to_thread(self.transport.queue)
         except Exception:  # noqa: BLE001
             return {"running": 0, "pending": 0}
+
+    async def queue_ids(self) -> dict:
+        """返回 /queue 里的 running / pending prompt_id 集合。"""
+        try:
+            data = await asyncio.to_thread(self._get_json_sync, "/queue", 5.0)
+        except Exception:  # noqa: BLE001
+            # ok=False：调用方据此判断「没读到」而不是「队列是空的」，
+            # 否则清理逻辑会在 ComfyUI 离线时把待清理 pid 记录误删。
+            return {"ok": False, "running": set(), "pending": set()}
+
+        def _ids(key: str) -> set[str]:
+            out: set[str] = set()
+            for item in data.get(key) or []:
+                if isinstance(item, (list, tuple)) and len(item) > 1:
+                    pid = str(item[1] or "")
+                    if pid:
+                        out.add(pid)
+            return out
+
+        return {
+            "ok": True,
+            "running": _ids("queue_running"),
+            "pending": _ids("queue_pending"),
+        }
+
+    async def drop_prompts(self, prompt_ids: list[str]) -> int:
+        """从 ComfyUI 队列里删掉指定 prompt（只能删 pending）。"""
+        ids = [str(x) for x in (prompt_ids or []) if str(x).strip()]
+        if not ids:
+            return 0
+        try:
+            await asyncio.to_thread(
+                self._post_json_sync, "/queue", {"delete": ids}, 8.0
+            )
+            logger.info(f"[comfy] 已从 ComfyUI 队列删除 {len(ids)} 个任务")
+            return len(ids)
+        except ComfyError as exc:
+            logger.warning(f"[comfy] 删除残留队列任务失败: {exc}")
+            return 0
+
+    async def clear_queue(self) -> dict:
+        """中断当前任务 + 清空排队（管理员手动清理用）。"""
+        await self.cancel()
+        try:
+            await asyncio.to_thread(
+                self._post_json_sync, "/queue", {"clear": True}, 8.0
+            )
+            return {"ok": True}
+        except ComfyError as exc:
+            return {"ok": False, "message": str(exc)}
 
     async def queue_position(self, prompt_id: str) -> int | None:
         """0 = 正在跑；N = 前面还有 N 个；None = 不在队列里。"""
