@@ -413,7 +413,12 @@ class QuotaEngine:
         note = str(values.get("note") or "").strip()[:40]
         if note:
             clean["note"] = note
-        if not clean:
+        name = str(values.get("name") or "").strip()[:40]
+        if name:
+            clean["name"] = name
+        # 只要显式保存赞助者（哪怕只填了 QQ / 名字），就标记为赞助者，
+        # 不因为「没有数值」而把记录删掉。
+        if not clean and not values.get("exclude_pool") and not values.get("sponsor"):
             self.remove_override(user_id, now=now)
             return {}
         clean["exclude_pool"] = True

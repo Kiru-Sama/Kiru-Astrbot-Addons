@@ -631,5 +631,11 @@
     "description": "主人的名字（bot 认人时用）",
     "hint": "默认 KiruSama。bot 会把「这个名字 + 上面的管理员 QQ」当成主人，别人提到也认得出。",
     "default": "KiruSama"
+  },
+  "direct_draw_daily_limit": {
+    "type": "int",
+    "description": "直出图每日次数（/生图提示词）",
+    "hint": "每人每天可用 /生图提示词 直接出图几次；默认 3。额度照常计。",
+    "default": 3
   }
 }

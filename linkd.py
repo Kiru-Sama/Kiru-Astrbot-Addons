@@ -23,6 +23,8 @@ import json
 import os
 import socket
 import subprocess
+import sys
+import urllib.request
 
 # ★ 2026-11-02：所有子进程都必须隐藏窗口，否则面板轮询会一直弹命令框
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -254,6 +256,52 @@ def _sysinfo() -> dict:
 
 
 
+# ---------------------------------------------------------------------------
+#  LoRA 下载（手机插件 → 电脑 linkd）
+# ---------------------------------------------------------------------------
+
+_PLUGIN_DIR = r"F:\NapCatDesk\ASTRBOT\data\plugins\astrbot_plugin_ncd_comfy"
+_MODS_DIR = r"F:\ComfyUI_portable\Mods In It"
+
+
+def _load_lora_module():
+    if _PLUGIN_DIR not in sys.path:
+        sys.path.insert(0, _PLUGIN_DIR)
+    import importlib
+
+    import lora_download as ld
+
+    return importlib.reload(ld) if "lora_download" in sys.modules else ld
+
+
+def _download_lora(payload: dict) -> dict:
+    try:
+        ld = _load_lora_module()
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "message": f"无法加载下载模块: {type(exc).__name__}: {exc}"}
+
+    sha = str(payload.get("sha256") or "").strip().lower()
+    mirror = str(payload.get("mirror") or "").strip()
+    if not sha or not mirror:
+        return {"ok": False, "message": "缺少 sha256 或 mirror"}
+    if not mirror.startswith("https://huggingface.co/"):
+        return {"ok": False, "message": "mirror 必须是 huggingface.co 直链"}
+
+    item = ld.LoraResult(
+        name=str(payload.get("name") or ""),
+        base_model=str(payload.get("base_model") or ""),
+        published_at=float(payload.get("published_at") or 0),
+        download_count=int(payload.get("download_count") or 0),
+        url="",
+        sha256=sha,
+        size_bytes=int(payload.get("size_bytes") or 0),
+        mirror=mirror,
+        filename=str(payload.get("filename") or ""),
+        tags=[str(x) for x in (payload.get("tags") or [])],
+    )
+    return ld.download_lora(item, _MODS_DIR)
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8") -> None:
         self.send_response(code)
@@ -277,6 +325,23 @@ class Handler(BaseHTTPRequestHandler):
             elif path in ("/", "/link"):
                 html = "<meta charset=utf-8><h3>linkd 链路探针</h3><pre id=o>loading…</pre><script>fetch('/link/state').then(r=>r.json()).then(j=>o.textContent=JSON.stringify(j,null,2))</script>"
                 self._send(200, html.encode(), "text/html; charset=utf-8")
+            else:
+                self._send(404, b'{"error":"not found"}')
+        except Exception as exc:  # noqa: BLE001
+            self._send(500, json.dumps({"error": str(exc)}, ensure_ascii=False).encode())
+
+    def do_POST(self) -> None:  # noqa: N802
+        path = self.path.split("?")[0]
+        try:
+            if path == "/lora/download":
+                length = int(self.headers.get("Content-Length") or 0)
+                raw = self.rfile.read(length) if length > 0 else b"{}"
+                payload = json.loads(raw.decode("utf-8"))
+                result = _download_lora(payload)
+                self._send(
+                    200 if result.get("ok") else 400,
+                    json.dumps(result, ensure_ascii=False).encode(),
+                )
             else:
                 self._send(404, b'{"error":"not found"}')
         except Exception as exc:  # noqa: BLE001

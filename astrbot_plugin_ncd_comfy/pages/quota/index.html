@@ -52,6 +52,12 @@
   .num { font-variant-numeric:tabular-nums; }
   .name { font-weight:600; }
   .uid { color:var(--muted); font-size:11px; }
+  .mini { font-size:11px; padding:1px 7px; margin-left:6px; border-radius:6px;
+    border:1px solid var(--border); background:var(--card); color:var(--accent);
+    cursor:pointer; line-height:1.5; }
+  .mini:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
+  .editing { font-size:12.5px; color:var(--muted); margin:4px 0 8px; }
+  .editing b { color:var(--text); font-weight:600; }
   .badge { display:inline-block; font-size:11px; padding:1px 7px; border-radius:999px;
     background:var(--track); color:var(--muted); margin-right:4px; white-space:nowrap; }
   .badge.bad { background:#fdecec; color:var(--bad); }
@@ -146,6 +152,7 @@
   <h2 style="margin-top:18px">赞助者单独额度
     <span class="sub">仍计入张数/排行，不占普通前 5/前 3</span>
   </h2>
+  <div class="editing" id="sfEditing">当前：新增赞助者</div>
   <div class="ctrls" id="sponsorFields"></div>
   <div class="actions">
     <button id="saveSponsor" class="primary" type="button">保存赞助者</button>
@@ -320,6 +327,20 @@ function fillSponsor(ov) {
     const v = data[f.k];
     node.value = v === undefined || v === null ? "" : v;
   });
+  const tip = $("sfEditing");
+  if (tip) {
+    const uid = String(data.user_id || "").trim();
+    const nm = String(data.note || data.name || "").trim();
+    if (uid) {
+      tip.replaceChildren(
+        document.createTextNode("当前编辑："),
+        el("b", "", nm || uid),
+        document.createTextNode(nm ? "（" + uid + "）" : "（" + uid + "）")
+      );
+    } else {
+      tip.textContent = "当前：新增赞助者";
+    }
+  }
 }
 function readSponsor() {
   const uid = ($("sf_user_id") || {}).value || "";
@@ -369,7 +390,13 @@ function renderSponsors(overrides) {
     row.appendChild(el("div", "sum", bits.join(" · ") || "全部默认，仅不占池"));
     const edit = el("button", "", "编辑");
     edit.type = "button";
-    edit.onclick = () => fillSponsor({ ...ov, user_id: uid });
+    edit.onclick = () => {
+      fillSponsor({ ...ov, user_id: uid, note: ov.note || ov.name || "" });
+      const box = $("sponsorFields");
+      if (box && box.scrollIntoView) {
+        box.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    };
     row.appendChild(edit);
     const del = el("button", "", "删除");
     del.type = "button";
@@ -439,7 +466,22 @@ function renderBoard(data) {
     const who = el("td");
     const nm = nameOf(row);
     who.appendChild(el("div", "name", nm.name));
-    if (nm.uid) who.appendChild(el("div", "uid", nm.uid));
+    if (nm.uid) {
+      const uidRow = el("div", "uid");
+      uidRow.appendChild(document.createTextNode(nm.uid + " "));
+      const addBtn = el("button", "mini", "+赞助");
+      addBtn.title = "添加为赞助者";
+      addBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        fillSponsor({ user_id: nm.uid, note: nm.name });
+        const box = $("sponsorFields");
+        if (box && box.scrollIntoView) {
+          box.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+      });
+      uidRow.appendChild(addBtn);
+      who.appendChild(uidRow);
+    }
     tr.appendChild(who);
     if (board === "daily") {
       tr.appendChild(el("td", "num", String(row.count || 0)));
@@ -619,7 +661,9 @@ $("saveSponsor").addEventListener("click", async () => {
   try {
     const r = await P.apiPost("/ncd-comfy/quota/sponsor", payload);
     if (r && r.error) throw new Error(r.error);
-    setStatus("赞助者 " + payload.user_id + " 已保存", "ok");
+    const who = (payload.overrides.note || payload.user_id).trim();
+    setStatus("已保存赞助者：" + who + "（" + payload.user_id + "）", "ok");
+    fillSponsor({});
     load();
   } catch (err) {
     setStatus("保存失败：" + (err && err.message ? err.message : err), "err");

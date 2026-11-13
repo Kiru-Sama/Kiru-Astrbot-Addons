@@ -336,7 +336,7 @@ MENU_TOOL = "ncd_tools"
 #   （2026-10-22：清掉已下线的独立绘图插件 ncd_draw 的四个旧工具名，避免误导）
 FOREIGN_KEEP = ("comfy_tools", "comfy_generate", "comfy_models", "comfy_status",
                 "comfy_say", "comfy_output", "comfy_gallery", "comfy_prompt_help",
-                "comfy_tag_lookup",
+                "comfy_tag_lookup", "comfy_find_lora", "comfy_download_lora",
                 "memory_write", "memory_search", "memory_forget",
                 "extend_turns", "read_attachment",
                   "feedback_submit")
@@ -550,6 +550,25 @@ class NcdToolboxPlugin(star.Star):
             return explicit
         engine = self._conf_str("search_engine", "bing").lower()
         return SEARCH_PRESETS.get(engine, DEFAULT_SEARCH_URL)
+
+    def _foreign_keep_names(self) -> set[str]:
+        """沉浸模式放行的「其他插件工具」：静态白名单 + 运行时自动发现。
+
+        ★ 为什么动态发现：FOREIGN_KEEP 是手写清单，新加工具忘了同步就会
+          在沉浸模式里被静默过滤（表现是模型死活不调这个工具）。
+          这里直接问 AstrBot 的工具管理器要当前所有已注册工具，
+          把非本插件的全部放行，以后加工具不用改这个文件。
+        """
+        keep: set[str] = set(FOREIGN_KEEP)
+        try:
+            manager = self.context.get_llm_tool_manager()
+            for tool in getattr(manager, "func_list", None) or []:
+                name = str(getattr(tool, "name", "") or "")
+                if name and name not in TOOL_NAMES:
+                    keep.add(name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[toolbox] 动态发现外来工具失败（用静态白名单）: {exc}")
+        return keep
 
     def _normalize_rp_mode(self) -> None:
         """沉浸模式与半沉浸模式【互斥】：两个都开着就关掉半沉浸并写回配置。
@@ -818,8 +837,9 @@ class NcdToolboxPlugin(star.Star):
 
             if req.func_tool:
                 before = [tool.name for tool in req.func_tool.tools]
+                foreign_keep = self._foreign_keep_names()
                 for name in before:
-                    if name not in TOOL_NAMES and name not in FOREIGN_KEEP:
+                    if name not in TOOL_NAMES and name not in foreign_keep:
                         req.func_tool.remove_tool(name)
 
         # 工具菜单：只留 ncd_tools 常驻，其余等模型点开才给（见 _apply_tool_menu）。

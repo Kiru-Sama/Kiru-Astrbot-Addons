@@ -583,6 +583,35 @@ class NcdExtraPlugin(star.Star):
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[extra] 配置落盘失败：{exc}")
 
+    # -------------------- 工具气泡（会话级 + 全局默认） -------------------- #
+    def _tooldisplay_path(self):
+        return PLUGIN_DIR.parents[1] / "plugin_data" / "ncd_extra" / "tooldisplay_sessions.json"
+
+    def _tooldisplay_sessions(self) -> dict:
+        try:
+            p = self._tooldisplay_path()
+            if p.is_file():
+                return json.loads(p.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+
+    def _tooldisplay_save(self, sessions: dict) -> None:
+        try:
+            p = self._tooldisplay_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(sessions, ensure_ascii=False), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] tooldisplay 会话状态保存失败: {exc}")
+
+    def _tooldisplay_on(self, event) -> bool:
+        """当前会话是否显示工具气泡：会话覆盖 > 全局默认。"""
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        sessions = self._tooldisplay_sessions()
+        if umo and umo in sessions:
+            return bool(sessions[umo])
+        return as_bool(self._cfg("tooldisplay", False), False)
+
     # ---------------------------- 公告 ---------------------------- #
     def _announce_admin(self, event: AstrMessageEvent) -> bool:
         if self._is_admin(event):
@@ -1209,39 +1238,75 @@ class NcdExtraPlugin(star.Star):
     # ====================================================================== #
     @filter.command("tooldisplay")
     async def tooldisplay(self, event: AstrMessageEvent, args: GreedyStr):
-        """开关工具调用气泡：/tooldisplay on|off|status"""
+        """开关工具调用气泡：/tooldisplay on|off（本会话）/ all on|off（全局默认）/ status"""
         if not self._is_admin(event):
             yield event.plain_result("这个指令只有管理员能用。")
             return
         word = str(args or "").strip()
-        enabled = as_bool(self._cfg("tooldisplay", False), False)
-        if not word or word.lower() in {"status", "状态"}:
-            yield event.plain_result(self._tooldisplay_status(enabled, event))
+        parts = word.split()
+        scope = "session"
+        if parts and parts[0].lower() in {"all", "global", "全局", "所有"}:
+            scope = "global"
+            parts = parts[1:]
+        body = " ".join(parts).strip()
+
+        if not body or body.lower() in {"status", "状态"}:
+            yield event.plain_result(self._tooldisplay_status(event))
             return
-        target = parse_onoff(word)
+
+        target = parse_onoff(body)
         if target is None:
-            yield event.plain_result("用法：/tooldisplay on|off|status")
+            yield event.plain_result(
+                "用法：\n"
+                "/tooldisplay on|off     —— 只改当前会话\n"
+                "/tooldisplay all on|off —— 改全局默认（没单独设置的会话跟随它）\n"
+                "/tooldisplay status     —— 查看当前会话和全局默认"
+            )
             return
-        self._save_cfg(tooldisplay=target)
+
+        if scope == "global":
+            self._save_cfg(tooldisplay=target)
+            yield event.plain_result(
+                f"全局默认工具气泡：{'已开启 ✅' if target else '已关闭 ⛔'}\n"
+                "（当前会话如果单独设置过，仍以会话设置为准；用 /tooldisplay status 查看）"
+            )
+            return
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        sessions = self._tooldisplay_sessions()
+        if umo:
+            sessions[umo] = target
+            while len(sessions) > 500:
+                sessions.pop(next(iter(sessions)), None)
+        self._tooldisplay_save(sessions)
         tip = ""
         if target and self._native_setting(event.unified_msg_origin, "show_tool_use_status"):
             tip = "\n注：AstrBot 原生工具气泡已开启，本插件会自动让路，不会重复发。"
         yield event.plain_result(
-            f"工具调用气泡：{'已开启 ✅' if target else '已关闭 ⛔'}{tip}"
+            f"当前会话工具气泡：{'已开启 ✅' if target else '已关闭 ⛔'}{tip}"
         )
 
-    def _tooldisplay_status(self, enabled: bool, event: AstrMessageEvent | None) -> str:
-        native = False
-        if event is not None:
-            native = self._native_setting(event.unified_msg_origin, "show_tool_use_status")
+    def _tooldisplay_status(self, event: AstrMessageEvent) -> str:
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        sessions = self._tooldisplay_sessions()
+        override = sessions.get(umo) if umo else None
+        default = as_bool(self._cfg("tooldisplay", False), False)
+        effective = bool(override) if override is not None else default
+        native = self._native_setting(umo, "show_tool_use_status") if umo else False
+
+        source = (
+            "本会话单独设置" if override is not None else "跟随全局默认"
+        )
         lines = [
-            f"工具调用气泡：{'开启 ✅' if enabled else '关闭 ⛔'}",
+            f"工具调用气泡（当前会话）：{'开启 ✅' if effective else '关闭 ⛔'}（{source}）",
+            f"全局默认：{'开启' if default else '关闭'}"
+            + ("" if override is None else "（本会话已覆盖）"),
             f"显示参数：{'是' if as_bool(self._cfg('tooldisplay_show_args', True), True) else '否'}"
             f" · 显示返回：{'是' if as_bool(self._cfg('tooldisplay_show_result', False)) else '否'}",
         ]
         if native:
             lines.append("AstrBot 原生开关：已开启（本插件自动让路）")
-        lines.append("切换：/tooldisplay on 或 /tooldisplay off")
+        lines.append("切换：/tooldisplay on|off（本会话） · /tooldisplay all on|off（全局默认）")
         return "\n".join(lines)
 
     @filter.llm_tool(name="extend_turns")
@@ -1326,7 +1391,7 @@ class NcdExtraPlugin(star.Star):
     @filter.on_using_llm_tool()
     async def _on_tool_bubble(self, event: AstrMessageEvent, tool: Any, tool_args: Any):
         """在工具真正执行前发一条气泡。"""
-        if not as_bool(self._cfg("tooldisplay", False)):
+        if not self._tooldisplay_on(event):
             return
         if self._native_setting(event.unified_msg_origin, "show_tool_use_status"):
             return  # 原生已经在发，别重复
@@ -1350,7 +1415,7 @@ class NcdExtraPlugin(star.Star):
         tool_result: Any,
     ):
         """可选：工具返回后补一条带结果的摘要。"""
-        if not as_bool(self._cfg("tooldisplay", False)):
+        if not self._tooldisplay_on(event):
             return
         if not as_bool(self._cfg("tooldisplay_show_result", False)):
             return

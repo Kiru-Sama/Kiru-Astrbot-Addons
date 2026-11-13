@@ -103,6 +103,12 @@
 .q-scope .num { font-variant-numeric:tabular-nums; }
 .q-scope .name { font-weight:600; }
 .q-scope .uid { color:var(--muted); font-size:11px; }
+.q-scope .mini { font-size:11px; padding:1px 7px; margin-left:6px; border-radius:6px;
+    border:1px solid var(--border); background:var(--card); color:var(--accent);
+    cursor:pointer; line-height:1.5; }
+.q-scope .mini:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
+.q-scope .editing { font-size:12.5px; color:var(--muted); margin:4px 0 8px; }
+.q-scope .editing b { color:var(--text); font-weight:600; }
 .q-scope .badge { display:inline-block; font-size:11px; padding:1px 7px; border-radius:999px;
     background:var(--track); color:var(--muted); margin-right:4px; white-space:nowrap; }
 .q-scope .badge.bad { background:#fdecec; color:var(--bad); }
@@ -222,6 +228,7 @@
   <h2 style="margin-top:18px">赞助者单独额度
     <span class="sub">仍计入张数/排行，不占普通前 5/前 3</span>
   </h2>
+  <div class="editing" id="q-sfEditing">当前：新增赞助者</div>
   <div class="ctrls" id="q-sponsorFields"></div>
   <div class="actions">
     <button id="q-saveSponsor" class="primary" type="button">保存赞助者</button>
@@ -506,12 +513,12 @@ function buildFields() {
   _fieldsBuilt = true;
   const gf = $("q-globalFields");
   const sf = $("q-sponsorFields");
-  if (gf) GLOBAL_FIELDS.forEach((f) => makeField(f, gf, "gf_"));
-  if (sf) SPONSOR_FIELDS.forEach((f) => makeField(f, sf, "sf_"));
+  if (gf) GLOBAL_FIELDS.forEach((f) => makeField(f, gf, "q-gf_"));
+  if (sf) SPONSOR_FIELDS.forEach((f) => makeField(f, sf, "q-sf_"));
 }
 function fillGlobal(cfg) {
   GLOBAL_FIELDS.forEach((f) => {
-    const node = $("gf_" + f.k);
+    const node = $("q-gf_" + f.k);
     if (!node) return;
     const v = cfg ? cfg[f.k] : undefined;
     if (f.type === "bool") node.checked = !!v;
@@ -522,7 +529,7 @@ function fillGlobal(cfg) {
 function readGlobal() {
   const out = {};
   GLOBAL_FIELDS.forEach((f) => {
-    const node = $("gf_" + f.k);
+    const node = $("q-gf_" + f.k);
     if (!node) return;
     if (f.type === "bool") out[f.k] = !!node.checked;
     else if (f.type === "text") out[f.k] = node.value.trim();
@@ -544,11 +551,25 @@ async function saveGlobal(values, doneText) {
 function fillSponsor(ov) {
   const data = ov || {};
   SPONSOR_FIELDS.forEach((f) => {
-    const node = $("sf_" + f.k);
+    const node = $("q-sf_" + f.k);
     if (!node) return;
     const v = data[f.k];
     node.value = v === undefined || v === null ? "" : v;
   });
+  const tip = $("q-sfEditing");
+  if (tip) {
+    const uid = String(data.user_id || "").trim();
+    const nm = String(data.note || data.name || "").trim();
+    if (uid) {
+      tip.replaceChildren(
+        document.createTextNode("当前编辑："),
+        el("b", "", nm || uid),
+        document.createTextNode(nm ? "（" + uid + "）" : "（" + uid + "）")
+      );
+    } else {
+      tip.textContent = "当前：新增赞助者";
+    }
+  }
 }
 function readSponsor() {
   const uid = ($("q-sf_user_id") || {}).value || "";
@@ -557,7 +578,7 @@ function readSponsor() {
   if (note) overrides.note = note;
   ["queue_cap", "interval_seconds", "canvas_max_side",
     "degrade_after", "degrade_steps", "ban_after", "ban_hours"].forEach((k) => {
-    const node = $("sf_" + k);
+    const node = $("q-sf_" + k);
     if (node && node.value !== "") overrides[k] = Number(node.value);
   });
   return { user_id: uid.trim(), overrides };
@@ -598,7 +619,13 @@ function renderSponsors(overrides) {
     row.appendChild(el("div", "sum", bits.join(" · ") || "全部默认，仅不占池"));
     const edit = el("button", "", "编辑");
     edit.type = "button";
-    edit.onclick = () => fillSponsor({ ...ov, user_id: uid });
+    edit.onclick = () => {
+      fillSponsor({ ...ov, user_id: uid, note: ov.note || ov.name || "" });
+      const box = $("q-sponsorFields");
+      if (box && box.scrollIntoView) {
+        box.scrollIntoView({ block: "center", behavior: "smooth" });
+      }
+    };
     row.appendChild(edit);
     const del = el("button", "", "删除");
     del.type = "button";
@@ -668,7 +695,22 @@ function renderBoard(data) {
     const who = el("td");
     const nm = nameOf(row);
     who.appendChild(el("div", "name", nm.name));
-    if (nm.uid) who.appendChild(el("div", "uid", nm.uid));
+    if (nm.uid) {
+      const uidRow = el("div", "uid");
+      uidRow.appendChild(document.createTextNode(nm.uid + " "));
+      const addBtn = el("button", "mini", "+赞助");
+      addBtn.title = "添加为赞助者";
+      addBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        fillSponsor({ user_id: nm.uid, note: nm.name });
+        const box = $("q-sponsorFields");
+        if (box && box.scrollIntoView) {
+          box.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+      });
+      uidRow.appendChild(addBtn);
+      who.appendChild(uidRow);
+    }
     tr.appendChild(who);
     if (board === "daily") {
       tr.appendChild(el("td", "num", String(row.count || 0)));
@@ -848,7 +890,9 @@ $("q-saveSponsor").addEventListener("click", async () => {
   try {
     const r = await P.apiPost("/ncd-comfy/quota/sponsor", payload);
     if (r && r.error) throw new Error(r.error);
-    setStatus("赞助者 " + payload.user_id + " 已保存", "ok");
+    const who = (payload.overrides.note || payload.user_id).trim();
+    setStatus("已保存赞助者：" + who + "（" + payload.user_id + "）", "ok");
+    fillSponsor({});
     load();
   } catch (err) {
     setStatus("保存失败：" + (err && err.message ? err.message : err), "err");

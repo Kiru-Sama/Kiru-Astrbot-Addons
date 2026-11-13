@@ -535,19 +535,19 @@ class NaturalChat(Star):
         block = ""
         if prof_lines:
             block += (
-                "\n\n# 你平时说话的样子\n"
+                "\n\n（参考：你平时说话的样子）\n"
                 + "\n".join(prof_lines)
             )
-        block += "\n\n# 你以前真实发过的话（照这个感觉说，别照抄）\n" + "\n".join(lines)
+        block += "\n\n（参考：你以前真实发过的话，找这个语感，别照抄）\n" + "\n".join(lines)
 
         max_chars = self._eff_max_chars()
         if len(block) > max_chars:
             block = block[:max_chars] + "…"
 
         try:
-            # ★ 2026-11-09：动态内容放到「用户消息」前，system_prompt 保持静态
-            #   （缓存前缀不变，命中率不会因为每轮追加而掉光）
-            req.prompt = block.strip() + "\n\n" + (req.prompt or "")
+            # ★ 2026-11-09：动态内容放到「用户消息」最后（AI 先看到用户原话，再看到参考，
+            #   不会一开始就被参考语料带出戏）
+            req.prompt = (req.prompt or "") + "\n\n" + block.strip()
             self._rounds.appendleft({
                 "ts": time.time(), "kind": "inject", "umo": umo,
                 "persona": persona, "k": len(lines), "chars": len(block),
@@ -575,7 +575,16 @@ class NaturalChat(Star):
             return
 
         result = event.get_result()
-        chain = getattr(result, "chain", None) if result is not None else None
+        if result is None:
+            return
+        # ★ 只有 LLM 生成的回复才分条；命令回执（/人格、/审核 等 plain_result）不分条。
+        #   MessageEventResult.is_llm_result() 是 AstrBot 自带的判定，比猜 extra 可靠。
+        try:
+            if not result.is_llm_result():
+                return
+        except Exception:  # noqa: BLE001
+            pass
+        chain = getattr(result, "chain", None)
         if not chain:
             return
 

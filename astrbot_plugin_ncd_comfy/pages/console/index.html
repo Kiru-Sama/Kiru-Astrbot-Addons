@@ -1,0 +1,1462 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Comfy 操控台</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root {
+    --bg:#f6f7f9; --card:#fff; --border:#e5e8ee; --text:#1f2329;
+    --muted:#8a919b; --accent:#3b82f6; --ok:#16a34a; --bad:#dc2626;
+    --warn:#d97706; --track:#f1f3f6; --soft:#eef2f8;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif; padding:16px; }
+  header { display:flex; align-items:center; gap:12px; margin-bottom:12px; flex-wrap:wrap; }
+  h1 { font-size:17px; margin:0; }
+  h2 { font-size:12px; color:var(--muted); margin:0 0 10px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.04em; }
+  .sub { color:var(--muted); font-size:12px; }
+  .spacer { flex:1; }
+  button { font:inherit; border:1px solid var(--border); border-radius:8px;
+    padding:7px 12px; background:var(--card); color:var(--text); cursor:pointer; }
+  button:hover { background:var(--track); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.primary:hover { filter:brightness(1.05); }
+  button.danger { color:var(--bad); border-color:#f3c3c3; }
+  .statusbar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }
+  .pill { background:var(--card); border:1px solid var(--border); border-radius:999px;
+    padding:5px 12px; font-size:12px; display:flex; gap:6px; align-items:center; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); }
+  .dot.warn { background:var(--warn); }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+    gap:12px; margin-bottom:12px; }
+  .card { background:var(--card); border:1px solid var(--border);
+    border-radius:12px; padding:14px; }
+  .kpi .num { font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
+  .kpi .label { color:var(--muted); font-size:12px; }
+  .kpi .hint { color:var(--muted); font-size:11px; margin-top:2px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--border);
+    font-size:13px; vertical-align:middle; }
+  th { color:var(--muted); font-size:11px; font-weight:600; }
+  tr:last-child td { border-bottom:none; }
+  input, select { font:inherit; border:1px solid var(--border); border-radius:8px;
+    padding:6px 9px; background:var(--card); color:var(--text); width:100%; }
+  input:focus, select:focus { outline:2px solid #c7dbff; border-color:var(--accent); }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:10px; }
+  .field { margin-bottom:10px; }
+  .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .field .desc { font-size:11px; color:var(--muted); margin-top:3px; }
+  .muted { color:var(--muted); font-size:12px; }
+  .bar { height:7px; background:var(--track); border-radius:999px; overflow:hidden; margin-top:8px; }
+  .bar > i { display:block; height:100%; background:var(--accent); border-radius:999px; }
+  .bar.hot > i { background:var(--warn); } .bar.over > i { background:var(--bad); }
+  details { background:var(--card); border:1px solid var(--border); border-radius:12px;
+    padding:12px; margin-bottom:10px; }
+  summary { cursor:pointer; font-weight:600; font-size:13px; }
+  summary .n { color:var(--muted); font-weight:400; margin-left:6px; font-size:12px; }
+  .savebar { position:sticky; bottom:0; background:var(--bg); padding:10px 0;
+    display:flex; gap:8px; align-items:center; border-top:1px solid var(--border); }
+  .badge { font-size:11px; padding:1px 7px; border-radius:6px; background:var(--soft);
+    color:var(--accent); }
+  .badge.bad { background:#fdecec; color:var(--bad); }
+  .toast { position:fixed; right:18px; bottom:18px; background:#111; color:#fff;
+    padding:9px 14px; border-radius:9px; font-size:13px; opacity:0;
+    transition:opacity .2s; pointer-events:none; z-index:99; }
+  .toast.show { opacity:.92; }
+
+/* ============ 内嵌「完整图库」样式（作用域：#galleryApp 内部） ============ */
+#galleryApp .g-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+#galleryApp .g-grow { flex:1; }
+#galleryApp .g-sub { color:var(--muted); font-size:12px; }
+#galleryApp .g-layout { display:grid; grid-template-columns:260px minmax(0,1fr); gap:10px; align-items:start; }
+#galleryApp .g-panel { background:var(--card); border:1px solid var(--border); border-radius:12px; }
+#galleryApp .g-sessions { max-height:64vh; overflow:auto; padding:6px; }
+#galleryApp .g-sess { padding:8px 10px; border-radius:8px; cursor:pointer; }
+#galleryApp .g-sess:hover { background:var(--track); }
+#galleryApp .g-sess.on { background:var(--soft); }
+#galleryApp .g-sess .t { font-size:13px; font-weight:600; }
+#galleryApp .g-sess .m { font-size:11px; color:var(--muted); }
+#galleryApp .g-main { padding:10px; min-height:140px; }
+#galleryApp .g-igrid { display:grid; grid-template-columns:repeat(auto-fill,minmax(132px,1fr)); gap:8px; }
+#galleryApp .g-cell { border:1px solid var(--border); border-radius:10px; overflow:hidden; background:#fafbfc; cursor:pointer; position:relative; aspect-ratio:3/4; }
+#galleryApp .g-cell img { width:100%; height:100%; object-fit:cover; display:block; }
+#galleryApp .g-cell .ph { display:flex; align-items:center; justify-content:center; height:100%; color:var(--muted); font-size:11px; }
+#galleryApp .g-cell .info { position:absolute; left:0; right:0; bottom:0; padding:4px 6px; background:linear-gradient(transparent, rgba(0,0,0,.65)); color:#fff; font-size:10px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+#galleryApp .g-empty { color:var(--muted); padding:22px; text-align:center; font-size:13px; }
+#galleryApp .g-status { color:var(--muted); font-size:12px; margin-top:8px; min-height:16px; }
+#galleryApp .g-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.72); z-index:60; align-items:center; justify-content:center; padding:18px; }
+#galleryApp .g-modal .box { background:var(--card); border-radius:14px; max-width:94vw; max-height:92vh; overflow:hidden; padding:10px; display:flex; gap:12px; }
+#galleryApp .g-modal img { max-width:56vw; max-height:82vh; display:block; border-radius:8px; object-fit:contain; background:#0b0e13; flex:0 0 auto; }
+#galleryApp .g-modal .meta { color:var(--muted); font-size:12.5px; padding:2px 0; white-space:pre-wrap; word-break:break-word; overflow:auto; flex:1 1 auto; min-width:240px; max-height:82vh; }
+@media (max-width:900px) {
+  #galleryApp .g-layout { grid-template-columns:1fr; }
+  #galleryApp .g-sessions { max-height:34vh; }
+}
+@media (max-width:700px) {
+  #galleryApp .g-modal .box { flex-direction:column; padding:8px; }
+  #galleryApp .g-modal img { max-width:88vw; max-height:60vh; }
+  #galleryApp .g-modal .meta { min-width:0; max-height:26vh; }
+}
+
+/* ============ 内嵌「完整额度」样式（作用域：#quotaApp 内部） ============ */
+#quotaApp .qhead { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }
+#quotaApp .qwin { color:var(--muted); font-size:12px; }
+#quotaApp .qgrow { flex:1; }
+#quotaApp .sub { color:var(--muted); font-size:12px; }
+#quotaApp h2 { font-size:12px; color:var(--muted); margin:0 0 10px; font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+#quotaApp .tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px; }
+#quotaApp .tabs button { padding:4px 9px; font-size:12px; border-radius:999px; color:var(--muted); }
+#quotaApp .tabs button.on { background:var(--soft); color:var(--accent); border-color:#c7dbff; }
+#quotaApp .cards { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:10px; margin-bottom:10px; }
+#quotaApp .card { background:var(--card); border:1px solid var(--border); border-radius:12px; padding:12px; }
+#quotaApp .kpi .num { font-size:22px; font-weight:700; font-variant-numeric:tabular-nums; }
+#quotaApp .kpi .label { color:var(--muted); font-size:12px; }
+#quotaApp .kpi .hint { color:var(--muted); font-size:11px; margin-top:2px; }
+#quotaApp .bar { height:7px; background:var(--track); border-radius:999px; overflow:hidden; margin-top:8px; }
+#quotaApp .bar > i { display:block; height:100%; background:var(--accent); border-radius:999px; }
+#quotaApp .bar.hot > i { background:var(--warn); }
+#quotaApp .bar.over > i { background:var(--bad); }
+#quotaApp .grid { display:grid; grid-template-columns:minmax(0,1.6fr) minmax(0,1fr); gap:10px; }
+#quotaApp table { width:100%; border-collapse:collapse; }
+#quotaApp th, #quotaApp td { text-align:left; padding:7px 8px; border-bottom:1px solid var(--border); font-size:13px; vertical-align:middle; }
+#quotaApp th { color:var(--muted); font-size:11px; font-weight:600; }
+#quotaApp tr:last-child td { border-bottom:none; }
+#quotaApp .num { font-variant-numeric:tabular-nums; }
+#quotaApp .name { font-weight:600; }
+#quotaApp .uid { color:var(--muted); font-size:11px; }
+#quotaApp .mini { font-size:11px; padding:1px 7px; margin-left:6px; border-radius:6px; border:1px solid var(--border); background:var(--card); color:var(--accent); cursor:pointer; line-height:1.5; }
+#quotaApp .mini:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
+#quotaApp .qbar { height:5px; background:var(--track); border-radius:999px; overflow:hidden; margin-top:3px; }
+#quotaApp .qbar > i { display:block; height:100%; background:var(--accent); }
+#quotaApp .qbar > i.warn { background:var(--warn); }
+#quotaApp .qbar > i.bad { background:var(--bad); }
+#quotaApp .editing { font-size:12.5px; color:var(--muted); margin:4px 0 8px; }
+#quotaApp .editing b { color:var(--text); font-weight:600; }
+#quotaApp .badge { display:inline-block; font-size:11px; padding:1px 7px; border-radius:999px; background:var(--track); color:var(--muted); margin-right:4px; white-space:nowrap; }
+#quotaApp .badge.bad { background:#fdecec; color:var(--bad); }
+#quotaApp .badge.warn { background:#fff7e6; color:var(--warn); }
+#quotaApp .badge.ok { background:#eaf7ee; color:var(--ok); }
+#quotaApp .badge.blue { background:#eaf2ff; color:#1d4ed8; }
+#quotaApp .empty { color:var(--muted); text-align:center; padding:22px 8px; }
+#quotaApp .watch-row { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px solid var(--border); }
+#quotaApp .watch-row:last-child { border-bottom:none; }
+#quotaApp .watch-main { min-width:0; flex:1; }
+#quotaApp .watch-top { display:flex; align-items:baseline; gap:8px; }
+#quotaApp .watch-top .n { font-weight:600; font-size:13px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#quotaApp .watch-top .c { margin-left:auto; color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums; }
+#quotaApp .status { margin-top:10px; font-size:12px; color:var(--muted); min-height:18px; }
+#quotaApp .status.err { color:var(--bad); }
+#quotaApp .status.ok { color:var(--ok); }
+#quotaApp .notice { background:#fff7e6; border:1px solid #f5d9a8; color:#8a5a00; border-radius:10px; padding:9px 12px; font-size:12px; margin-bottom:10px; }
+#quotaApp .notice b { font-weight:700; }
+#quotaApp button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+#quotaApp .ctrls { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:8px 12px; }
+#quotaApp .ctrl { display:flex; flex-direction:column; gap:3px; min-width:0; }
+#quotaApp .ctrl label { font-size:11px; color:var(--muted); }
+#quotaApp .ctrl input { width:100%; padding:5px 7px; border:1px solid var(--border); border-radius:7px; font:13px/1.4 "Segoe UI","Microsoft YaHei",sans-serif; color:var(--text); background:#fbfcfe; }
+#quotaApp .ctrl input[type=checkbox] { width:auto; align-self:flex-start; }
+#quotaApp .actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+#quotaApp .sponsor-row { display:flex; align-items:center; gap:10px; padding:7px 0; border-bottom:1px solid var(--border); }
+#quotaApp .sponsor-row:last-child { border-bottom:none; }
+#quotaApp .sponsor-row .who { min-width:140px; }
+#quotaApp .sponsor-row .sum { flex:1; color:var(--muted); font-size:11px; }
+#quotaApp .sponsor-row button { padding:3px 9px; font-size:12px; }
+@media (max-width:1440px) {
+  #quotaApp .cards { grid-template-columns:repeat(3,minmax(0,1fr)); }
+}
+@media (max-width:860px) {
+  #quotaApp .cards { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  #quotaApp .cards > .card:last-child:nth-child(odd) { grid-column:1 / -1; }
+  #quotaApp .grid { grid-template-columns:1fr; }
+  #quotaApp .ctrls { grid-template-columns:repeat(2,minmax(0,1fr)); }
+}
+
+</style>
+</head>
+<body>
+<header>
+  <h1>Comfy 操控台</h1>
+  <span class="sub" id="updated">—</span>
+  <span class="spacer"></span>
+  <button id="btnRefresh">刷新状态</button>
+</header>
+
+<div class="statusbar" id="statusbar"></div>
+
+<div class="cards" id="cards"></div>
+
+<details open>
+  <summary>出图参数（当前默认预设）<span class="n" id="presetInfo"></span></summary>
+  <div id="presetBox" class="grid2"></div>
+</details>
+
+<details open>
+  <summary>LoRA 市场<span class="n">搜索 / 下载 / bot下载配额</span></summary>
+  <div class="grid2" style="margin-bottom:10px">
+    <div class="field"><label>搜索关键词</label><input id="loraQuery" placeholder="角色名 / 画风 / 作者" /></div>
+    <div class="field"><label>排序</label>
+      <select id="loraSort">
+        <option value="hot">下载量最高</option>
+        <option value="new">最新发布</option>
+        <option value="liked">点赞最多</option>
+      </select>
+    </div>
+    <div class="field"><label>底模（可空）</label>
+      <input id="loraBase" placeholder="Anima / MOSS / Illustrious …" />
+    </div>
+    <div class="field" style="display:flex;align-items:flex-end">
+      <button class="primary" id="btnSearchLora" style="width:100%">搜索 LoRA</button>
+    </div>
+  </div>
+  <div id="loraQuota" class="muted" style="margin-bottom:8px"></div>
+  <table id="loraTable"><thead><tr>
+    <th>名字</th><th>底模</th><th>大小</th><th>发布</th><th>下载量</th><th>操作</th>
+  </tr></thead><tbody></tbody></table>
+</details>
+
+<details>
+  <summary>额度概览<span class="n" id="quotaInfo"></span></summary>
+  <div id="quotaBox"></div>
+</details>
+
+<details>
+  <summary>全部配置<span class="n" id="cfgCount"></span></summary>
+  <div id="configBox"></div>
+  <div class="savebar">
+    <button class="primary" id="btnSave">保存修改</button>
+    <span class="muted" id="saveTip">改完点保存，立即生效</span>
+  </div>
+</details>
+
+<details id="detGallery">
+  <summary>图库（完整）<span class="n">会话列表 / 缩略图 / 大图</span></summary>
+  <div id="galleryApp">
+    <div class="g-head">
+      <span class="g-sub" id="g-summary">展开时加载…</span>
+      <span class="g-grow"></span>
+      <button type="button" id="g-refresh">刷新</button>
+    </div>
+    <div class="g-layout">
+      <div class="g-panel g-sessions" id="g-sessions"></div>
+      <div class="g-panel g-main">
+        <div id="g-grid" class="g-igrid"></div>
+        <div id="g-empty" class="g-empty" style="display:none">点左边选一个会话</div>
+      </div>
+    </div>
+    <div class="g-status" id="g-status"></div>
+    <div class="g-modal" id="g-modal">
+      <div class="box">
+        <img id="g-modal-img" alt="" />
+        <div class="meta" id="g-modal-meta"></div>
+      </div>
+    </div>
+  </div>
+</details>
+
+<details id="detQuota">
+  <summary>额度（完整）<span class="n">看板 / 排行 / 阈值 / 赞助者</span></summary>
+  <div id="quotaApp">
+    <div class="qhead">
+      <span class="qwin" id="q-window">加载中…</span>
+      <span class="qgrow"></span>
+      <button type="button" id="q-refresh">刷新</button>
+    </div>
+
+    <div class="notice" id="q-notice">
+      <b>统计阶段：</b>队列上限、间隔、画幅尚未拦截；50 张降质、70 张禁生图已拦截。
+    </div>
+
+    <div class="cards" id="q-cards"></div>
+
+    <div class="grid">
+      <section class="card">
+        <h2>排行榜 <span class="sub">生图 / 发言 · 日榜 / 总榜</span></h2>
+        <div class="tabs" id="q-rank-tabs"></div>
+        <div id="q-rank"><div class="empty">加载中…</div></div>
+      </section>
+      <section class="card">
+        <h2>50 / 70 进度 <span class="sub">按个人阈值</span></h2>
+        <div id="q-watch"><div class="empty">加载中…</div></div>
+      </section>
+    </div>
+
+    <section class="card" style="margin-top:10px">
+      <h2>禁生图</h2>
+      <div id="q-bans"><div class="empty">加载中…</div></div>
+    </section>
+
+    <section class="card" style="margin-top:10px" id="q-controlCard">
+      <h2>数值控制 <span class="sub">保存后立即生效 · 面板与插件配置同一份文件</span></h2>
+      <div class="ctrls" id="q-globalFields"></div>
+      <div class="actions">
+        <button id="q-saveConfig" class="primary" type="button">保存全局阈值</button>
+        <button id="q-resetConfig" type="button">恢复默认数值</button>
+      </div>
+
+      <h2 style="margin-top:16px">赞助者单独额度
+        <span class="sub">仍计入张数/排行，不占普通前 5/前 3</span>
+      </h2>
+      <div class="editing" id="q-sfEditing">当前：新增赞助者</div>
+      <div class="ctrls" id="q-sponsorFields"></div>
+      <div class="actions">
+        <button id="q-saveSponsor" class="primary" type="button">保存赞助者</button>
+        <button id="q-clearSponsor" type="button">清空表单</button>
+      </div>
+      <div id="q-sponsorList" style="margin-top:8px">
+        <div class="empty">还没有赞助者。</div>
+      </div>
+    </section>
+
+    <div class="status" id="q-status"></div>
+  </div>
+</details>
+
+<details id="detTips">
+  <summary>生图 tips<span class="n">随机显示在进度消息后面</span></summary>
+  <div style="padding:6px 0">
+    <div class="muted" style="margin-bottom:8px">每行一条，随机挑一条显示在「正在加载模型权重…」和「开始采样了…」后面。留空则不显示。</div>
+    <textarea id="tipsBox" style="width:100%;min-height:180px;border:1px solid var(--border);border-radius:10px;padding:10px;font:13px/1.6 'Segoe UI','Microsoft YaHei',sans-serif;resize:vertical"></textarea>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:8px">
+      <button class="primary" id="btnSaveTips">保存 tips</button>
+      <span class="muted" id="tipsCount"></span>
+    </div>
+  </div>
+</details>
+
+<details>
+  <summary>系统操作</summary>
+  <div class="grid2">
+    <button id="btnClean">清理模型/预设缓存</button>
+    <button id="btnRestart" class="danger">请求重启 ComfyUI</button>
+  </div>
+  <div class="muted" style="margin-top:8px" id="sysInfo"></div>
+</details>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const P = window.AstrBotPluginPage;
+const $ = (id) => document.getElementById(id);
+let state = null;
+let configItems = null;
+const dirty = {};
+
+function toast(msg, ms) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), ms || 2200);
+}
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined && text !== null) n.textContent = text;
+  return n;
+}
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(2) + " GB";
+  if (n >= 1024 ** 2) return (n / 1024 ** 2).toFixed(1) + " MB";
+  if (n >= 1024) return (n / 1024).toFixed(0) + " KB";
+  return n + " B";
+}
+function fmtAge(days) {
+  if (days === undefined || days === null || days < 0) return "—";
+  if (days === 0) return "今天";
+  if (days === 1) return "昨天";
+  if (days < 30) return days + " 天前";
+  if (days < 365) return Math.floor(days / 30) + " 个月前";
+  return Math.floor(days / 365) + " 年前";
+}
+function pill(dotClass, label, value) {
+  const p = el("span", "pill");
+  p.appendChild(el("span", "dot " + dotClass));
+  p.appendChild(el("span", "", label));
+  const v = el("b", "", value);
+  p.appendChild(v);
+  return p;
+}
+
+async function loadState() {
+  try {
+    const raw = await P.apiGet("/ncd-comfy/console/state");
+    state = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
+    if (!state || !state.now) throw new Error("返回结构不对");
+    renderState();
+    $("updated").textContent = "更新于 " + (state.now || "");
+  } catch (e) {
+    toast("状态加载失败：" + e.message);
+  }
+}
+
+function renderState() {
+  if (!state) return;
+  const bar = $("statusbar");
+  bar.replaceChildren();
+  const link = state.link || {};
+  bar.appendChild(pill(link.healthy ? "ok" : "bad", "ComfyUI", link.healthy ? "在线" : "离线"));
+  bar.appendChild(pill(link.healthy ? "ok" : "warn", "链路", link.remote ? "远程" : "本地"));
+  bar.appendChild(pill("", "地址", (link.host || "?") + ":" + (link.port || "?")));
+  const q = state.quota || {};
+  bar.appendChild(pill(q.enforce ? "ok" : "warn", "额度", q.enforce ? "生效" : "关闭"));
+  const lb = state.lora_bot || {};
+  bar.appendChild(pill(lb.free_low ? "warn" : (lb.over_limit ? "bad" : "ok"),
+    "bot下载", (lb.used_text || "?") + " / " + (lb.limit_text || "8 GB")));
+  bar.appendChild(pill(lb.free_low ? "warn" : "ok", "磁盘", lb.free_text || "?"));
+  const g = state.gallery || {};
+  bar.appendChild(pill("", "图库", (g.sessions || 0) + " 会话 · " + (g.images || 0) + " 张"));
+
+  const cards = $("cards");
+  cards.replaceChildren();
+  const cur = (state.presets || []).find((p) => p.name === state.default_preset) || {};
+  const card1 = el("div", "card kpi");
+  card1.append(el("div", "num", cur.label || state.default_preset || "—"));
+  card1.append(el("div", "label", "当前默认预设"));
+  card1.append(el("div", "hint", (cur.model || "模型未知")));
+  cards.appendChild(card1);
+
+  const card2 = el("div", "card kpi");
+  card2.append(el("div", "num", (lb.count || 0) + " 个"));
+  card2.append(el("div", "label", "bot 下载 LoRA"));
+  const pct = lb.limit_bytes ? Math.min(1, (lb.used_bytes || 0) / lb.limit_bytes) : 0;
+  const b2 = el("div", "bar" + (pct > 0.9 ? " over" : pct > 0.7 ? " hot" : ""));
+  const i2 = el("i");
+  i2.style.width = (pct * 100).toFixed(1) + "%";
+  b2.appendChild(i2);
+  card2.appendChild(b2);
+  cards.appendChild(card2);
+
+  const card3 = el("div", "card kpi");
+  const topRow = (state.quota && state.quota.ranking && state.quota.ranking[0]) || null;
+  card3.append(el("div", "num", topRow ? (topRow.count || topRow.total || 0) : "0"));
+  card3.append(el("div", "label", "今日第一（生图数）"));
+  card3.append(el("div", "hint", topRow ? (topRow.name || topRow.user_id || "") : "还没有记录"));
+  cards.appendChild(card3);
+
+  const pbox = $("presetBox");
+  pbox.replaceChildren();
+  (state.presets || []).forEach((p) => {
+    const f = el("div", "field");
+    const lab = el("label", "", (p.label || p.name) + "  ·  " + (p.name || ""));
+    f.appendChild(lab);
+    const val = el("div", "", p.error ? "工作流读取失败" : ((p.model || "?") + " · " + (p.width || "?") + "×" + (p.height || "?") + " · " + (p.steps || "?") + " 步 · CFG " + (p.cfg || "?")));
+    val.className = "muted";
+    f.appendChild(val);
+    pbox.appendChild(f);
+  });
+  $("presetInfo").textContent = "默认：" + (state.default_preset || "?");
+
+  const qbox = $("quotaBox");
+  qbox.replaceChildren();
+  const qq = state.quota || {};
+  const qinfo = el("div", "muted");
+  qinfo.textContent = "限额执行：" + (qq.enforce ? "开" : "关") + " · 禁生图：" + ((qq.bans || []).length) + " 人";
+  qbox.appendChild(qinfo);
+  const tbl = el("table");
+  const thead = el("thead");
+  const htr = el("tr");
+  ["#", "用户", "今日", "总数"].forEach((h) => htr.appendChild(el("th", "", h)));
+  thead.appendChild(htr);
+  tbl.appendChild(thead);
+  const tbody = el("tbody");
+  (qq.ranking || []).forEach((row, i) => {
+    const tr = el("tr");
+    tr.appendChild(el("td", "", String(i + 1)));
+    tr.appendChild(el("td", "", row.name || row.user_id || "?"));
+    tr.appendChild(el("td", "", String(row.count || 0)));
+    tr.appendChild(el("td", "", String(row.total || 0)));
+    tbody.appendChild(tr);
+  });
+  tbl.appendChild(tbody);
+  qbox.appendChild(tbl);
+  $("quotaInfo").textContent = "前 10 名";
+
+  // bot下载配额
+  const lq = $("loraQuota");
+  lq.textContent = "bot下载：" + (lb.used_text || "?") + " / " + (lb.limit_text || "8 GB")
+    + " · 磁盘剩余 " + (lb.free_text || "?") + (lb.over_limit ? " · 已超上限，下载被禁用" : "");
+  if (lb.over_limit || lb.free_low) lq.className = "badge bad";
+  else lq.className = "muted";
+
+  $("sysInfo").textContent = (state.link && state.link.remote ? "远程模式：" : "本地模式：")
+    + (state.link && state.link.host ? state.link.host + ":" + state.link.port : "");
+}
+
+async function loadConfig() {
+  try {
+    const raw = await P.apiGet("/ncd-comfy/console/config");
+    const cfg = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
+    configItems = cfg || {};
+    renderConfig();
+  } catch (e) {
+    toast("配置加载失败：" + e.message);
+  }
+}
+
+function renderConfig() {
+  const box = $("configBox");
+  box.replaceChildren();
+  const groups = {};
+  Object.entries(configItems).forEach(([key, item]) => {
+    const g = item.group || "misc";
+    (groups[g] = groups[g] || []).push([key, item]);
+  });
+  $("cfgCount").textContent = Object.keys(configItems).length + " 项";
+  Object.keys(groups).sort().forEach((g) => {
+    const det = el("details");
+    det.style.marginBottom = "6px";
+    const sum = el("summary");
+    sum.textContent = g;
+    sum.appendChild(el("span", "n", groups[g].length + " 项"));
+    det.appendChild(sum);
+    const wrap = el("div", "grid2");
+    wrap.style.marginTop = "10px";
+    groups[g].forEach(([key, item]) => {
+      const f = el("div", "field");
+      const lab = el("label", "", key);
+      f.appendChild(lab);
+      let input;
+      if (item.type === "bool") {
+        input = el("select");
+        [["true", "开"], ["false", "关"]].forEach(([v, t]) => {
+          const o = el("option", "", t);
+          o.value = v;
+          input.appendChild(o);
+        });
+        input.value = String(item.value === true || item.value === "true" || item.value === 1);
+      } else if (item.type === "int" || item.type === "float") {
+        input = el("input");
+        input.type = "number";
+        input.step = item.type === "float" ? "0.1" : "1";
+        input.value = item.value === null || item.value === undefined ? "" : item.value;
+      } else {
+        input = el("input");
+        input.value = item.value === null || item.value === undefined ? "" : String(item.value);
+      }
+      input.dataset.key = key;
+      input.dataset.type = item.type;
+      input.addEventListener("change", () => {
+        dirty[key] = input.value;
+      });
+      f.appendChild(input);
+      if (item.description) f.appendChild(el("div", "desc", item.description));
+      wrap.appendChild(f);
+    });
+    det.appendChild(wrap);
+    box.appendChild(det);
+  });
+}
+
+async function saveConfig() {
+  const keys = Object.keys(dirty);
+  if (!keys.length) return toast("没有改动");
+  const payload = {};
+  keys.forEach((k) => {
+    const item = configItems[k] || {};
+    const v = dirty[k];
+    if (item.type === "int") payload[k] = parseInt(v, 10) || 0;
+    else if (item.type === "float") payload[k] = parseFloat(v) || 0;
+    else if (item.type === "bool") payload[k] = String(v).toLowerCase() === "true";
+    else payload[k] = v;
+  });
+  try {
+    const raw = await P.apiPost("/ncd-comfy/console/config", payload);
+    const res = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
+    Object.keys(dirty).forEach((k) => delete dirty[k]);
+    $("saveTip").textContent = "已保存 " + (((res && res.saved) || []).length) + " 项（" + (((res && res.skipped) || []).length) + " 项被跳过）";
+    toast("保存成功");
+  } catch (e) {
+    toast("保存失败：" + e.message);
+  }
+}
+
+async function searchLora() {
+  const q = $("loraQuery").value.trim();
+  if (!q) return toast("先填搜索词");
+  const tbl = $("loraTable").querySelector("tbody");
+  tbl.replaceChildren(el("tr", "", "搜索中…"));
+  try {
+    const raw = await P.apiPost("/ncd-comfy/console/action", {
+      action: "search_lora",
+      query: q,
+      sort: $("loraSort").value,
+      base_model: $("loraBase").value.trim(),
+      limit: 5,
+    });
+    const list = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
+    tbl.replaceChildren();
+    if (!Array.isArray(list) || !list.length) {
+      tbl.appendChild(el("tr", "", "没有结果"));
+      return;
+    }
+    list.forEach((d) => {
+      const tr = el("tr");
+      const tdName = el("td", "", d.name || "?");
+      if (d.sha256) {
+        const b = el("span", "badge", d.sha256.slice(0, 8));
+        tdName.appendChild(b);
+      }
+      tr.appendChild(tdName);
+      tr.appendChild(el("td", "", d.base_model || "?"));
+      tr.appendChild(el("td", "", d.size_text || "?"));
+      tr.appendChild(el("td", "", (d.published_text || "?") + "（" + fmtAge(d.age_days) + "）"));
+      tr.appendChild(el("td", "", String(d.download_count || 0)));
+      const tdOp = el("td");
+      if (d.sha256 && d.mirror) {
+        const b = el("button", "primary", "下载");
+        b.addEventListener("click", () => downloadLora(d, b));
+        tdOp.appendChild(b);
+      } else {
+        tdOp.appendChild(el("span", "muted", "无 HF 镜像"));
+      }
+      tr.appendChild(tdOp);
+      tbl.appendChild(tr);
+    });
+  } catch (e) {
+    tbl.replaceChildren(el("tr", "", "搜索失败：" + e.message));
+  }
+}
+
+async function downloadLora(d, btn) {
+  if (!confirm("确认下载这个 LoRA 到 bot下载 目录？\n\n" + (d.name || ""))) return;
+  btn.disabled = true;
+  btn.textContent = "下载中…";
+  try {
+    const raw = await P.apiPost("/ncd-comfy/console/action", {
+      action: "download_lora",
+      name: d.name,
+      base_model: d.base_model,
+      published_at: d.published_at,
+      download_count: d.download_count,
+      sha256: d.sha256,
+      size_bytes: d.size_bytes,
+      mirror: d.mirror,
+      filename: d.filename,
+      tags: d.tags || [],
+    });
+    const res = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
+    if (!res || res.ok === false) throw new Error((res && res.message) || "下载失败");
+    toast("下载完成：" + ((res && res.message) || ""), 4000);
+    loadState();
+  } catch (e) {
+    toast("下载失败：" + e.message, 4000);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "下载";
+  }
+}
+
+async function doAction(action) {
+  try {
+    const raw = await P.apiPost("/ncd-comfy/console/action", { action });
+    const res = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
+    toast("完成：" + ((res && res.message) || ""));
+  } catch (e) {
+    toast("失败：" + e.message);
+  }
+}
+
+$("btnRefresh").addEventListener("click", () => { loadState(); loadConfig(); });
+$("btnSave").addEventListener("click", saveConfig);
+$("btnSearchLora").addEventListener("click", searchLora);
+$("btnClean").addEventListener("click", () => doAction("clean_cache"));
+$("btnRestart").addEventListener("click", () => {
+  if (confirm("确定要请求重启 ComfyUI 吗？")) doAction("restart");
+});
+
+/* ================= 内嵌完整图库：直接渲染，不再 iframe ================= */
+(function () {
+  "use strict";
+  const P = window.AstrBotPluginPage;
+  const byId = (id) => document.getElementById(id);
+  const root = byId("galleryApp");
+  if (!root) return;
+
+  function mk(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+  if (!P || typeof P.apiGet !== "function") {
+    root.appendChild(mk("div", "g-empty", "插件页桥接未加载（P 不存在），无法取数。"));
+    return;
+  }
+
+  let sessions = [];
+  let current = null;
+  let loaded = false;
+  let loading = false;
+
+  function fmtTime(ts) {
+    if (!ts) return "—";
+    const d = new Date(Number(ts) * 1000);
+    const p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) +
+      " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  function sessName(s) {
+    const kind = String(s.umo || "").split(":")[1] || "";
+    const prefix = kind === "GroupMessage" ? "群聊 " : "私聊 ";
+    return prefix + (s.title || ("会话 " + String(s.dir || "").slice(0, 8)));
+  }
+  function setStatus(text) {
+    const node = byId("g-status");
+    if (node) node.textContent = text || "";
+  }
+
+  function renderSessions() {
+    const box = byId("g-sessions");
+    if (!box) return;
+    box.replaceChildren();
+    if (!sessions.length) {
+      box.appendChild(mk("div", "g-empty", "还没有出图记录。"));
+      return;
+    }
+    sessions.forEach((s) => {
+      const node = mk("div", "g-sess" + (current && current.dir === s.dir ? " on" : ""));
+      node.appendChild(mk("div", "t", sessName(s)));
+      node.appendChild(mk("div", "m", s.count + " 张 · 最近 " + fmtTime(s.latest)));
+      node.addEventListener("click", () => selectSession(s));
+      box.appendChild(node);
+    });
+  }
+
+  async function loadThumb(cell, s, it) {
+    try {
+      const r = await P.apiGet("/ncd-comfy/gallery/thumb", { dir: s.dir, file: it.file });
+      if (r && r.ok && r.thumb) {
+        const img = document.createElement("img");
+        img.src = r.thumb;
+        img.alt = it.file;
+        img.loading = "lazy";
+        cell.replaceChild(img, cell.firstChild);
+      } else if (cell.firstChild) {
+        cell.firstChild.textContent = "无缩略图";
+      }
+    } catch (e) {
+      if (cell.firstChild) cell.firstChild.textContent = "加载失败";
+    }
+  }
+
+  function selectSession(s) {
+    current = s;
+    renderSessions();
+    const empty = byId("g-empty");
+    if (empty) empty.style.display = "none";
+    const grid = byId("g-grid");
+    if (!grid) return;
+    grid.replaceChildren();
+    setStatus("加载 " + s.count + " 张图…");
+    (s.items || []).forEach((it) => {
+      const cell = mk("div", "g-cell");
+      cell.appendChild(mk("div", "ph", "加载中"));
+      cell.appendChild(mk("div", "info", String(it.prompt || it.file || "").slice(0, 40)));
+      cell.addEventListener("click", () => openFull(it));
+      grid.appendChild(cell);
+      loadThumb(cell, s, it);
+    });
+    if (!(s.items || []).length) {
+      if (empty) {
+        empty.style.display = "block";
+        empty.textContent = "这个会话没有图";
+      }
+    }
+    setStatus("已列出 " + s.count + " 张（缩略图按需加载）");
+  }
+
+  async function openFull(it) {
+    if (!current) return;
+    setStatus("加载原图…");
+    try {
+      const r = await P.apiGet("/ncd-comfy/gallery/full", {
+        dir: current.dir,
+        file: it.file,
+      });
+      if (!r || !r.ok) {
+        setStatus("原图加载失败");
+        return;
+      }
+      byId("g-modal-img").src = r.b64;
+      byId("g-modal-meta").textContent =
+        it.file + "\n" + fmtTime(it.ts) + " · " +
+        (it.size ? Math.round(it.size / 1024) : "?") + " KB" +
+        (it.preset ? " · " + it.preset : "") +
+        (it.model ? " · " + it.model : "") + "\n" + (it.prompt || "");
+      byId("g-modal").style.display = "flex";
+      setStatus("已加载 " + it.file);
+    } catch (e) {
+      setStatus("原图加载失败：" + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function loadGallery() {
+    if (loading) return;
+    loading = true;
+    setStatus("读取会话列表…");
+    try {
+      const data = await P.apiGet("/ncd-comfy/gallery");
+      if (data && data.error) throw new Error(data.error);
+      sessions = (data && data.sessions) || [];
+      const sum = byId("g-summary");
+      if (sum) {
+        sum.textContent = sessions.length + " 个会话 · 共 " +
+          ((data && data.total) || 0) + " 张图";
+      }
+      renderSessions();
+      if (sessions.length) {
+        const keep = current && sessions.find((s) => s.dir === current.dir);
+        selectSession(keep || sessions[0]);
+      } else {
+        current = null;
+        const grid = byId("g-grid");
+        if (grid) grid.replaceChildren();
+        const empty = byId("g-empty");
+        if (empty) {
+          empty.style.display = "block";
+          empty.textContent = "图库里还没有图";
+        }
+        setStatus("没有会话");
+      }
+      loaded = true;
+    } catch (e) {
+      setStatus("读取失败：" + (e && e.message ? e.message : e));
+    } finally {
+      loading = false;
+    }
+  }
+
+  const modal = byId("g-modal");
+  if (modal) {
+    modal.addEventListener("click", (e) => {
+      if (e.target === modal) modal.style.display = "none";
+    });
+  }
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && modal && modal.style.display === "flex") {
+      modal.style.display = "none";
+    }
+  });
+  const refreshBtn = byId("g-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", () => loadGallery());
+
+  const det = byId("detGallery");
+  if (det) {
+    det.addEventListener("toggle", () => {
+      if (det.open && !loaded && !loading) loadGallery();
+    });
+  }
+
+  window.NCDGallery = { reload: loadGallery };
+})();
+
+/* ================= 内嵌完整额度：直接渲染，不再 iframe ================= */
+(function () {
+  "use strict";
+  const P = window.AstrBotPluginPage;
+  const byId = (id) => document.getElementById(id);
+  const root = byId("quotaApp");
+  if (!root) return;
+
+  function mk(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  }
+  if (!P || typeof P.apiGet !== "function") {
+    root.appendChild(mk("div", "empty", "插件页桥接未加载（P 不存在），无法取数。"));
+    return;
+  }
+
+  let timer = null;
+  let opened = Boolean(byId("detQuota") && byId("detQuota").open);
+  let lastData = null;
+  let board = "daily";
+  const BOARDS = [
+    { key: "daily", label: "生图日榜" },
+    { key: "total", label: "生图总榜" },
+    { key: "speech_daily", label: "发言日榜" },
+    { key: "speech_total", label: "发言总榜" },
+  ];
+
+  function setStatus(text, cls) {
+    const node = byId("q-status");
+    if (!node) return;
+    node.textContent = text || "";
+    node.className = "status" + (cls ? " " + cls : "");
+  }
+  function fmtTime(ts) {
+    if (!ts) return "—";
+    const d = new Date(Number(ts) * 1000);
+    const p = (n) => String(n).padStart(2, "0");
+    return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " +
+      p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+  function fmtDur(sec) {
+    sec = Math.max(0, Number(sec) || 0);
+    const h = Math.floor(sec / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    if (h && m) return h + " 小时 " + m + " 分";
+    if (h) return h + " 小时";
+    if (m) return m + " 分钟";
+    return Math.floor(sec) + " 秒";
+  }
+  function nameOf(row) {
+    const name = String((row && row.name) || "").trim();
+    const uid = String((row && row.user_id) || "");
+    return { name: name || uid || "未知", uid: uid && name ? uid : "" };
+  }
+  function kpi(label, num, hint, percent, tone) {
+    const card = mk("div", "card kpi");
+    card.appendChild(mk("div", "label", label));
+    card.appendChild(mk("div", "num", num));
+    if (hint) card.appendChild(mk("div", "hint", hint));
+    if (percent !== null && percent !== undefined) {
+      const bar = mk("div", "bar" + (tone ? " " + tone : ""));
+      const fill = mk("i");
+      fill.style.width = Math.max(0, Math.min(100, Number(percent) || 0)) + "%";
+      bar.appendChild(fill);
+      card.appendChild(bar);
+    }
+    return card;
+  }
+  function badge(text, cls) {
+    return mk("span", "badge" + (cls ? " " + cls : ""), text);
+  }
+
+  const GLOBAL_FIELDS = [
+    { k: "global_enabled", label: "启用全局 30 触发线", type: "bool" },
+    { k: "global_limit", label: "全局触发张数" },
+    { k: "throttle_top", label: "限流池前 N 名" },
+    { k: "canvas_top", label: "画幅池前 N 名" },
+    { k: "canvas_max_side", label: "画幅最长边" },
+    { k: "queue_limited", label: "限流队列上限" },
+    { k: "queue_normal", label: "普通队列上限" },
+    { k: "interval_base", label: "间隔基数（秒）" },
+    { k: "interval_step", label: "间隔递减（秒）" },
+    { k: "degrade_after", label: "降质张数" },
+    { k: "degrade_steps", label: "降质步数" },
+    { k: "ban_after", label: "禁生图张数" },
+    { k: "ban_hours", label: "禁生图小时" },
+    { k: "window_hour", label: "窗口起点（小时）" },
+    { k: "bypass_ids", label: "完全绕过 QQ（逗号分隔）", type: "text" },
+  ];
+  const SPONSOR_FIELDS = [
+    { k: "user_id", label: "赞助者 QQ", type: "text" },
+    { k: "note", label: "备注/名字", type: "text" },
+    { k: "queue_cap", label: "队列上限", placeholder: "默认 3" },
+    { k: "interval_seconds", label: "间隔（秒）", placeholder: "默认 0" },
+    { k: "canvas_max_side", label: "画幅最长边（0=不限）", placeholder: "默认" },
+    { k: "degrade_after", label: "降质张数", placeholder: "默认 50" },
+    { k: "degrade_steps", label: "降质步数", placeholder: "默认 20" },
+    { k: "ban_after", label: "禁生图张数", placeholder: "默认 70" },
+    { k: "ban_hours", label: "禁生图小时", placeholder: "默认 36" },
+  ];
+
+  let fieldsBuilt = false;
+  let configFilled = false;
+
+  function makeField(field, box, prefix) {
+    const wrap = mk("div", "ctrl");
+    wrap.appendChild(mk("label", "", field.label));
+    const input = mk("input");
+    input.id = prefix + field.k;
+    input.dataset.k = field.k;
+    if (field.type === "bool") {
+      input.type = "checkbox";
+    } else if (field.type === "text") {
+      input.type = "text";
+    } else {
+      input.type = "number";
+      input.step = "1";
+      input.min = "0";
+      if (field.placeholder) input.placeholder = field.placeholder;
+    }
+    wrap.appendChild(input);
+    box.appendChild(wrap);
+    return input;
+  }
+  function buildFields() {
+    if (fieldsBuilt) return;
+    fieldsBuilt = true;
+    const gf = byId("q-globalFields");
+    const sf = byId("q-sponsorFields");
+    if (gf) GLOBAL_FIELDS.forEach((f) => makeField(f, gf, "q-gf_"));
+    if (sf) SPONSOR_FIELDS.forEach((f) => makeField(f, sf, "q-sf_"));
+  }
+  function fillGlobal(cfg) {
+    GLOBAL_FIELDS.forEach((f) => {
+      const node = byId("q-gf_" + f.k);
+      if (!node) return;
+      const v = cfg ? cfg[f.k] : undefined;
+      if (f.type === "bool") node.checked = !!v;
+      else node.value = v === undefined || v === null ? "" : v;
+    });
+    configFilled = true;
+  }
+  function readGlobal() {
+    const out = {};
+    GLOBAL_FIELDS.forEach((f) => {
+      const node = byId("q-gf_" + f.k);
+      if (!node) return;
+      if (f.type === "bool") out[f.k] = !!node.checked;
+      else if (f.type === "text") out[f.k] = node.value.trim();
+      else if (node.value !== "") out[f.k] = Number(node.value);
+    });
+    return out;
+  }
+  async function saveGlobal(values, doneText) {
+    try {
+      const r = await P.apiPost("/ncd-comfy/quota/config", { values });
+      if (r && r.error) throw new Error(r.error);
+      fillGlobal((r && r.config) || values);
+      setStatus(doneText || "全局阈值已保存", "ok");
+      load();
+    } catch (err) {
+      setStatus("保存失败：" + (err && err.message ? err.message : err), "err");
+    }
+  }
+  function fillSponsor(ov) {
+    const data = ov || {};
+    SPONSOR_FIELDS.forEach((f) => {
+      const node = byId("q-sf_" + f.k);
+      if (!node) return;
+      const v = data[f.k];
+      node.value = v === undefined || v === null ? "" : v;
+    });
+    const tip = byId("q-sfEditing");
+    if (tip) {
+      const uid = String(data.user_id || "").trim();
+      const nm = String(data.note || data.name || "").trim();
+      if (uid) {
+        tip.replaceChildren(
+          document.createTextNode("当前编辑："),
+          mk("b", "", nm || uid),
+          document.createTextNode("（" + uid + "）")
+        );
+      } else {
+        tip.textContent = "当前：新增赞助者";
+      }
+    }
+  }
+  function readSponsor() {
+    const uid = (byId("q-sf_user_id") || {}).value || "";
+    const overrides = {};
+    const note = ((byId("q-sf_note") || {}).value || "").trim();
+    if (note) overrides.note = note;
+    ["queue_cap", "interval_seconds", "canvas_max_side",
+      "degrade_after", "degrade_steps", "ban_after", "ban_hours"].forEach((k) => {
+      const node = byId("q-sf_" + k);
+      if (node && node.value !== "") overrides[k] = Number(node.value);
+    });
+    return { user_id: uid.trim(), overrides };
+  }
+  function renderSponsors(overrides) {
+    const box = byId("q-sponsorList");
+    if (!box) return;
+    box.replaceChildren();
+    const rows = Object.entries(overrides || {});
+    if (!rows.length) {
+      box.appendChild(mk("div", "empty", "还没有赞助者。"));
+      return;
+    }
+    rows.forEach(([uid, ov]) => {
+      const row = mk("div", "sponsor-row");
+      const who = mk("div", "who");
+      const nm = String(ov.name || "").trim();
+      who.appendChild(mk("div", "name", nm || uid));
+      who.appendChild(mk("div", "uid", uid));
+      row.appendChild(who);
+      const cfg = (lastData && lastData.config) || {};
+      const ds = ov.degrade_steps !== undefined
+        ? ov.degrade_steps : (cfg.degrade_steps === undefined ? 20 : cfg.degrade_steps);
+      const bh = ov.ban_hours !== undefined
+        ? ov.ban_hours : (cfg.ban_hours === undefined ? 36 : cfg.ban_hours);
+      const bits = [];
+      if (ov.queue_cap !== undefined) bits.push("队列 " + ov.queue_cap);
+      if (ov.interval_seconds !== undefined) bits.push("间隔 " + ov.interval_seconds + "s");
+      if (ov.canvas_max_side !== undefined) {
+        bits.push("画幅 " + (Number(ov.canvas_max_side) > 0 ? ov.canvas_max_side : "不限"));
+      }
+      if (ov.degrade_after !== undefined) {
+        bits.push("降质 " + ov.degrade_after + " 张/" + ds + " 步");
+      }
+      if (ov.ban_after !== undefined) {
+        bits.push("禁生 " + ov.ban_after + " 张/" + bh + "h");
+      }
+      row.appendChild(mk("div", "sum", bits.join(" · ") || "全部默认，仅不占池"));
+      const edit = mk("button", "", "编辑");
+      edit.type = "button";
+      edit.onclick = () => {
+        fillSponsor(Object.assign({}, ov, { user_id: uid, note: ov.note || ov.name || "" }));
+        const box2 = byId("q-sponsorFields");
+        if (box2 && box2.scrollIntoView) {
+          box2.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+      };
+      row.appendChild(edit);
+      const del = mk("button", "", "删除");
+      del.type = "button";
+      del.onclick = async () => {
+        try {
+          const r = await P.apiPost("/ncd-comfy/quota/sponsor",
+            { user_id: uid, action: "remove" });
+          if (r && r.error) throw new Error(r.error);
+          setStatus("已删除赞助者 " + uid, "ok");
+          load();
+        } catch (err) {
+          setStatus("删除失败：" + (err && err.message ? err.message : err), "err");
+        }
+      };
+      row.appendChild(del);
+      box.appendChild(row);
+    });
+  }
+
+  function renderTabs() {
+    const box = byId("q-rank-tabs");
+    if (!box) return;
+    box.replaceChildren();
+    BOARDS.forEach((item) => {
+      const btn = mk("button", board === item.key ? "on" : "", item.label);
+      btn.type = "button";
+      btn.onclick = () => {
+        board = item.key;
+        renderTabs();
+        renderBoard(lastData);
+      };
+      box.appendChild(btn);
+    });
+  }
+
+  function renderBoard(data) {
+    const box = byId("q-rank");
+    if (!box) return;
+    box.replaceChildren();
+    const rankings = (data && data.rankings) || {};
+    const rows = Array.isArray(rankings[board])
+      ? rankings[board]
+      : (board === "daily" && data && Array.isArray(data.ranking)
+        ? data.ranking : []);
+    if (!rows.length) {
+      box.appendChild(mk("div", "empty",
+        board === "daily" ? "本时段还没有成功生图。" : "还没有数据。"));
+      return;
+    }
+    const heads = board === "daily"
+      ? ["名次", "用户", "今日", "间隔", "队列", "状态"]
+      : board === "total"
+        ? ["名次", "用户", "累计", "最近"]
+        : board === "speech_daily"
+          ? ["名次", "用户", "今日发言", "累计"]
+          : ["名次", "用户", "累计发言"];
+    const table = mk("table");
+    const thead = mk("thead");
+    const hr = mk("tr");
+    heads.forEach((t) => hr.appendChild(mk("th", "", t)));
+    thead.appendChild(hr);
+    table.appendChild(thead);
+    const tbody = mk("tbody");
+    rows.forEach((row) => {
+      const tr = mk("tr");
+      tr.appendChild(mk("td", "num", "#" + (row.rank || "—")));
+      const who = mk("td");
+      const nm = nameOf(row);
+      who.appendChild(mk("div", "name", nm.name));
+      if (nm.uid) {
+        const uidRow = mk("div", "uid");
+        uidRow.appendChild(document.createTextNode(nm.uid + " "));
+        const addBtn = mk("button", "mini", "+赞助");
+        addBtn.title = "添加为赞助者";
+        addBtn.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          fillSponsor({ user_id: nm.uid, note: nm.name });
+          const box2 = byId("q-sponsorFields");
+          if (box2 && box2.scrollIntoView) {
+            box2.scrollIntoView({ block: "center", behavior: "smooth" });
+          }
+        });
+        uidRow.appendChild(addBtn);
+        who.appendChild(uidRow);
+      }
+      tr.appendChild(who);
+      if (board === "daily") {
+        tr.appendChild(mk("td", "num", String(row.count || 0)));
+        tr.appendChild(mk("td", "num",
+          row.interval_seconds ? row.interval_seconds + "s" : "—"));
+        tr.appendChild(mk("td", "num",
+          row.queue_cap === null || row.queue_cap === undefined ? "—" : row.queue_cap));
+        const st = mk("td");
+        if (row.banned) st.appendChild(badge("禁生", "bad"));
+        if (row.throttled) st.appendChild(badge("限流", "warn"));
+        if (row.sponsor) st.appendChild(badge("赞助", "blue"));
+        if (row.canvas_limited) {
+          st.appendChild(badge(String(row.canvas_max_side || 1080), "blue"));
+        }
+        if (row.degraded) {
+          st.appendChild(badge((row.degrade_steps || 20) + " 步", "warn"));
+        }
+        if (!st.childNodes.length) st.appendChild(badge("正常", "ok"));
+        tr.appendChild(st);
+      } else if (board === "total") {
+        tr.appendChild(mk("td", "num", String(row.count || 0)));
+        tr.appendChild(mk("td", "num", fmtTime(row.last_success)));
+      } else if (board === "speech_daily") {
+        tr.appendChild(mk("td", "num", String(row.count || 0)));
+        tr.appendChild(mk("td", "num", String(row.total_count || 0)));
+      } else {
+        tr.appendChild(mk("td", "num", String(row.count || 0)));
+      }
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+    box.appendChild(table);
+  }
+
+  function render(data) {
+    const g = data.global || {};
+    const w = data.window || {};
+    const totals = data.totals || {};
+    const bans = Array.isArray(data.bans) ? data.bans : [];
+    const dailyRows = Array.isArray(data.ranking) ? data.ranking : [];
+    lastData = data;
+    renderTabs();
+    buildFields();
+    const editing = document.activeElement && document.activeElement.closest
+      ? document.activeElement.closest("#q-controlCard")
+      : null;
+    if (!configFilled || !editing) fillGlobal(data.config || {});
+    renderSponsors(data.overrides || {});
+
+    const win = byId("q-window");
+    if (win) {
+      win.textContent = (w.label || "—") +
+        (w.remaining ? " · 距重置 " + fmtDur(w.remaining) : "");
+    }
+
+    const notice = byId("q-notice");
+    if (notice) notice.style.display = data.enforce === false ? "" : "none";
+
+    const cards = byId("q-cards");
+    if (cards) {
+      cards.replaceChildren();
+      cards.appendChild(kpi(
+        "私聊全局成功生图",
+        (g.count || 0) + " / " + (g.limit || 30),
+        g.enabled === false ? "全局 30 已关闭" :
+          (g.triggered ? "已触发前 5 限流" : "未触发限流池"),
+        g.enabled === false ? null : (g.percent || 0),
+        g.triggered ? "over" : ""
+      ));
+      cards.appendChild(kpi(
+        "群聊全局生图",
+        (g.group_count || 0) + " 张",
+        "累计 " + (g.group_total || 0) + " 张 · 不占私聊额度"
+      ));
+      cards.appendChild(kpi(
+        "本时段参与用户", totals.users || 0,
+        "累计成功 " + (totals.images || 0) + " 张"
+      ));
+      cards.appendChild(kpi(
+        "禁生图", bans.length,
+        bans.length ? "到期自动恢复" : "暂无"
+      ));
+      cards.appendChild(kpi(
+        "限流池 / 画幅池",
+        ((data.pools && data.pools.throttle) || []).length + " / " +
+          ((data.pools && data.pools.canvas) || []).length,
+        "前 5 名 / 前 3 名"
+      ));
+    }
+
+    renderBoard(data);
+
+    const watchBox = byId("q-watch");
+    if (watchBox) {
+      watchBox.replaceChildren();
+      const watch = dailyRows.filter((r) => (r.count || 0) > 0).slice(0, 14);
+      if (!watch.length) {
+        watchBox.appendChild(mk("div", "empty", "还没有需要盯的用户。"));
+      } else {
+        watch.forEach((row) => {
+          const wrap = mk("div", "watch-row");
+          const main = mk("div", "watch-main");
+          const top = mk("div", "watch-top");
+          const nm = nameOf(row);
+          const da = Number(row.degrade_after) || 50;
+          const ba = Number(row.ban_after) || 70;
+          top.appendChild(mk("span", "n", nm.name));
+          top.appendChild(mk("span", "c",
+            (row.count || 0) + "/" + da + " · " + (row.count || 0) + "/" + ba));
+          main.appendChild(top);
+          const bar = mk("div", "qbar");
+          const fill = mk("i");
+          fill.style.width = Math.max(0, Math.min(100,
+            (Number(row.count) || 0) / ba * 100)) + "%";
+          if ((row.count || 0) >= ba) fill.className = "bad";
+          else if ((row.count || 0) >= da) fill.className = "warn";
+          bar.appendChild(fill);
+          main.appendChild(bar);
+          wrap.appendChild(main);
+          watchBox.appendChild(wrap);
+        });
+      }
+    }
+
+    const banBox = byId("q-bans");
+    if (banBox) {
+      banBox.replaceChildren();
+      if (!bans.length) {
+        banBox.appendChild(mk("div", "empty", "当前没有禁生图用户。"));
+      } else {
+        const table = mk("table");
+        const thead = mk("thead");
+        const hr = mk("tr");
+        ["用户", "截止", "剩余"].forEach((t) => hr.appendChild(mk("th", "", t)));
+        thead.appendChild(hr);
+        table.appendChild(thead);
+        const tbody = mk("tbody");
+        bans.forEach((ban) => {
+          const tr = mk("tr");
+          const who = mk("td");
+          const nm = nameOf(ban);
+          who.appendChild(mk("div", "name", nm.name));
+          if (nm.uid) who.appendChild(mk("div", "uid", nm.uid));
+          tr.appendChild(who);
+          tr.appendChild(mk("td", "num", fmtTime(ban.until)));
+          tr.appendChild(mk("td", "num", fmtDur(ban.remaining)));
+          tbody.appendChild(tr);
+        });
+        table.appendChild(tbody);
+        banBox.appendChild(table);
+      }
+    }
+  }
+
+  async function load() {
+    try {
+      const data = await P.apiGet("/ncd-comfy/quota");
+      if (data && data.error) throw new Error(data.error);
+      render(data || {});
+      setStatus("已刷新 " + new Date().toLocaleTimeString(), "ok");
+    } catch (err) {
+      setStatus("拉取失败：" + (err && err.message ? err.message : err), "err");
+    }
+  }
+
+  function startPolling() {
+    if (timer) return;
+    load();
+    timer = setInterval(() => {
+      if (!document.hidden) load();
+    }, 5000);
+  }
+  function stopPolling() {
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+  }
+
+  const refreshBtn = byId("q-refresh");
+  if (refreshBtn) refreshBtn.addEventListener("click", load);
+  const saveBtn = byId("q-saveConfig");
+  if (saveBtn) {
+    saveBtn.addEventListener("click", () => {
+      saveGlobal(readGlobal(), "全局阈值已保存");
+    });
+  }
+  const resetBtn = byId("q-resetConfig");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", () => {
+      const defs = lastData && lastData.defaults;
+      if (!defs) {
+        setStatus("默认值还没加载，稍后再试", "err");
+        return;
+      }
+      fillGlobal(defs);
+      saveGlobal(defs, "已恢复默认数值");
+    });
+  }
+  const clearBtn = byId("q-clearSponsor");
+  if (clearBtn) clearBtn.addEventListener("click", () => fillSponsor({}));
+  const saveSponsorBtn = byId("q-saveSponsor");
+  if (saveSponsorBtn) {
+    saveSponsorBtn.addEventListener("click", async () => {
+      const payload = readSponsor();
+      if (!/^\d{5,12}$/.test(payload.user_id)) {
+        setStatus("赞助者 QQ 号格式不对", "err");
+        return;
+      }
+      try {
+        const r = await P.apiPost("/ncd-comfy/quota/sponsor", payload);
+        if (r && r.error) throw new Error(r.error);
+        const who = (payload.overrides.note || payload.user_id).trim();
+        setStatus("已保存赞助者：" + who + "（" + payload.user_id + "）", "ok");
+        fillSponsor({});
+        load();
+      } catch (err) {
+        setStatus("保存失败：" + (err && err.message ? err.message : err), "err");
+      }
+    });
+  }
+
+  const det = byId("detQuota");
+  if (det) {
+    det.addEventListener("toggle", () => {
+      opened = det.open;
+      if (opened) startPolling();
+      else stopPolling();
+    });
+    if (opened) startPolling();
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) stopPolling();
+    else if (opened) startPolling();
+  });
+
+  window.NCDQuota = { reload: load };
+})();
+
+// ---------- 生图 tips ----------
+async function loadTips() {
+  try {
+    const raw = await P.apiGet("/ncd-comfy/console/tips");
+    const data = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
+    const items = (data && data.items) || [];
+    $("tipsBox").value = items.join("\n");
+    $("tipsCount").textContent = items.length ? items.length + " 条" : "还没写";
+  } catch (e) {
+    $("tipsCount").textContent = "加载失败：" + e.message;
+  }
+}
+async function saveTips() {
+  const items = $("tipsBox").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  try {
+    const raw = await P.apiPost("/ncd-comfy/console/tips", { items });
+    const data = (raw && raw.status === "ok" && raw.data) ? raw.data : raw;
+    const saved = (data && data.items) || items;
+    $("tipsCount").textContent = "已保存 " + saved.length + " 条";
+    toast("tips 已保存");
+  } catch (e) {
+    toast("保存失败：" + e.message);
+  }
+}
+document.getElementById("detTips").addEventListener("toggle", (ev) => {
+  if (ev.target.open) loadTips();
+});
+$("btnSaveTips").addEventListener("click", saveTips);
+
+loadState();
+loadConfig();
+setInterval(loadState, 3000);
+</script>
+</body>
+</html>
