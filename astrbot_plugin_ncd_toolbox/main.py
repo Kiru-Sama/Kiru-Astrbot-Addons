@@ -484,6 +484,25 @@ class NcdToolboxPlugin(star.Star):
         # 最近几轮【真正发出去】的系统提示词（含本插件注入的部分）。
         # 只为让面板能摊开看，不参与任何逻辑。
         self._prompt_log: deque[dict[str, Any]] = deque(maxlen=5)
+        # ★ 2026-11-19 修 M9：工具提示词页的 4 个 handler 之前从未注册路由（页面 404）
+        self._register_apis()
+
+    def _register_apis(self) -> None:
+        """注册工具提示词页的 Web API。"""
+        try:
+            name = os.path.basename(PLUGIN_DIR)
+            for route, handler, methods, desc in (
+                ("tools/info", self.api_tools_info, ["GET"], "工具提示词：信息"),
+                ("tools/prompt", self.api_tools_prompt, ["GET"], "工具提示词：最近提示词"),
+                ("tools/save-hint", self.api_tools_save_hint, ["POST"], "工具提示词：保存提示"),
+                ("tools/save-descriptions", self.api_tools_save_descriptions, ["POST"], "工具提示词：保存描述"),
+            ):
+                self.context.register_web_api(
+                    f"/{name}/ncd-toolbox/{route}", handler, methods, desc
+                )
+            logger.info("[toolbox] 已注册工具提示词 Web API")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[toolbox] 注册 Web API 失败: {exc}")
 
 
     # ------------------------------------------------------------------
@@ -1396,7 +1415,7 @@ class NcdToolboxPlugin(star.Star):
             # ★ PDF 直接解析，别塞给浏览器渲染（渲染出来是阅读器界面，抽不到正文）。
             if url.split("?")[0].lower().endswith(".pdf"):
                 await self._web_notice(event, "📄 开始读取 PDF…")
-                return await self._read_pdf(url, fetch_chars)
+                return await self._read_pdf(url, fetch_chars, guard_on=guard_on)
             official = False
             page = None
             page_key = f"p|{_norm_url(url)}|{fetch_chars}"
@@ -1521,22 +1540,68 @@ class NcdToolboxPlugin(star.Star):
         except Exception:  # noqa: BLE001
             return ""
 
-    async def _read_pdf(self, url: str, max_chars: int) -> str:
-        """PDF 走 pypdf，不进浏览器。"""
+    async def _read_pdf(self, url: str, max_chars: int, guard_on: bool = True) -> str:
+        """PDF 走 pypdf，不进浏览器。
+
+        ★ 2026-11-19 修 M3：原实现 urlopen 默认跟随 302 且不复查落点，
+          公网 PDF 可 302 到内网/本机读数据（SSRF）；临时文件也永不清理。
+          现在手动逐跳跟随，每跳都做 public_url_error 复查，并 finally 删临时文件。
+        """
+        import hashlib
+        import urllib.error
         import urllib.request
+        from urllib.parse import urljoin
+
+        def _download() -> tuple[bytes, str]:
+            class _NoRedirect(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+                    return None
+
+            opener = urllib.request.build_opener(_NoRedirect)
+            current = url
+            for _hop in range(4):
+                req = urllib.request.Request(
+                    current, headers={"User-Agent": "Mozilla/5.0"}
+                )
+                try:
+                    with opener.open(req, timeout=30) as resp:
+                        return resp.read(30 * 1024 * 1024), resp.geturl() or current
+                except urllib.error.HTTPError as exc:
+                    if exc.code not in (301, 302, 303, 307, 308):
+                        raise
+                    location = exc.headers.get("Location") or ""
+                    if not location:
+                        raise
+                    current = urljoin(current, location)
+                    if guard_on:
+                        problem = public_url_error(current)
+                        if problem:
+                            raise RuntimeError(f"PDF 跳转到了不允许的地址：{problem}")
+            raise RuntimeError("PDF 跳转次数过多")
 
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            data = await asyncio.to_thread(
-                lambda: urllib.request.urlopen(req, timeout=30).read(30 * 1024 * 1024)
-            )
-            tmp = Path(tempfile.gettempdir()) / f"ncd_pdf_{abs(hash(url)) % 10**10}.pdf"
-            tmp.write_bytes(data)
-            from pypdf import PdfReader
+            data, final_url = await asyncio.to_thread(_download)
+            if guard_on:
+                problem = public_url_error(final_url)
+                if problem:
+                    return json.dumps(
+                        {"url": final_url, "error": f"PDF 最终地址不允许访问：{problem}"},
+                        ensure_ascii=False,
+                    )
+            digest = hashlib.sha1(url.encode("utf-8")).hexdigest()[:16]
+            tmp = Path(tempfile.gettempdir()) / f"ncd_pdf_{digest}.pdf"
+            try:
+                tmp.write_bytes(data)
+                from pypdf import PdfReader
 
-            reader = PdfReader(str(tmp))
-            parts = [(p.extract_text() or "") for p in reader.pages[:8]]
-            text = "\n".join(x for x in parts if x.strip())
+                reader = PdfReader(str(tmp))
+                parts = [(p.extract_text() or "") for p in reader.pages[:8]]
+                text = "\n".join(x for x in parts if x.strip())
+            finally:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except OSError:
+                    pass
             stats_add(fetch=1, fetch_chars=len(text))
             if not text.strip():
                 return json.dumps(
@@ -1544,7 +1609,7 @@ class NcdToolboxPlugin(star.Star):
                     ensure_ascii=False,
                 )
             return json.dumps(
-                {"url": url, "title": "", "engine": "pdf", "text": text[:max_chars],
+                {"url": final_url, "title": "", "engine": "pdf", "text": text[:max_chars],
                  "total_chars": len(text), "note": "PDF 直接解析的正文（前 8 页）。"},
                 ensure_ascii=False,
             )
@@ -1623,8 +1688,17 @@ class NcdToolboxPlugin(star.Star):
                     browser = await self._get_browser()
                     page = await browser.fetch_text(u, chars, kws)
                     engine = "browser"
+                landed = str(page.get("url") or u)
+                # ★ 2026-11-19 修 M4：浏览器回退也可能被 302 带到内网，落点必须复查
+                if guard_on and engine != "deepseek":
+                    problem = public_url_error(landed)
+                    if problem:
+                        return {
+                            "url": landed,
+                            "error": f"最终跳转到了不允许的地址：{problem}",
+                        }
                 return {
-                    "url": page.get("url") or u,
+                    "url": landed,
                     "title": page.get("title") or "",
                     "engine": engine,
                     "status": page.get("status") or 0,

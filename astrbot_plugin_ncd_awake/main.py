@@ -188,6 +188,12 @@ class Main(star.Star):
 
     # ---------------- 生命周期 ----------------
     async def initialize(self) -> None:
+        # ★ 2026-11-19 修 M10：非 Windows（手机 Linux）直接跳过，不告警刷屏
+        import sys as _sys
+
+        if _sys.platform != "win32":
+            logger.info("[awake] 当前平台不是 Windows，保持唤醒功能跳过")
+            return
         if not self._conf_bool("enabled"):
             return
         ok, err = self._awake.start(self._conf_bool("keep_display"), self._refresh())

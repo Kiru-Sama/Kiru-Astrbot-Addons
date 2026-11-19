@@ -15,6 +15,7 @@ AstrBot 原生只有 `/new`（新建并切过去），没有"回头切回旧对�
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from astrbot.api import logger, star
@@ -30,6 +31,32 @@ class NcdSessionPlugin(star.Star):
         super().__init__(context, config)
         self.context = context
         self._conf: dict[str, Any] = config or {}
+
+    # ------------------------------------------------------------------
+    #  权限
+    # ------------------------------------------------------------------
+    def _group_admin_ok(self, event: AstrMessageEvent) -> bool:
+        """群聊里操作共享对话需要管理员（主/副管理员或平台管理员）；私聊不限。"""
+        try:
+            gid = str(event.get_group_id() or "")
+        except Exception:  # noqa: BLE001
+            gid = ""
+        if not gid:
+            return True
+        try:
+            if event.is_admin():
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            me = str(event.get_sender_id() or "")
+            admins: set[str] = set()
+            for key in ("ncd_primary_admin", "ncd_deputy_admin"):
+                raw = str(self._conf.get(key) or "")
+                admins.update(x for x in re.split(r"[\s,，;；]+", raw) if x)
+            return me in admins
+        except Exception:  # noqa: BLE001
+            return False
 
     # ------------------------------------------------------------------
     #  内置命令回执本地化
@@ -170,6 +197,9 @@ class NcdSessionPlugin(star.Star):
     @filter.command("切换", alias={"switch"})
     async def switch_conversation(self, event: AstrMessageEvent, index: str = "") -> None:
         """切换到另一个对话：/切换 3 或 /切换 前几位ID"""
+        if not self._group_admin_ok(event):
+            self._reply(event, "群聊里只有管理员能切换/删除/命名共享对话。")
+            return
         umo = event.unified_msg_origin
         convs = await self._list(umo)
         if not convs:
@@ -198,6 +228,9 @@ class NcdSessionPlugin(star.Star):
     @filter.command("命名", alias={"rename"})
     async def rename_conversation(self, event: AstrMessageEvent, title: GreedyStr = "") -> None:
         """给当前对话改标题：/命名 熬夜聊猫娘"""
+        if not self._group_admin_ok(event):
+            self._reply(event, "群聊里只有管理员能切换/删除/命名共享对话。")
+            return
         umo = event.unified_msg_origin
         name = str(title or "").strip()
         if not name:
@@ -221,6 +254,9 @@ class NcdSessionPlugin(star.Star):
     @filter.command("删除", alias={"del", "convdel"})
     async def delete_conversation(self, event: AstrMessageEvent, index: str = "") -> None:
         """删除一个对话：/删除 3（当前对话不能删，先切走）"""
+        if not self._group_admin_ok(event):
+            self._reply(event, "群聊里只有管理员能切换/删除/命名共享对话。")
+            return
         umo = event.unified_msg_origin
         convs = await self._list(umo)
         if not convs:

@@ -1,3 +1,9 @@
+## 2026-11-19 深夜 · 全量插件审查（17 插件）修复
+
+- 高危：comfy 图库 dir 路径穿越（可读手机任意文件）、session 群聊对话无权限、catchup 心跳吞停机窗口。
+- 中危：natural 数据目录/多行丢内容、memory 头像串行超时、toolbox PDF SSRF 与跳转复查、inject 重复注入与写盘节流、toolbox 提示词 API 路由、awake 非 Windows 静默、extra linkd 403 提示。
+- 新增 REVIEW_CONTEXT.md「全量审查修复轮」与已知低危清单，供后续复用子代理审查。
+
 ## 2026-11-19 深夜 · 剩余中低危修复
 
 - linkd：/run 支持共享 token 校验（_probe/linkd_run_token.txt 存在才启用；extra 配置 ncd_pc_linkd_token 同值），启动并发互斥。

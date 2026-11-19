@@ -87,8 +87,25 @@ class NaturalChat(Star):
 
     # ------------------------------------------------------------------ 路径
     def _data_dir(self) -> Path:
-        root = PLUGIN_DIR.parents[1]  # data/plugins/<name> -> data
-        return root / "data" / "plugin_data" / "ncd_natural"
+        # ★ 2026-11-19 修 M1：PLUGIN_DIR.parents[1] 本身已经是 <AstrBot>/data，
+        #   原代码又拼了一次 "data" → 实际写到 data/data/plugin_data（备份/迁移丢设置）。
+        #   与 memory/inject/catchup 对齐：<AstrBot>/data/plugin_data/ncd_natural
+        return PLUGIN_DIR.parents[2] / "data" / "plugin_data" / "ncd_natural"
+
+    def _migrate_old_data_dir(self) -> None:
+        """旧路径 data/data/plugin_data/ncd_natural 存在时，一次性搬到新路径。"""
+        try:
+            old = PLUGIN_DIR.parents[1] / "data" / "plugin_data" / "ncd_natural"
+            new = self._data_dir()
+            if not old.is_dir() or new.exists():
+                return
+            import shutil
+
+            new.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(old, new)
+            logger.info(f"[natural] 旧数据目录已迁移: {old} -> {new}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[natural] 旧数据目录迁移失败（忽略）: {exc}")
 
     def _pack_dir(self) -> Path:
         # 插件自带 packs/ 优先（随插件包分发），其次 plugin_data
@@ -357,6 +374,7 @@ class NaturalChat(Star):
 
     # ------------------------------------------------------------------ 生命周期
     async def initialize(self) -> None:
+        self._migrate_old_data_dir()
         self._load_packs()
         self._load_state()
         self._register_web()
@@ -589,6 +607,8 @@ class NaturalChat(Star):
             return
 
         lines: list[str] = []
+        # ★ 2026-11-19 修 M6：非文本组件（图/语音/At）不再静默丢弃，发完文本后补发
+        extras: list[Any] = []
         for comp in chain:
             text = getattr(comp, "text", None)
             if isinstance(text, str) and text.strip():
@@ -596,6 +616,10 @@ class NaturalChat(Star):
                     ln = ln.strip()
                     if ln:
                         lines.append(ln)
+            elif not isinstance(text, str) or not (text or "").strip():
+                extras.append(comp)
+        if not lines and not extras:
+            return
         if not lines:
             return
         # ★ 2026-11-09：只有多行（真正的连发）才接管；
@@ -613,13 +637,24 @@ class NaturalChat(Star):
             pass
         self._rounds.appendleft({
             "ts": time.time(), "kind": "send", "umo": umo,
-            "k": len(lines[:4]), "preview": lines[0][:80] if lines else "",
+            "k": len(lines), "preview": lines[0][:80] if lines else "",
         })
         logger.info(f"[natural] 自发送 {len(lines)} 条（无引用）→ {umo}")
         await self._send_burst(umo, lines)
+        if extras:
+            try:
+                await asyncio.wait_for(
+                    self.context.send_message(umo, MessageChain(chain=extras)),
+                    timeout=20,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[natural] 补发非文本组件失败: {exc}")
 
     async def _send_burst(self, umo: str, lines: list[str]) -> None:
-        for i, line in enumerate(lines[:4]):
+        # ★ 2026-11-19 修 M6：不再只发前 4 行，其余行合并成一条（防刷屏但不丢内容）
+        if len(lines) > 4:
+            lines = lines[:3] + ["\n".join(lines[3:])]
+        for i, line in enumerate(lines):
             if i:
                 await asyncio.sleep(random.uniform(0.4, 1.1))
             try:

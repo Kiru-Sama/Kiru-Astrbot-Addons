@@ -41,6 +41,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from astrbot.api import logger, star
+from astrbot.api.web import json_response
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest
 
@@ -448,6 +449,7 @@ class NcdExtraPlugin(star.Star):
         self._announce_recent: dict[str, float] = {}
         self._announce_lock = asyncio.Lock()
         self._ensure_wake_symbols()
+        self._register_help_api()
 
     async def terminate(self) -> None:
         """卸载/重载时取消还在广播的公告，避免旧实例继续发消息。"""
@@ -1394,6 +1396,15 @@ class NcdExtraPlugin(star.Star):
             with _u.urlopen(url, timeout=25) as resp:
                 data = json.loads(resp.read().decode("utf-8", "replace"))
         except Exception as exc:  # noqa: BLE001
+            # ★ 2026-11-19 修 M5：linkd 启用了 /run token 但插件没配时，提示去哪填
+            code = int(getattr(exc, "code", 0) or 0)
+            if code == 403:
+                yield event.plain_result(
+                    "拉起失败：电脑 linkd 要求 /run token。\n"
+                    "把电脑 _probe\\linkd_run_token.txt 里的字符串填到插件配置 "
+                    "ncd_pc_linkd_token 即可（或者删掉电脑侧该文件恢复免 token 模式）。"
+                )
+                return
             logger.warning(f"[extra] 拉起向日葵失败: {exc}")
             yield event.plain_result(f"拉起失败（电脑 linkd 没响应）：{exc}")
             return
@@ -1653,6 +1664,135 @@ class NcdExtraPlugin(star.Star):
             lines.append("AstrBot 原生开关：已开启（本插件自动让路）")
         lines.append("切换：/tooldisplay on|off（本会话） · /tooldisplay all on|off（全局默认）")
         return "\n".join(lines)
+
+    # ------------------------- 指令帮助（给不会指令的人） ------------------------- #
+    def _register_help_api(self) -> None:
+        """注册帮助查询 API（页面/实测用；工具本身是给 bot 用的）。"""
+        try:
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR.name}/ncd-extra/help",
+                self.api_help,
+                ["GET"],
+                "指令帮助：按关键词查 bot 功能与用法",
+            )
+            logger.info("[extra] 已注册帮助查询 API（ncd-extra/help）")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 注册帮助 API 失败: {exc}")
+
+    async def _help_items(self) -> list[dict]:
+        """读取 AstrBot 当前启用的指令列表（与 /help 同源）。"""
+        try:
+            from astrbot.core.star import command_management
+
+            items = await command_management.list_commands()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 读取指令列表失败: {exc}")
+            return []
+        rows: list[dict] = []
+        for item in items or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("reserved") or not item.get("enabled", True):
+                continue
+            if item.get("type") == "sub_command" or item.get("parent_signature"):
+                continue
+            if not item.get("plugin_activated", True):
+                continue
+            name = (
+                item.get("effective_command")
+                or item.get("original_command")
+                or item.get("handler_name")
+            )
+            if not name:
+                continue
+            rows.append(
+                {
+                    "name": str(name),
+                    "desc": str(item.get("description") or "").strip(),
+                    "group": str(
+                        item.get("plugin_display_name")
+                        or item.get("plugin")
+                        or "内置"
+                    ).strip()
+                    or "内置",
+                    "aliases": [str(a) for a in (item.get("aliases") or [])],
+                }
+            )
+        rows.sort(key=lambda r: (r["group"], r["name"]))
+        return rows
+
+    @staticmethod
+    def _format_help(rows: list[dict], query: str = "") -> str:
+        q = str(query or "").strip().lower()
+        if not rows:
+            return "暂时查不到指令列表（框架接口不可用）。可以试 /help。"
+
+        def hit(row: dict) -> bool:
+            if not q:
+                return True
+            parts = [row["name"], row["desc"], row["group"], *row["aliases"]]
+            return any(q in str(p).lower() for p in parts)
+
+        if q:
+            matched = [r for r in rows if hit(r)]
+            if not matched:
+                return (
+                    f"没找到和「{query}」相关的功能。\n"
+                    "可以问「有哪些功能」，或按分类问：生图 / 状态图 / 反馈 / 聊天 / 管理。"
+                )
+            lines = [f"和「{query}」相关的功能："]
+            for r in matched[:20]:
+                desc = f" - {r['desc']}" if r["desc"] else ""
+                lines.append(f"/{r['name']}{desc}")
+            if len(matched) > 20:
+                lines.append(f"…还有 {len(matched) - 20} 条，可以再具体点问。")
+            return "\n".join(lines)
+
+        groups: dict[str, list[dict]] = {}
+        for r in rows:
+            groups.setdefault(r["group"], []).append(r)
+        lines = ["功能分类（不知道用什么指令时，直接问我具体要干什么就行）："]
+        for group, group_rows in groups.items():
+            names = "、".join(f"/{r['name']}" for r in group_rows[:8])
+            more = f" 等 {len(group_rows)} 个" if len(group_rows) > 8 else ""
+            lines.append(f"· {group}：{names}{more}")
+        lines.append("")
+        lines.append("想看某个功能怎么用：问我「XX 怎么用」，或者直接说需求。")
+        lines.append(
+            "除了指令，我还能直接做：生图、发 QQ 空间说说、查设备状态、提交/查看反馈、"
+            "开关主动回复等——直接用大白话说需求就行。"
+        )
+        return "\n".join(lines)
+
+    @filter.llm_tool(name="ncd_help")
+    async def ncd_help(self, event: AstrMessageEvent, query: str = "") -> str:
+        """查询 bot 的指令/功能帮助（给不了解指令的用户）。
+
+        ★ 什么时候用：用户问「有什么功能」「怎么用」「你会什么」「不会指令」，
+          或者想找某个功能但不知道敲什么命令时，调用本工具把帮助内容查出来，
+          再用自己的话回复用户（不要编造命令）。
+        ★ 不要用它回答催图/画图等具体任务，那些用对应工具。
+
+        Args:
+            query(string): 关键词或分类，如 生图/空间/反馈/状态/聊天/管理；留空返回功能分类总览
+        """
+        rows = await self._help_items()
+        return self._format_help(rows, query)
+
+    async def api_help(self, query: str = "", **kwargs):
+        """GET /ncd-extra/help?query=...：返回帮助文本（页面/实测用）。"""
+        if not str(query or "").strip():
+            try:
+                from astrbot.api.web import request as _req
+
+                qp = getattr(_req, "query", None)
+                if qp is not None:
+                    query = str(qp.get("query") or "")
+            except Exception:  # noqa: BLE001
+                pass
+        rows = await self._help_items()
+        text = self._format_help(rows, query)
+        return json_response({"ok": True, "count": len(rows), "query": query, "text": text})
 
     @filter.llm_tool(name="extend_turns")
     async def extend_turns(self, event: AstrMessageEvent, rounds: int = 5) -> str:

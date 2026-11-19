@@ -854,6 +854,33 @@ class Main(star.Star):
         _AVATAR_CACHE[url] = (now, value, value != url)
         return value
 
+    async def _avatar_many(
+        self, items: list[tuple[str, str]], timeout: float = 4.0
+    ) -> list[str]:
+        """并发拉多个头像（★2026-11-19 修 M2：原来串行拉，冷缓存时会超过 25 秒超时）。"""
+        if not items:
+            return []
+        sem = asyncio.Semaphore(8)
+
+        async def one(kind: str, peer_id: str) -> str:
+            async with sem:
+                try:
+                    return await self._avatar_value(kind, peer_id)
+                except Exception:  # noqa: BLE001
+                    return ""
+
+        tasks = [asyncio.create_task(one(k, p)) for k, p in items]
+        try:
+            out = await asyncio.wait_for(
+                asyncio.gather(*tasks, return_exceptions=True), timeout=timeout
+            )
+            return [x if isinstance(x, str) else "" for x in out]
+        except asyncio.TimeoutError:
+            for task in tasks:
+                task.cancel()
+            logger.debug("[memory] 头像批量拉取超时，先返回外链")
+            return [_avatar_url(k, p) or "" for k, p in items]
+
     def _register_apis(self) -> None:
         try:
             self.context.register_web_api(
@@ -923,7 +950,8 @@ class Main(star.Star):
                         "peer_kind": kind,
                         "peer_id": peer_id,
                         "peer_name": peer_name,
-                        "avatar": await self._avatar_value(kind, peer_id),
+                        # ★ 2026-11-19 修 M2：头像先占位，循环后并发拉（避免串行 25s 超时）
+                        "avatar": "",
                         "count": len(entries),
                         "summary_count": sum(
                             1 for e in entries if e.get("kind") == "summary"
@@ -941,6 +969,12 @@ class Main(star.Star):
                 )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[memory] 列会话失败: {exc}")
+        # ★ 2026-11-19 修 M2：头像并发拉取（最多 4 秒，超时先返回外链）
+        avatars = await self._avatar_many(
+            [(str(r.get("peer_kind") or ""), str(r.get("peer_id") or "")) for r in rows]
+        )
+        for row, avatar in zip(rows, avatars):
+            row["avatar"] = avatar
         rows.sort(key=lambda x: x["last_ts"], reverse=True)
         return json_response({"items": rows})
 

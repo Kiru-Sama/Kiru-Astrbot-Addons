@@ -47,6 +47,8 @@ class Main(star.Star):
         self._conf: dict = config if isinstance(config, dict) else {}
         self._sessions: dict[str, dict] = {}
         self._pending: dict[str, list[dict]] = {}
+        # ★ 2026-11-19 修 M8：写盘节流（每条消息都全量写 state.json 会拖手机 IO）
+        self._last_track_save = 0.0
         self._load()
         self._register_apis()
 
@@ -83,6 +85,14 @@ class Main(star.Star):
 
     def _save(self) -> None:
         try:
+            # ★ 2026-11-19 修 M8：会话表无限增长 → 只保留最近 200 个
+            if len(self._sessions) > 200:
+                keep = sorted(
+                    self._sessions.items(),
+                    key=lambda kv: float((kv[1] or {}).get("ts") or 0),
+                    reverse=True,
+                )[:200]
+                self._sessions = dict(keep)
             STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
             tmp = STATE_PATH.with_suffix(".tmp")
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -150,7 +160,11 @@ class Main(star.Star):
         info = self._session_info(event)
         info["ts"] = _now()
         self._sessions[umo] = info
-        self._save()
+        # ★ 2026-11-19 修 M8：写盘节流到 5 秒一次（原来每条消息全量写）
+        now = _now()
+        if now - getattr(self, "_last_track_save", 0.0) > 5:
+            self._last_track_save = now
+            self._save()
         return umo
 
     def _prune(self, umo: str) -> None:
@@ -211,6 +225,17 @@ class Main(star.Star):
             logger.warning(f"[inject] 注入失败: {exc}")
             return
         item["injected_at"] = _now()
+        # ★ 2026-11-19 修 M7：注入后模型失败/被 stop 时 after_message_sent 不会触发，
+        #   下一轮会重复注入同一条。限制最多注入 3 次后自动移出队列，避免无限重复。
+        item["inject_count"] = int(item.get("inject_count") or 0) + 1
+        if item["inject_count"] >= 3:
+            try:
+                queue.remove(item)
+            except ValueError:
+                pass
+            if not queue:
+                self._pending.pop(umo, None)
+            logger.info(f"[inject] 念头已注入 3 次仍未消费，自动移出队列 → {umo}")
         logger.info(f"[inject] 已注入({mode}) → {umo}: {text[:40]}")
         self._save()
 

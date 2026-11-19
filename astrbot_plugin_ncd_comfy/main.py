@@ -1821,29 +1821,57 @@ class NcdComfyPlugin(star.Star):
         sessions.sort(key=lambda s: -s["latest"])
         return {"sessions": sessions, "total": sum(s["count"] for s in sessions)}
 
+    def _gallery_dir(self, folder_name: str) -> Path | None:
+        """校验并返回图库会话目录。
+
+        ★ 2026-11-19 修 H1：原来 folder_name 直接拼到 out 下，
+          dir=../../.. 可穿越读取手机任意文件（实测读出 AstrBot 主配置、/root/.bashrc）。
+          现在只允许 out 下的**单层目录名**，且解析后必须仍在 out 内。
+        """
+        out = (
+            Path(PLUGIN_DIR).parents[2]
+            / "data" / "plugin_data" / "ncd_comfy" / "out"
+        )
+        name = str(folder_name or "").strip()
+        if not name or name in (".", "..") or "/" in name or "\\" in name:
+            return None
+        base = (out / name).resolve()
+        try:
+            out_resolved = out.resolve()
+        except Exception:  # noqa: BLE001
+            return None
+        if base == out_resolved or out_resolved not in base.parents:
+            return None
+        if not base.is_dir():
+            return None
+        return base
+
+    @staticmethod
+    def _gallery_file_ok(target: Path) -> bool:
+        """图库只服务图片文件，杜绝借合法目录读配置/文本。"""
+        return target.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
     def _gallery_path(self, folder_name: str, file_name: str) -> Path | None:
         """只解析+校验路径，不读文件内容（缩略图批量用，避免把 4MB 原图读进内存）。"""
-        base = (
-            Path(PLUGIN_DIR).parents[2]
-            / "data" / "plugin_data" / "ncd_comfy" / "out" / folder_name
-        )
+        base = self._gallery_dir(folder_name)
+        if base is None:
+            return None
         target = (base / os.path.basename(file_name)).resolve()
-        try:
-            target.relative_to(base.resolve())
-        except Exception:  # noqa: BLE001
+        if base not in target.parents:
+            return None
+        if not self._gallery_file_ok(target):
             return None
         return target if target.is_file() else None
 
     def _gallery_read(self, folder_name: str, file_name: str):
         """(Path, bytes) 或 (None, None)。"""
-        base = (
-            Path(PLUGIN_DIR).parents[2]
-            / "data" / "plugin_data" / "ncd_comfy" / "out" / folder_name
-        )
+        base = self._gallery_dir(folder_name)
+        if base is None:
+            return None, None
         target = (base / os.path.basename(file_name)).resolve()
-        try:
-            target.relative_to(base.resolve())
-        except Exception:  # noqa: BLE001
+        if base not in target.parents:
+            return None, None
+        if not self._gallery_file_ok(target):
             return None, None
         if not target.is_file():
             return None, None

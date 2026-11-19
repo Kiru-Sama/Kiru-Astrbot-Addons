@@ -47,6 +47,8 @@ class NcdCatchupPlugin(star.Star):
         self._catching_up = False
         self._self_id: str = ""
         self._manual_last: dict[str, float] = {}
+        # ★ 2026-11-19 修 H3：只有成功补台之后，心跳才允许推进处理点
+        self._catchup_done = False
 
     # ------------------------------------------------------------------
     def _conf_bool(self, key: str, default: bool) -> bool:
@@ -160,13 +162,27 @@ class NcdCatchupPlugin(star.Star):
         self._beat = asyncio.create_task(self._heartbeat())
 
     async def _delayed_run(self, delay: int) -> None:
-        try:
-            await asyncio.sleep(delay)
-            await self._catch_up()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.error(f"[catchup] 补回车失败: {type(exc).__name__}: {exc}", exc_info=True)
+        # ★ 2026-11-19 修 H3：补台失败自动重试（NapCat 比 AstrBot 晚连上时很常见），
+        #   只有成功后才允许心跳推进处理点，避免停机窗口被心跳吞掉。
+        for attempt in range(1, 4):
+            try:
+                await asyncio.sleep(delay if attempt == 1 else min(120, 30 * attempt))
+                result = await self._catch_up()
+                if isinstance(result, dict) and result.get("ok") is False:
+                    logger.warning(
+                        f"[catchup] 第 {attempt} 次补台失败：{result.get('error')}，稍后重试"
+                    )
+                    continue
+                self._catchup_done = True
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    f"[catchup] 第 {attempt} 次补回车异常: {type(exc).__name__}: {exc}",
+                    exc_info=True,
+                )
+        logger.warning("[catchup] 连续 3 次补台失败，等待下一次插件重载/重启再补")
 
     async def _heartbeat(self) -> None:
         """运行期间每 60 秒推进处理点 —— 停机后窗口 = 停机时长，而不是固定回溯。"""
@@ -175,6 +191,8 @@ class NcdCatchupPlugin(star.Star):
                 await asyncio.sleep(60)
                 if self._catching_up:
                     continue  # 补台正在跑，别把处理点推过去
+                if not getattr(self, "_catchup_done", False):
+                    continue  # ★ 修 H3：补台还没成功过，不许推进处理点（否则停机窗口永久漏补）
                 state = self._load_state()
                 state["last_ts"] = int(time.time())
                 self._save_state(state)
@@ -338,6 +356,7 @@ class NcdCatchupPlugin(star.Star):
                 "manual": True,
             }
 
+        self._catchup_done = True
         state["last_ts"] = now
         state["last_run"] = now
         self._save_state(state)
