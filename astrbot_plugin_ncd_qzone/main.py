@@ -500,7 +500,7 @@ class Main(star.Star):
             content(string): 说说正文
             images(string): 配图，多个用英文逗号分隔，可填本地路径或 URL；如果用户在当前消息或引用消息里发了图，写 current 即可
             confirmed(boolean): 用户是否已明确同意发布；没有同意不要填 true
-            visibility(string): 可见范围，留空用空间默认；public=公开，friends=好友，private=仅自己
+            visibility(string): 可见范围；留空=公开（1），friends=好友（4），private=仅自己（64）
         """
         if not confirmed:
             return "还没发布：请先在聊天里把说说内容和用户确认，用户明确同意后再调用（confirmed=true）。"

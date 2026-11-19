@@ -2,6 +2,6 @@ name: astrbot_plugin_ncd_status
 display_name: 状态图背景
 desc: /设备状态 信息图的底图设置：内置默认 / 指定一张 / 随机轮换，支持上传图库、模糊与压暗。独立入口，改完即生效。
 author: 本地自用
-version: 1.0.11
+version: 1.0.12
 repo: ""
 astrbot_version: ">=4.28.0,<4.31"

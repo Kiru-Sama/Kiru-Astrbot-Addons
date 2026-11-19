@@ -1,3 +1,15 @@
+## 2026-11-19 深夜 · 剩余中低危修复
+
+- linkd：/run 支持共享 token 校验（_probe/linkd_run_token.txt 存在才启用；extra 配置 ncd_pc_linkd_token 同值），启动并发互斥。
+- extra 1.4.9：/拉起向日葵 带 token；公告先过滤已屏蔽目标再截断（之前屏蔽目标占名额）。
+- feedback 1.0.9：管理命令统一 _is_admin（副管理员可用，不再被框架过滤器拦）；清空反馈写盘失败回滚并如实报错。
+- comfy 2.44.2：/屏蔽tips 原子写；私聊主动跨天重置 noreply；调试 fire 复核白名单。
+- comfy_watchdog：GGUF 清单抽检 10 秒 → 5 分钟；接口异常不再当作成功；重试后降频日志。
+- monitor 1.7.84：/设备状态 出图按会话冷却 60 秒；删除当前背景自动回退内置；schema 文案改为 1 张图。
+- qzone 1.1.4：删死代码；vision-test 用 NamedTemporaryFile；文本审核 prompt 防注入；页面 error/tid 转义；visibility 文档明确留空=公开。
+- status 1.0.12：删除当前背景自动回退内置。
+- 新增 REVIEW_CONTEXT.md：给复用子代理的审查上下文（项目地图/接口陷阱/验证命令/已修清单）。
+
 ## 2026-11-19 晚间 · bug 修复（子代理审查后）
 
 - status 1.0.11：去重/清空 等修改操作提前做管理员校验（之前普通成员可清空整库）；上传文件名清洗、只收真图片、删除只限图库内文件；settings 原子写 tmp 名唯一。

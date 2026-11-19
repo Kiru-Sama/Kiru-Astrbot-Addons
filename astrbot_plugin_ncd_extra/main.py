@@ -721,7 +721,8 @@ class NcdExtraPlugin(star.Star):
                     f"好友已占满 {max_targets} 个名额，本轮没有群被发送"
                     "（好友与群共用 announce_max_targets）"
                 )
-        targets = self.filter_muted_targets(targets[:max_targets], skipped)
+        # ★ 2026-11-19 修 M11：先过滤已屏蔽目标再截断，避免屏蔽占掉名额
+        targets = self.filter_muted_targets(targets, skipped)[:max_targets]
         label = {"friend": "好友", "group": "群", "all": "好友+群"}[scope]
         return bot, targets, label, skipped
 
@@ -1366,6 +1367,13 @@ class NcdExtraPlugin(star.Star):
             base = ""
         return (base or "http://192.168.137.1:8201").rstrip("/")
 
+    def _pc_linkd_token(self) -> str:
+        """linkd /run 的共享 token（PC 侧 _probe/linkd_run_token.txt 同值；空=不校验）。"""
+        try:
+            return str(self._conf.get("ncd_pc_linkd_token") or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
     @filter.command("拉起向日葵", alias={"远程", "向日葵"})
     async def cmd_run_sunlogin(self, event: AstrMessageEvent):
         """让电脑启动向日葵远程控制（仅最高管理员）"""
@@ -1375,6 +1383,11 @@ class NcdExtraPlugin(star.Star):
             yield event.plain_result("只有最高管理员能远程拉起向日葵。")
             return
         url = self._pc_linkd_base() + "/run?app=sunlogin"
+        _tok = self._pc_linkd_token()
+        if _tok:
+            from urllib.parse import quote as _quote
+
+            url += "&token=" + _quote(_tok)
         try:
             import urllib.request as _u
 

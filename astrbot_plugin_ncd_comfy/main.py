@@ -2360,7 +2360,9 @@ class NcdComfyPlugin(star.Star):
                 targets = [
                     u
                     for u in list(self._proactive_guard.keys())
-                    if ":FriendMessage:" in str(u) and self._proactive_enabled_for(u)
+                    if ":FriendMessage:" in str(u)
+                    and self._proactive_enabled_for(u)
+                    and self._proactive_private_umo_allowed(u)
                 ]
                 if not targets:
                     return {
@@ -4977,9 +4979,10 @@ class NcdComfyPlugin(star.Star):
         p = self._tips_muted_path()
         p.parent.mkdir(parents=True, exist_ok=True)
         data = {str(k): True for k, v in sessions.items() if v}
-        p.write_text(
-            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
-        )
+        # ★ 2026-11-19 修低危：原子写（tmp+replace），避免并发写留下半截 JSON
+        tmp = p.with_name(p.name + ".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(p)
 
     def _tips_muted(self, event) -> bool:
         """当前会话是否屏蔽了出图 Tips。"""
@@ -6751,6 +6754,8 @@ class NcdComfyPlugin(star.Star):
             st = self._proactive_private.setdefault(umo, {})
             if str(st.get("day") or "") != today:
                 st["day"] = today
+                # ★ 2026-11-19 修低危：跨天也清零 noreply，避免间隔一直偏大
+                st["noreply"] = 0
                 st["count"] = 0
             if proactive.in_quiet_hours(hour, quiet_start, quiet_end):
                 continue

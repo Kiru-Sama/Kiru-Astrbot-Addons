@@ -160,6 +160,13 @@
     }).join("");
   }
 
+  // ★ 2026-11-19 修低危：记录里的 error/tid 也要转义后再拼 innerHTML
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[<>&"]/g, (c) => (
+      { "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]
+    ));
+  }
+
   function renderRecords() {
     const rows = (state.overview || {}).recent || [];
     if (!rows.length) {
@@ -169,10 +176,10 @@
     $("records").innerHTML = rows.map((r) => {
       const ok = !!r.ok;
       const badge = ok ? '<span class="badge ok">成功</span>' : '<span class="badge bad">失败</span>';
-      const err = ok ? "" : ' · ' + (r.error || "未知错误");
+      const err = ok ? "" : " · " + esc(r.error || "未知错误");
       return '<div class="item"><div class="top"><span>' + fmtTime(r.ts) + " · " + (r.sender || "?") + "</span><span>" + badge + "</span></div>" +
         '<div class="content">' + String(r.content || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</div>" +
-        '<div class="meta">配图 ' + Number(r.images || 0) + " 张" + (r.tid ? " · tid=" + r.tid : "") + err + "</div></div>";
+        '<div class="meta">配图 ' + Number(r.images || 0) + " 张" + (r.tid ? " · tid=" + esc(r.tid) : "") + err + "</div></div>";
     }).join("");
   }
 

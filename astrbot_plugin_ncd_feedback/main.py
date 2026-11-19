@@ -105,7 +105,8 @@ class NcdFeedbackPlugin(star.Star):
         self._items = items
         return items
 
-    def _save_all(self) -> None:
+    def _save_all(self) -> bool:
+        """保存全部反馈；失败返回 False（调用方可回滚并如实报错）。"""
         try:
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             tmp = STORE.with_suffix(".tmp")
@@ -113,8 +114,10 @@ class NcdFeedbackPlugin(star.Star):
                 for it in self._items or []:
                     f.write(json.dumps(it, ensure_ascii=False) + "\n")
             tmp.replace(STORE)
+            return True
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[feedback] 保存反馈失败: {exc}")
+            return False
 
     def _add(self, event: AstrMessageEvent | None, text: str, category: str) -> dict:
         items = self._load()
@@ -294,10 +297,12 @@ class NcdFeedbackPlugin(star.Star):
             "会在反馈面板里排上，处理完就不用再提了。"
         )
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("反馈列表", alias={"反馈待办"})
     async def cmd_list(self, event: AstrMessageEvent) -> None:
         """看最近 10 条待处理反馈"""
+        if not self._is_admin(event):
+            yield event.plain_result("只有管理员 / 副管理员能看反馈列表。")
+            return
         items = [it for it in self._load() if it.get("status") == "new"]
         items.sort(key=lambda x: x.get("ts", 0), reverse=True)
         if not items:
@@ -314,19 +319,22 @@ class NcdFeedbackPlugin(star.Star):
         lines.append("处理：/反馈处理 <编号>　忽略：/反馈忽略 <编号>")
         yield event.plain_result("\n".join(lines))
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("反馈处理", alias={"反馈完成"})
     async def cmd_done(self, event: AstrMessageEvent, fid: str = "") -> None:
         """把某条反馈标记为已处理：/反馈处理 3f2a1b9c"""
+        if not self._is_admin(event):
+            yield event.plain_result("只有管理员 / 副管理员能处理反馈。")
+            return
         yield event.plain_result(self._set_status(str(fid).strip(), "done"))
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("反馈忽略")
     async def cmd_drop(self, event: AstrMessageEvent, fid: str = "") -> None:
         """把某条反馈标记为已忽略"""
+        if not self._is_admin(event):
+            yield event.plain_result("只有管理员 / 副管理员能忽略反馈。")
+            return
         yield event.plain_result(self._set_status(str(fid).strip(), "dropped"))
 
-    @filter.permission_type(filter.PermissionType.ADMIN)
     @filter.command("反馈清空", alias={"清空反馈", "反馈全清"})
     async def cmd_clear(self, event: AstrMessageEvent) -> None:
         """清空全部反馈（先自动备份，仅管理员 / 副管理员）"""
@@ -360,8 +368,13 @@ class NcdFeedbackPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             yield event.plain_result(f"备份失败，没有清空（避免丢数据）：{exc}")
             return
+        old_items = self._items
         self._items = []
-        self._save_all()
+        # ★ 2026-11-19 修 M12：写盘失败要回滚并如实报错（之前内存清空、文件未清，状态不一致）
+        if not self._save_all():
+            self._items = old_items
+            yield event.plain_result("清空失败：写盘失败，已回滚（列表未变）。")
+            return
         sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
         logger.info(
             f"[feedback] 管理员 {sender} 清空反馈 {total} 条（备份 {backup_name}）"

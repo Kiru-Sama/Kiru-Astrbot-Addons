@@ -56,6 +56,14 @@ _RUN_TASKS = {
 }
 
 _lock = threading.Lock()
+# ★ 2026-11-19 修 M8：/run 加可选的共享 token（文件存在才启用），并防止并发重复启动。
+#   PC 侧文件：<工作区>\_probe\linkd_run_token.txt；手机 extra 插件配置同值。
+_run_lock = threading.Lock()
+_RUN_TOKEN_FILE = Path(__file__).parent / "_probe" / "linkd_run_token.txt"
+try:
+    _RUN_TOKEN = _RUN_TOKEN_FILE.read_text(encoding="utf-8").strip()
+except OSError:
+    _RUN_TOKEN = ""
 _state = {"pc_reachable": True, "comfy": None, "launcher": None, "hotspot_ip": None, "ts": 0.0, "detail": ""}
 _history: list[dict] = []
 
@@ -370,6 +378,16 @@ def _sysinfo() -> dict:
 
 
 def _run_app(name: str) -> dict:
+    """白名单启动程序（带并发互斥）；已运行则不重复启动。"""
+    if not _run_lock.acquire(blocking=False):
+        return {"ok": False, "error": "已有启动请求在处理中，别连点"}
+    try:
+        return _run_app_locked(name)
+    finally:
+        _run_lock.release()
+
+
+def _run_app_locked(name: str) -> dict:
     """白名单启动程序；已运行则不重复启动。"""
     key = str(name or "").strip().lower()
     exe = _RUN_APPS.get(key)
@@ -459,6 +477,23 @@ class Handler(BaseHTTPRequestHandler):
                     app = unquote(app)
                 except Exception:
                     pass
+                # ★ 2026-11-19 修 M8：token 文件存在时 /run 必须带正确 token
+                if _RUN_TOKEN:
+                    tok = qs.get("token", "").strip()
+                    if not tok:
+                        try:
+                            tok = str(self.headers.get("X-Linkd-Token") or "").strip()
+                        except Exception:  # noqa: BLE001
+                            tok = ""
+                    if tok != _RUN_TOKEN:
+                        self._send(
+                            403,
+                            json.dumps(
+                                {"ok": False, "error": "unauthorized（/run 需要 token）"},
+                                ensure_ascii=False,
+                            ).encode(),
+                        )
+                        return
                 self._send(200, json.dumps(_run_app(app), ensure_ascii=False).encode())
             elif path == "/link/history":
                 with _lock:

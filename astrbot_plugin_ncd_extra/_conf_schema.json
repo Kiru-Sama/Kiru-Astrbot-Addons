@@ -117,5 +117,11 @@
     "description": "电脑侧 linkd 地址",
     "hint": "/拉起向日葵 用：默认 http://192.168.137.1:8201。\n留空=默认；改端口/换电脑时填这里。",
     "default": ""
+  },
+  "ncd_pc_linkd_token": {
+    "type": "string",
+    "description": "电脑侧 linkd /run 的共享 token",
+    "hint": "留空 = 不校验（兼容旧版）。启用方法：在电脑工作区建 _probe\\linkd_run_token.txt 写入一个随机串，再把同一串填到这里。",
+    "default": ""
   }
 }

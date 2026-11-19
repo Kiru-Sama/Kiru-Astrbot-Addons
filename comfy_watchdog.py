@@ -122,8 +122,8 @@ def _wait_model_lib(max_wait: float = 180.0) -> bool:
     return False
 
 
-def _gguf_ok() -> bool:
-    """启动后抽检：UnetLoaderGGUF 列表为空 = 模型库没扫到（半残实例）。"""
+def _gguf_ok() -> bool | None:
+    """启动后抽检：True=清单正常 / False=清单为空（半残实例）/ None=判断不了。"""
     try:
         with urllib.request.urlopen(
             f"http://127.0.0.1:{PORT}/object_info/UnetLoaderGGUF", timeout=10
@@ -136,7 +136,7 @@ def _gguf_ok() -> bool:
             .get("unet_name")
         )
         if not spec:
-            return True  # 节点不在：不归我管
+            return None  # 节点不在：判断不了，不折腾
         if isinstance(spec[0], list):
             vals = spec[0]
         elif len(spec) > 1 and isinstance(spec[1], dict):
@@ -145,7 +145,7 @@ def _gguf_ok() -> bool:
             vals = []
         return bool(vals)
     except Exception:
-        return True  # 判断不了就不折腾
+        return None  # ★ 2026-11-19：接口异常时不再当成功，交回上层判断
 
 
 _LOCK_PORT = 8202
@@ -175,24 +175,33 @@ def main() -> int:
     proc: subprocess.Popen | None = None
     backoff = 5.0
     retry_bad = 0
+    # ★ 2026-11-19 修 M9：抽检拉长到 5 分钟一次（原来每 10 秒请求 object_info）
+    last_gguf_check = 0.0
+    GGUF_CHECK_INTERVAL = 300.0
     while True:
         try:
             if healthy():
                 if proc is not None:
                     log("ComfyUI 已就绪")
                     proc = None
-                # 就绪后抽检一次模型清单（防止"能连但模型没扫到"的半残实例）
-                if not _gguf_ok():
-                    retry_bad += 1
-                    if retry_bad <= 2:
-                        log(f"模型清单为空（第 {retry_bad} 次），重启 ComfyUI 重新扫描")
-                        _kill_comfy()
-                        time.sleep(8)
-                        backoff = 5.0
-                        continue
-                    log("模型清单仍为空（已重试 2 次），先保持现状，等外挂盘恢复")
-                else:
-                    retry_bad = 0
+                # 就绪后按间隔抽检模型清单（防止"能连但模型没扫到"的半残实例）
+                now_check = time.time()
+                if now_check - last_gguf_check >= GGUF_CHECK_INTERVAL:
+                    last_gguf_check = now_check
+                    gguf = _gguf_ok()
+                    if gguf is False:
+                        retry_bad += 1
+                        if retry_bad <= 2:
+                            log(f"模型清单为空（第 {retry_bad} 次），重启 ComfyUI 重新扫描")
+                            _kill_comfy()
+                            time.sleep(8)
+                            backoff = 5.0
+                            continue
+                        log("模型清单仍为空（已重试 2 次），先保持现状，等外挂盘恢复（5 分钟后再抽检）")
+                    elif gguf is None:
+                        log("模型清单抽检失败（接口异常，判断不了），下一轮再试")
+                    else:
+                        retry_bad = 0
                 backoff = 5.0
                 time.sleep(10)
                 continue

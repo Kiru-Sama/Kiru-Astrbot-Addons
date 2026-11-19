@@ -360,6 +360,15 @@ class Main(star.Star):
             (BG_DIR / name).unlink(missing_ok=True)
         except OSError as exc:
             return json_response({"ok": False, "error": str(exc)})
+        # ★ 2026-11-19 修低危：删掉的正好是当前背景时，把设置回退到内置默认
+        try:
+            cur = _settings_load()
+            if str(cur.get("current") or "") == name:
+                cur["mode"] = "builtin"
+                cur.pop("current", None)
+                _settings_save(cur)
+        except Exception:  # noqa: BLE001
+            pass
         return json_response({"ok": True, "files": _files_list()})
 
     async def api_status_bg_preview(self, name: str = "", **kwargs):

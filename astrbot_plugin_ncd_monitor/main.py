@@ -1474,6 +1474,15 @@ class Main(star.Star):
             (self._status_bg_dir() / name).unlink(missing_ok=True)
         except OSError as exc:
             return json_response({"ok": False, "error": str(exc)})
+        # ★ 2026-11-19 修低危：删掉的正好是当前背景时，把设置回退到内置默认
+        try:
+            cur = self._status_bg_settings()
+            if str(cur.get("current") or "") == name:
+                cur["mode"] = "builtin"
+                cur.pop("current", None)
+                self._status_bg_save(cur)
+        except Exception:  # noqa: BLE001
+            pass
         return json_response({"ok": True, "files": self._status_bg_files()})
 
     async def api_status_bg_preview(self, name: str = "", **kwargs):
@@ -6188,6 +6197,25 @@ class Main(star.Star):
         """渲染并逐张发送；任何失败都只记日志，不影响文字回复。"""
         if not self._status_images_enabled():
             return
+        # ★ 2026-11-19 修 M14：按会话冷却（默认 60 秒），防止群成员反复触发 6000px 渲染
+        try:
+            cooldown = int(self._conf_int("status_image_cooldown", 60))
+        except Exception:  # noqa: BLE001
+            cooldown = 60
+        if cooldown > 0:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            cd_map = getattr(self, "_status_img_last", None)
+            if cd_map is None:
+                cd_map = {}
+                self._status_img_last = cd_map
+            now_ts = time.time()
+            last_ts = float(cd_map.get(umo) or 0.0)
+            if now_ts - last_ts < cooldown:
+                return
+            cd_map[umo] = now_ts
+            if len(cd_map) > 200:
+                for old_key in list(cd_map)[:100]:
+                    cd_map.pop(old_key, None)
         try:
             path = await asyncio.to_thread(self._render_status_image)
             send_path = await asyncio.to_thread(self._make_send_image, path)
