@@ -94,5 +94,23 @@
     "description": "宿主机统计保留天数",
     "hint": "每 10 秒聚合一行，滚动保留这么多天；默认 7。",
     "default": 7
+  },
+  "status_images": {
+    "type": "bool",
+    "description": "/设备状态 附带图片",
+    "hint": "开（默认）：/设备状态 在文字后面再发 3 张信息图（模型/AstrBot、宿主机资源、近 7 天统计）。\n关：只发文字。图片渲染失败不会影响文字回复。",
+    "default": true
+  },
+  "status_image_long_side": {
+    "type": "int",
+    "description": "状态图原图最长边（像素）",
+    "hint": "默认 6000：原生按最长边 6000 渲染（约 2300×6000），字体锐利。\n填 0 = 900px 小图；嫌手机渲染慢可填 3000。",
+    "default": 6000
+  },
+  "status_send_long_side": {
+    "type": "int",
+    "description": "发送到聊天的最长边（像素）",
+    "hint": "默认 2000：原图 6000 留档，聊天只发等比缩小版（约 200~400KB，秒发）。",
+    "default": 2000
   }
 }

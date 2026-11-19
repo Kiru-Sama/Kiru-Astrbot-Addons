@@ -43,7 +43,7 @@ PRESETS: dict[str, dict] = {
         "model_kind": "checkpoint",
         "model_dir": "SDXL",
         "lora_dirs": ("sdxl",),
-        "desc": "SDXL 单文件底模，最快",
+        "desc": "快速、经典二次元图",
     },
     "krea2": {
         "file": "krea2.json",
@@ -52,7 +52,7 @@ PRESETS: dict[str, dict] = {
         "model_kind": "unet",
         "model_dir": "Krea2",
         "lora_dirs": ("Krea2",),
-        "desc": "KREA2（UNET + qwen3vl 文本编码器）",
+        "desc": "慢速、美学绘图模型",
     },
     "anima": {
         "file": "anima.json",
@@ -61,7 +61,7 @@ PRESETS: dict[str, dict] = {
         "model_kind": "unet",
         "model_dir": "anima",
         "lora_dirs": ("anima",),
-        "desc": "Anima（UNET + Qwen3-0.6B 文本编码器）",
+        "desc": "快速、新一代二次元生图模型",
     },
     "moss": {
         "file": "moss.json",
@@ -70,7 +70,19 @@ PRESETS: dict[str, dict] = {
         "model_kind": "unet",
         "model_dir": "MOSS",
         "lora_dirs": ("Moss",),
-        "desc": "MOSS-Image（50 步，最慢但细节最好）",
+        "desc": "中速、消费级显卡最强模型",
+    },
+    "qwen": {
+        "file": "qwen.json",
+        "label": "千问编辑",
+        "eta": 140,
+        "model_kind": "unet_gguf",
+        "model_dir": "Qwen",
+        "lora_dirs": ("Qwen",),
+        "desc": "慢速、参考/融合/角色去衣等全能模型（需 1~3 张参考图）",
+        "requires_reference": True,
+        "max_references": 3,
+        "lora_model_only": True,
     },
 }
 
@@ -205,6 +217,79 @@ def _upstream(graph: dict, link) -> str:
     return str(link[0])
 
 
+_TEXT_KEYS = ("prompt", "text")
+
+
+def _find_text_node(
+    graph: dict, node_id: str, depth: int = 0
+) -> tuple[str, str]:
+    """从采样器的 positive/negative 往上找「真正的文本编码节点」。
+
+    普通工作流就是 CLIPTextEncode 本身；千问编辑流外面还套了
+    FluxKontextMultiReferenceLatentMethod，所以要顺着 conditioning 继续找。
+    返回 (节点 id, 文本字段名)。
+    """
+    if depth > 20:
+        raise WorkflowError("文本编码链太深（可能有环），认不出文本节点")
+    nid = str(node_id)
+    node = graph.get(nid)
+    if node is None:
+        raise WorkflowError(f"文本链指向了不存在的节点 {nid}")
+    ins = node.get("inputs") or {}
+    if "clip" in ins:
+        for key in _TEXT_KEYS:
+            if key in ins:
+                return nid, key
+    # 先按标准包装节点的输入名找，再兜底任意连线
+    for name in ("conditioning", "text", "positive", "negative", "prompt", "model"):
+        link = ins.get(name)
+        if isinstance(link, list) and link and str(link[0]) in graph:
+            try:
+                return _find_text_node(graph, link[0], depth + 1)
+            except WorkflowError:
+                continue
+    for link in ins.values():
+        if isinstance(link, list) and link and str(link[0]) in graph:
+            try:
+                return _find_text_node(graph, link[0], depth + 1)
+            except WorkflowError:
+                continue
+    raise WorkflowError(
+        f"节点 {nid}({node.get('class_type')}) 找不到带 clip 的文本编码节点"
+    )
+
+
+def _find_load_image(
+    graph: dict, link, chain: list[str] | None = None, depth: int = 0
+) -> tuple[str, list[str]] | tuple[None, list[str]]:
+    """顺着任意连线往上找 LoadImage；返回 (LoadImage id, 中间节点列表)。"""
+    chain = list(chain or [])
+    if depth > 10 or not isinstance(link, (list, tuple)) or not link:
+        return None, chain
+    nid = str(link[0])
+    node = graph.get(nid)
+    if node is None:
+        return None, chain
+    if node.get("class_type") == "LoadImage":
+        return nid, chain
+    ins = node.get("inputs") or {}
+    image = ins.get("image")
+    if isinstance(image, list) and image:
+        return _find_load_image(graph, image, chain + [nid], depth + 1)
+    # 兜底：第一个指向已有节点的连线
+    for value in ins.values():
+        if isinstance(value, list) and value and str(value[0]) in graph:
+            hit, mid = _find_load_image(graph, value, chain + [nid], depth + 1)
+            if hit:
+                return hit, mid
+    return None, chain
+
+
+def _slot_index(key: str) -> int:
+    digits = "".join(ch for ch in str(key) if ch.isdigit())
+    return int(digits) if digits else 1
+
+
 def analyze(graph: dict) -> dict:
     """认出图里各个角色。返回节点 id / 连线，给注入参数用。"""
     samplers = [nid for nid, n in graph.items() if n.get("class_type") == "KSampler"]
@@ -222,7 +307,13 @@ def analyze(graph: dict) -> dict:
     negative_id = _upstream(graph, ins["negative"])
     latent_id = _upstream(graph, ins["latent_image"])
     model_src = ins["model"]
-    clip_src = (graph.get(positive_id, {}).get("inputs") or {}).get("clip")
+
+    # ★ 包装节点：positive/negative 可能只是 FluxKontextMultiReferenceLatentMethod，
+    #   真正的文本编码节点要顺着 conditioning 往上找。
+    positive_text_id, prompt_key = _find_text_node(graph, positive_id)
+    negative_text_id, negative_key = _find_text_node(graph, negative_id)
+
+    clip_src = (graph.get(positive_text_id, {}).get("inputs") or {}).get("clip")
     if not clip_src:
         raise WorkflowError("正面提示词节点没有 clip 输入，认不出文本编码器")
 
@@ -244,10 +335,28 @@ def analyze(graph: dict) -> dict:
     if decoders:
         vae_link = (graph[decoders[0]].get("inputs") or {}).get("vae")
 
+    # 参考图槽位：千问编辑流的文本节点上有 image1/image2/image3 输入
+    reference_slots: list[dict] = []
+    for key, value in (graph.get(positive_text_id, {}).get("inputs") or {}).items():
+        if not str(key).startswith("image"):
+            continue
+        if not isinstance(value, list) or not value:
+            continue
+        load_id, between = _find_load_image(graph, value)
+        if load_id:
+            reference_slots.append(
+                {"key": str(key), "loader": load_id, "between": between}
+            )
+    reference_slots.sort(key=lambda s: _slot_index(s["key"]))
+
     return {
         "sampler": sampler_id,
         "positive": positive_id,
         "negative": negative_id,
+        "positive_text": positive_text_id,
+        "negative_text": negative_text_id,
+        "prompt_key": prompt_key,
+        "negative_key": negative_key,
         "latent": latent_id,
         "model_loader": loader_id,
         "model_input": name_input,
@@ -255,6 +364,7 @@ def analyze(graph: dict) -> dict:
         "clip_link": list(clip_src),
         "vae_link": list(vae_link) if vae_link else None,
         "outputs": outputs,
+        "reference_slots": reference_slots,
     }
 
 
@@ -288,6 +398,8 @@ def summarize(graph: dict) -> dict:
     sampler = graph[roles["sampler"]]["inputs"]
     latent = (graph.get(roles["latent"]) or {}).get("inputs") or {}
     model_node = graph[roles["model_loader"]]["inputs"]
+    pos_ins = graph[roles["positive_text"]]["inputs"] or {}
+    neg_ins = graph[roles["negative_text"]]["inputs"] or {}
     return {
         "model": str(model_node.get(roles["model_input"]) or ""),
         "width": int(latent.get("width") or 0),
@@ -296,8 +408,8 @@ def summarize(graph: dict) -> dict:
         "cfg": float(sampler.get("cfg") or 0),
         "sampler_name": str(sampler.get("sampler_name") or ""),
         "scheduler": str(sampler.get("scheduler") or ""),
-        "positive": str((graph[roles["positive"]]["inputs"] or {}).get("text") or ""),
-        "negative": str((graph[roles["negative"]]["inputs"] or {}).get("text") or ""),
+        "positive": str(pos_ins.get(roles["prompt_key"]) or ""),
+        "negative": str(neg_ins.get(roles["negative_key"]) or ""),
     }
 
 
@@ -330,6 +442,7 @@ def apply_params(
     upscale_method: str = "lanczos",
     upscale_max_side: int = 0,
     upscale_model_scale: float = 4.0,
+    reference_images: list[str] | None = None,
 ) -> dict:
     """按参数改一份新图（不动传入的 dict）。
 
@@ -340,13 +453,30 @@ def apply_params(
     """
     g = copy.deepcopy(graph)
     roles = analyze(g)
+    meta = PRESETS.get(str(preset or ""), {})
 
-    pos = g[roles["positive"]]["inputs"]
-    neg = g[roles["negative"]]["inputs"]
+    pos = g[roles["positive_text"]]["inputs"]
+    neg = g[roles["negative_text"]]["inputs"]
     if prompt is not None:
-        pos["text"] = str(prompt)
+        pos[roles["prompt_key"]] = str(prompt)
     if negative is not None:
-        neg["text"] = str(negative)
+        neg[roles["negative_key"]] = str(negative)
+
+    # ★ 千问编辑流：参考图直接填文本节点的 image1/image2/image3 槽位，
+    #   不做 VAEEncode 图生图（那是 latent 重绘，会破坏编辑语义）。
+    ref_names = [str(x).strip() for x in (reference_images or []) if str(x).strip()]
+    if meta.get("requires_reference"):
+        if not ref_names and source_image:
+            ref_names = [str(source_image)]
+        if ref_names:
+            g = _apply_reference_images(g, roles, ref_names)
+        else:
+            raise WorkflowError(
+                f"{meta.get('label') or preset}需要参考图（1~"
+                f"{int(meta.get('max_references') or 3)} 张）："
+                "直接发图 / 引用图再画，或改用其他工作流。"
+            )
+        source_image = None  # 参考图已单独处理，不再走 VAEEncode
 
     if source_image:
         real_w, real_h = _insert_img2img(g, roles, source_image, width, height)
@@ -378,7 +508,12 @@ def apply_params(
                 g[nid]["inputs"]["filename_prefix"] = str(filename_prefix)
 
     if loras:
-        g = _insert_loras(g, roles, loras)
+        g = _insert_loras(
+            g,
+            roles,
+            loras,
+            model_only=bool(meta.get("lora_model_only")),
+        )
 
     if control_image:
         g = _insert_controlnet(
@@ -583,14 +718,53 @@ def _insert_img2img(
     return w, h
 
 
-def _insert_loras(graph: dict, roles: dict, loras: list[dict]) -> dict:
+def _drop_node_if_unused(graph: dict, node_id: str) -> None:
+    """节点已经没有任何连线引用时才删（多图裁剪时清掉多余分支）。"""
+    nid = str(node_id)
+    if nid not in graph:
+        return
+    for node in graph.values():
+        for value in (node.get("inputs") or {}).values():
+            if isinstance(value, list) and value and str(value[0]) == nid:
+                return
+    graph.pop(nid, None)
+
+
+def _apply_reference_images(
+    graph: dict, roles: dict, names: list[str]
+) -> dict:
+    """把参考图文件名填进 image1/image2/image3 槽位；多余的槽位整条删掉。"""
+    slots = list(roles.get("reference_slots") or [])
+    if not slots:
+        raise WorkflowError(
+            "这个工作流的参考图槽位认不出来（文本节点上没有 image1/2/3）"
+        )
+    names = [str(n) for n in names if str(n).strip()][: len(slots)]
+    pos_ins = graph[roles["positive_text"]].get("inputs") or {}
+    for i, slot in enumerate(slots):
+        if i < len(names):
+            graph[slot["loader"]]["inputs"]["image"] = names[i]
+        else:
+            pos_ins.pop(slot["key"], None)
+            for nid in list(slot.get("between") or []) + [slot["loader"]]:
+                _drop_node_if_unused(graph, nid)
+    return graph
+
+
+def _insert_loras(
+    graph: dict, roles: dict, loras: list[dict], model_only: bool = False
+) -> dict:
     """在 model / clip 链上串 LoraLoader。
 
-    ★ 必须同时改三处引用：KSampler.model、正面.clip、负面.clip，
+    ★ 普通族必须同时改三处引用：KSampler.model、正面.clip、负面.clip，
       否则模型加了 LoRA 而文本编码器没加（或反过来），风格会和预期不一样。
+    ★ model_only=True（千问编辑流）：文本编码器是 GGUF 包装的 Qwen2.5-VL，
+      LoraLoader 的 clip 分支不适用，只接 LoraLoaderModelOnly。
     """
     prev_model = list(roles["model_link"])
     prev_clip = list(roles["clip_link"])
+    pos_id = roles.get("positive_text") or roles["positive"]
+    neg_id = roles.get("negative_text") or roles["negative"]
     for i, lora in enumerate(loras, 1):
         name = str(lora.get("name") or "").strip()
         if not name:
@@ -600,22 +774,34 @@ def _insert_loras(graph: dict, roles: dict, loras: list[dict]) -> dict:
         # 防止和原图节点 id 撞车
         while node_id in graph:
             node_id += "_x"
-        graph[node_id] = {
-            "class_type": "LoraLoader",
-            "inputs": {
-                "model": prev_model,
-                "clip": prev_clip,
-                "lora_name": name,
-                "strength_model": strength,
-                "strength_clip": strength,
-            },
-        }
-        prev_model = [node_id, 0]
-        prev_clip = [node_id, 1]
+        if model_only:
+            graph[node_id] = {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "model": prev_model,
+                    "lora_name": name,
+                    "strength_model": strength,
+                },
+            }
+            prev_model = [node_id, 0]
+        else:
+            graph[node_id] = {
+                "class_type": "LoraLoader",
+                "inputs": {
+                    "model": prev_model,
+                    "clip": prev_clip,
+                    "lora_name": name,
+                    "strength_model": strength,
+                    "strength_clip": strength,
+                },
+            }
+            prev_model = [node_id, 0]
+            prev_clip = [node_id, 1]
 
     graph[roles["sampler"]]["inputs"]["model"] = prev_model
-    graph[roles["positive"]]["inputs"]["clip"] = prev_clip
-    graph[roles["negative"]]["inputs"]["clip"] = prev_clip
+    if not model_only:
+        graph[pos_id]["inputs"]["clip"] = prev_clip
+        graph[neg_id]["inputs"]["clip"] = prev_clip
 
     return graph
 

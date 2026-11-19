@@ -29,6 +29,25 @@ import sys as _sys_path
 _PLUGIN_DIR_PATH = _os_path.path.dirname(_os_path.path.abspath(__file__))
 
 
+def _qq_list(raw) -> list[str]:
+    """把配置里的 QQ 名单解析成去重列表（保序）。
+
+    支持逗号、中文逗号、分号、空格和换行分隔：
+        "111,222" / "111，222" / "111\n222" / "111 222"
+    """
+    import re as _re_qq
+
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    out: list[str] = []
+    for part in _re_qq.split(r"[,，;；\s]+", s):
+        p = part.strip()
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
 def _load_local(name: str, filename: str):
     """按路径加载同目录模块；文件 mtime 变了就重新加载。"""
     path = _os_path.path.join(_PLUGIN_DIR_PATH, filename)
@@ -64,6 +83,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -298,8 +318,15 @@ _QUOTA_JOB_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
     "ncd_comfy_quota_job", default=""
 )
 # 出队时固定的额度快照：画幅/降质用这份，运行中不追溯。
+_REF_PATHS: contextvars.ContextVar[list[str]] = contextvars.ContextVar(
+    "comfy_ref_paths", default=[]
+)
 _QUOTA_SNAPSHOT: contextvars.ContextVar[object | None] = contextvars.ContextVar(
     "ncd_comfy_quota_snapshot", default=None
+)
+# ★ 2026-11-19：本次出图使用的画风模板名（写进生图信息）
+_STYLE_NAMES: contextvars.ContextVar[tuple[str, ...]] = contextvars.ContextVar(
+    "ncd_comfy_style_names", default=()
 )
 # ★ 历史裁剪单次删除上限（P1-6）
 HISTORY_DELETE_CAP = 20
@@ -331,7 +358,7 @@ class NcdComfyPlugin(star.Star):
         self._conf: dict[str, Any] = config or {}
         # 管理员 QQ 从配置读（源码/发布包里不再出现私人 QQ 号）
         self._PRIMARY_ADMIN = str(self._conf.get('ncd_primary_admin') or '').strip()
-        self._DEPUTY_ADMIN = str(self._conf.get('ncd_deputy_admin') or '').strip()
+        self._DEPUTY_ADMINS = _qq_list(self._conf.get('ncd_deputy_admin'))
         self._client_obj: ComfyClient | None = None
         self._client_key: tuple | None = None
         self._revealed: dict[str, float] = {}
@@ -348,6 +375,8 @@ class NcdComfyPlugin(star.Star):
         # 上一张生成的图（reference="last" 做图生图时用）
         # 每个会话的“上一张图”（reference="last" 用；绝不能全局共用）
         self._last_image_bytes: dict[str, bytes] = {}
+        # 用户发来的图（按会话缓存最近一张）：AstrBot 下载失败时靠协议端兜底抓到的
+        self._last_user_image_bytes: dict[str, tuple[float, bytes]] = {}
         # 视觉能力（由 modalities 决定）与“探测失败”分开缓存
         self._vision_caps: dict[str, tuple[float, bool]] = {}
         self._vision_probe_fail: dict[str, float] = {}
@@ -415,6 +444,8 @@ class NcdComfyPlugin(star.Star):
         # ★ 2026-11-03：随机间隔 + 上下文判断所需的状态
         self._proactive_next: dict[str, float] = {}
         self._proactive_recent_lines: dict[str, list[str]] = {}
+        # 私聊主动消息状态：{umo: {next, day, count, last_sent, noreply}}
+        self._proactive_private: dict[str, dict] = {}
         self._group_last_msg: dict[str, float] = {}
         # ★ 2026-11-05：群级审核开关（/审核 开|关），优先于全局 comfy_group_guard
         self._audit_guard: dict[str, bool] = {}
@@ -441,10 +472,16 @@ class NcdComfyPlugin(star.Star):
         #   主动发言循环要自己恢复（否则要等下一次 @ 才启动）。
         try:
             self._proactive_load()
-            if self._proactive_mentions and self._proactive_task is None:
+            self._proactive_guard_load()
+            private_on = any(
+                ":FriendMessage:" in str(k) and bool(v)
+                for k, v in self._proactive_guard.items()
+            )
+            if (self._proactive_mentions or private_on) and self._proactive_task is None:
                 self._proactive_task = asyncio.create_task(self._proactive_loop())
                 logger.info(
-                    f"[comfy] 主动发言循环已恢复（{len(self._proactive_mentions)} 个群）"
+                    f"[comfy] 主动发言循环已恢复（{len(self._proactive_mentions)} 个群"
+                    f"{'，含私聊主动' if private_on else ''}）"
                 )
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 主动发言循环启动失败（忽略）: {exc}")
@@ -683,7 +720,7 @@ class NcdComfyPlugin(star.Star):
     # ★ 2026-11-02：管理员 QQ 不再写死在代码里（发布包会带 PII）。
     #   值从配置读：ncd_primary_admin / ncd_deputy_admin（见 _conf_schema.json）。
     _PRIMARY_ADMIN = ""
-    _DEPUTY_ADMIN = ""
+    _DEPUTY_ADMINS: list[str] = []
 
     def _deputy_allowed(self, event) -> bool:
         """副管理员：只在「主管理员不在当前群」时按管理员对待。
@@ -693,11 +730,11 @@ class NcdComfyPlugin(star.Star):
         """
         try:
             sender = str(event.get_sender_id() or "")
-            # ★ 2026-11-02（盲审 P3）：配置为空时 sender 与 _DEPUTY_ADMIN 都是 ""，
+            # ★ 2026-11-02（盲审 P3）：配置为空时 sender 与名单都空，
             #   相等就会往下走进「副管理员」分支 —— 必须先排除空值。
-            if not self._DEPUTY_ADMIN or not sender:
+            if not self._DEPUTY_ADMINS or not sender:
                 return False
-            if sender != self._DEPUTY_ADMIN:
+            if sender not in self._DEPUTY_ADMINS:
                 return False
             gid = str(event.get_group_id() or "")
             if not gid:
@@ -768,7 +805,7 @@ class NcdComfyPlugin(star.Star):
         try:
             sender = str(event.get_sender_id() or "")
             gid = str(event.get_group_id() or "")
-            if sender == self._DEPUTY_ADMIN and gid:
+            if sender and sender in self._DEPUTY_ADMINS and gid:
                 await self._refresh_deputy_state(gid)
                 return self._deputy_allowed(event)
         except Exception as exc:  # noqa: BLE001
@@ -853,6 +890,34 @@ class NcdComfyPlugin(star.Star):
                 1, min(150, int(self._quota_engine().config.degrade_steps))
             )
         return steps
+
+    def _qwen_degrade_block(self, event: AstrMessageEvent, preset_name: str) -> str:
+        """私聊进入降质期后，千问编辑流直接禁用（它没有 14 步降质档可跑）。
+
+        其他工作流照旧按 degrade_steps 快速出图；群聊/管理员不受影响。
+        """
+        if str(preset_name or "").strip().lower() != "qwen":
+            return ""
+        try:
+            if self._is_admin_event(event) or self._is_group_chat(event):
+                return ""
+            snap = self._quota_snapshot(event, force_private=True)
+            if snap is None or not getattr(snap, "degraded", False):
+                return ""
+            steps = int(self._quota_engine().config.degrade_steps)
+            daily = int(getattr(snap, "daily_count", 0) or 0)
+            logger.info(
+                f"[comfy] 降质期禁用千问编辑流 user="
+                f"{getattr(event, 'get_sender_id', lambda: '')()} daily={daily}"
+            )
+            return (
+                f"这张先不能画：你本时段私聊生图已到 {daily} 张，进入降质期，"
+                f"其他工作流按 {steps} 步快速出图，**千问编辑流在降质期不可用**。\n"
+                "→ 换其他工作流（moss / sdxl / anima / krea2），或等 08:00 额度刷新后再用千问编辑。"
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 千问降质检查失败（放行）: {exc}")
+            return ""
 
     def _quota_block_message(self, event: AstrMessageEvent) -> str:
         """70 张禁生图：私聊新任务直接拒绝；群聊/管理员不拦。"""
@@ -1204,7 +1269,12 @@ class NcdComfyPlugin(star.Star):
         """只读：各群「最后被 @ 时间 / 最后主动发言时间」（排障用）。"""
         try:
             self._proactive_load_if_needed()
-            if self._proactive_mentions and (
+            self._proactive_guard_load()
+            private_on = any(
+                ":FriendMessage:" in str(k) and bool(v)
+                for k, v in self._proactive_guard.items()
+            )
+            if (self._proactive_mentions or private_on) and (
                 self._proactive_task is None or self._proactive_task.done()
             ):
                 self._proactive_task = asyncio.create_task(self._proactive_loop())
@@ -1240,6 +1310,28 @@ class NcdComfyPlugin(star.Star):
                 ],
                 "loop_running": bool(self._proactive_task and not self._proactive_task.done()),
                 "groups": rows,
+                "private": {
+                    umo: {
+                        "enabled": bool(self._proactive_guard.get(umo)),
+                        "next_in_min": round((float(st.get("next") or 0.0) - now) / 60.0, 1)
+                        if st.get("next")
+                        else None,
+                        "count": int(st.get("count") or 0),
+                        "noreply": int(st.get("noreply") or 0),
+                        "day": str(st.get("day") or ""),
+                        "last_sent_ago_min": round(
+                            (now - float(st.get("last_sent") or 0.0)) / 60.0, 1
+                        )
+                        if st.get("last_sent")
+                        else None,
+                    }
+                    for umo, st in sorted(self._proactive_private.items())
+                },
+                "private_guard": {
+                    str(k): bool(v)
+                    for k, v in self._proactive_guard.items()
+                    if ":FriendMessage:" in str(k)
+                },
             }
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[comfy] 读取主动发言状态失败: {exc}", exc_info=True)
@@ -1326,6 +1418,13 @@ class NcdComfyPlugin(star.Star):
                 ["GET"],
                 "出图图库：缩略图",
             )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-comfy/gallery/thumbs",
+                self.api_gallery_thumbs,
+                ["GET", "POST"],
+                "图库缩略图（批量）",
+            )
+
             self.context.register_web_api(
                 f"/{PLUGIN_DIR_NAME}/ncd-comfy/gallery/full",
                 self.api_gallery_full,
@@ -1604,6 +1703,31 @@ class NcdComfyPlugin(star.Star):
                 continue
         return {"ok": False, "error": last if insts else "no platform"}
 
+    @staticmethod
+    def _history_public_entry(e: dict, prompt_limit: int = 0) -> dict:
+        """历史条目转成面板字段；prompt_limit>0 时截短（列表用）。"""
+        prompt = str(e.get("prompt") or "")
+        if prompt_limit and len(prompt) > prompt_limit:
+            prompt = prompt[:prompt_limit]
+        return {
+            "file": os.path.basename(str(e.get("file") or "")),
+            "ts": float(e.get("ts") or 0),
+            "size": e.get("size"),
+            "prompt": prompt,
+            "negative": str(e.get("negative") or ""),
+            "preset": e.get("preset") or "",
+            "model": os.path.basename(str(e.get("model") or "")),
+            "loras": e.get("loras") or [],
+            "width": e.get("width") or 0,
+            "height": e.get("height") or 0,
+            "steps": e.get("steps"),
+            "cfg": e.get("cfg"),
+            "seed": e.get("seed"),
+            "denoise": e.get("denoise"),
+            "upscale": e.get("upscale") or "",
+            "seconds": e.get("seconds"),
+        }
+
     async def api_gallery(self):
         """图库：按会话目录列出所有历史图（含 umo/数量/时间）。"""
         import hashlib
@@ -1653,6 +1777,33 @@ class NcdComfyPlugin(star.Star):
                             )
                         except Exception:  # noqa: BLE001
                             pass
+                # ★ 旧记录没存宽高：顺手用图片文件头补上并写回索引（只补缺的）
+                _dims_changed = False
+                for _e in items:
+                    if _e.get("width") and _e.get("height"):
+                        continue
+                    _fp = folder / os.path.basename(str(_e.get("file") or ""))
+                    if not _fp.is_file():
+                        continue
+                    try:
+                        from PIL import Image as _PILImage
+
+                        with _PILImage.open(_fp) as _im:
+                            _w, _h = _im.size
+                        _e["width"], _e["height"] = int(_w), int(_h)
+                        _dims_changed = True
+                    except Exception:
+                        continue
+                if _dims_changed:
+                    try:
+                        hist.write_text(
+                            json.dumps(
+                                {"version": 1, "items": items}, ensure_ascii=False
+                            ),
+                            encoding="utf-8",
+                        )
+                    except Exception as _exc:  # noqa: BLE001
+                        logger.debug(f"[comfy] 回填宽高写索引失败: {_exc}")
                 items.sort(key=lambda e: float(e.get("ts") or 0), reverse=True)
                 latest = max((float(e.get("ts") or 0) for e in items), default=0)
                 sessions.append({
@@ -1662,20 +1813,26 @@ class NcdComfyPlugin(star.Star):
                     "count": len(items),
                     "latest": latest,
                     "items": [
-                        {
-                            "file": os.path.basename(str(e.get("file") or "")),
-                            "ts": float(e.get("ts") or 0),
-                            "size": e.get("size"),
-                            "prompt": str(e.get("prompt") or "")[:300],
-                            "preset": e.get("preset") or "",
-                            "model": os.path.basename(str(e.get("model") or "")),
-                        }
+                        self._history_public_entry(e, prompt_limit=200)
                         for e in items[:300]
                         if e.get("file")
                     ],
                 })
         sessions.sort(key=lambda s: -s["latest"])
         return {"sessions": sessions, "total": sum(s["count"] for s in sessions)}
+
+    def _gallery_path(self, folder_name: str, file_name: str) -> Path | None:
+        """只解析+校验路径，不读文件内容（缩略图批量用，避免把 4MB 原图读进内存）。"""
+        base = (
+            Path(PLUGIN_DIR).parents[2]
+            / "data" / "plugin_data" / "ncd_comfy" / "out" / folder_name
+        )
+        target = (base / os.path.basename(file_name)).resolve()
+        try:
+            target.relative_to(base.resolve())
+        except Exception:  # noqa: BLE001
+            return None
+        return target if target.is_file() else None
 
     def _gallery_read(self, folder_name: str, file_name: str):
         """(Path, bytes) 或 (None, None)。"""
@@ -1711,6 +1868,76 @@ class NcdComfyPlugin(star.Star):
         except Exception:  # noqa: BLE001
             return ""
 
+    def _thumb_cache_root(self) -> Path:
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "thumbcache"
+        )
+
+    def _thumb_b64_cached(self, path: Path, side: int = 240) -> str:
+        """缩略图带磁盘缓存：同一张图（mtime/size 不变）第二次直接读缓存。"""
+        import base64
+        import io as _io
+
+        try:
+            st = path.stat()
+            digest = hashlib.sha1(
+                f"{path.name}:{st.st_mtime_ns}:{st.st_size}:{side}".encode()
+            ).hexdigest()
+            root = self._thumb_cache_root()
+            root.mkdir(parents=True, exist_ok=True)
+            cache = root / f"{digest}.jpg"
+            if cache.is_file():
+                raw = cache.read_bytes()
+                if raw:
+                    return "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+            from PIL import Image
+
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                img.thumbnail((side, side))
+                buf = _io.BytesIO()
+                img.save(buf, "JPEG", quality=72)
+            raw = buf.getvalue()
+            try:
+                cache.write_bytes(raw)
+            except OSError:
+                pass
+            return "data:image/jpeg;base64," + base64.b64encode(raw).decode()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    async def api_gallery_thumbs(self):
+        """批量缩略图：POST {dir, files:[...]} → {ok, thumbs:{file:dataURL}}。"""
+        from astrbot.api.web import request as _req
+
+        try:
+            body = await _req.json({}) or {}
+        except Exception:  # noqa: BLE001
+            body = {}
+        dir_name = str(body.get("dir") or "")
+        files = body.get("files") or []
+        if not dir_name or not isinstance(files, list) or not files:
+            return {"ok": False, "error": "缺少 dir 或 files"}
+        files = [str(x) for x in files][:120]
+
+        def _work() -> dict:
+            out: dict[str, str] = {}
+            for name in files:
+                path = self._gallery_path(dir_name, name)
+                if path is None:
+                    continue
+                thumb = self._thumb_b64_cached(path)
+                if thumb:
+                    out[name] = thumb
+            return out
+
+        thumbs = await asyncio.to_thread(_work)
+        return {"ok": True, "thumbs": thumbs}
+
     async def api_gallery_thumb(self):
         from astrbot.api.web import request as _req
 
@@ -1718,12 +1945,12 @@ class NcdComfyPlugin(star.Star):
             q = _req.query or {}
         except Exception:  # noqa: BLE001
             q = {}
-        path, data = self._gallery_read(
+        path = self._gallery_path(
             str(q.get("dir") or ""), str(q.get("file") or "")
         )
         if path is None:
             return {"ok": False}
-        return {"ok": True, "thumb": self._thumb_b64(data)}
+        return {"ok": True, "thumb": self._thumb_b64_cached(path)}
 
     async def api_gallery_full(self):
         from astrbot.api.web import request as _req
@@ -1741,10 +1968,32 @@ class NcdComfyPlugin(star.Star):
         mime = "image/png"
         if data[:4] == b"\xff\xd8\xff\xe0" or data[:2] == b"\xff\xd8":
             mime = "image/jpeg"
+        meta: dict = {}
+        try:
+            folder = path.parent
+            hist = folder / HISTORY_FILE
+            if hist.is_file():
+                raw = json.loads(hist.read_text(encoding="utf-8"))
+                for e in (raw.get("items") or []):
+                    if os.path.basename(str(e.get("file") or "")) == path.name:
+                        meta = self._history_public_entry(e)
+                        meta["width"], meta["height"] = e.get("width") or 0, e.get("height") or 0
+                        break
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 读图库完整信息失败（忽略）: {exc}")
+        if not meta.get("width"):
+            try:
+                from PIL import Image as _PILImage
+
+                with _PILImage.open(path) as _im:
+                    meta["width"], meta["height"] = _im.size
+            except Exception:  # noqa: BLE001
+                pass
         return {
             "ok": True,
             "mime": mime,
             "b64": "data:" + mime + ";base64," + base64.b64encode(data).decode(),
+            "meta": meta,
         }
 
     # ------------------------------------------------------------------
@@ -1920,9 +2169,19 @@ class NcdComfyPlugin(star.Star):
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 读取法典状态失败（忽略）: {exc}")
             codex = {"loaded": False, "error": str(exc)[:200]}
+        models: list[dict] = []
+        try:
+            models = self._all_models_for_picker()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 读取底模清单失败（忽略）: {exc}")
         return {
             "status": "ok",
-            "data": {"styles": self._styles_load(), "loras": loras, "codex": codex},
+            "data": {
+                "styles": self._styles_load(),
+                "loras": loras,
+                "models": models,
+                "codex": codex,
+            },
         }
 
     async def api_console_action(self):
@@ -1932,10 +2191,148 @@ class NcdComfyPlugin(star.Star):
             body = {}
         action = str(body.get("action") or "").strip().lower()
 
+        if action == "debug_write_data_file":
+            # 调试：往 AstrBot data 目录写文件（base64，支持分块 append），用于同步词库
+            try:
+                import base64 as _b64
+
+                data_root = Path("/root/AstrBot/data")
+                if not data_root.is_dir():
+                    data_root = Path(PLUGIN_DIR).parents[2] / "data"
+                rel = str(body.get("path") or "").strip().lstrip("/")
+                if not rel:
+                    return {"status": "error", "message": "需要 path"}
+                p = (data_root / rel).resolve()
+                allowed = [
+                    (data_root / "plugin_data" / "ncd_comfy").resolve(),
+                    (data_root / "config").resolve(),
+                ]
+                if not any(
+                    str(p).startswith(str(base) + os.sep) for base in allowed
+                ):
+                    return {
+                        "status": "error",
+                        "message": "只允许写 plugin_data/ncd_comfy 或 config 目录",
+                    }
+                raw = str(body.get("b64") or "")
+                if not raw:
+                    return {"status": "error", "message": "需要 b64"}
+                blob = _b64.b64decode(raw)
+                p.parent.mkdir(parents=True, exist_ok=True)
+                mode = "ab" if body.get("append") else "wb"
+                with p.open(mode) as fh:
+                    fh.write(blob)
+                return {
+                    "status": "ok",
+                    "data": {
+                        "path": str(p),
+                        "size": p.stat().st_size,
+                        "chunk": len(blob),
+                    },
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "promptlib_probe":
+            # 调试：检查标签库是否可用 + 示例查询
+            try:
+                lib = self._promptlib()
+                out = {
+                    "available": bool(getattr(lib, "available", False)),
+                    "tag_root": str(getattr(lib, "tag_root", "") or ""),
+                }
+                q = str(body.get("query") or "散兵").strip()
+                try:
+                    res = await asyncio.to_thread(
+                        lib.query, q, limit=5, codex_limit=2, scope="character"
+                    )
+                    out["characters"] = [str(x) for x in (res.characters or [])][:5]
+                    out["tags"] = [
+                        getattr(x, "tag", str(x)) for x in (res.tags or [])
+                    ][:5]
+                    out["note"] = str(getattr(res, "note", "") or "")
+                except Exception as exc:  # noqa: BLE001
+                    out["query_error"] = str(exc)[:200]
+                return {"status": "ok", "data": out}
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "debug_write_pkg_file":
+            # 调试：写 AstrBot 包内文件（自动备份 + 语法校验 + 只允许包目录内）
+            try:
+                import astrbot as _pkg
+
+                base = Path(_pkg.__file__).resolve().parent
+                rel = str(body.get("path") or "").strip()
+                text = str(body.get("text") or "")
+                if not rel:
+                    return {"status": "error", "message": "需要 path"}
+                p = (base / rel).resolve()
+                if not str(p).startswith(str(base) + os.sep):
+                    return {"status": "error", "message": "只允许写 astrbot 包内文件"}
+                if not p.is_file():
+                    return {"status": "error", "message": f"文件不存在: {p}"}
+                try:
+                    compile(text, str(p), "exec")
+                except SyntaxError as exc:
+                    return {"status": "error", "message": f"语法错误，未写入: {exc}"}
+                backup = p.with_name(
+                    p.name + ".bak-" + time.strftime("%Y%m%d-%H%M%S")
+                )
+                backup.write_bytes(p.read_bytes())
+                p.write_text(text, encoding="utf-8")
+                return {
+                    "status": "ok",
+                    "data": {"path": str(p), "backup": str(backup), "size": len(text)},
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "debug_read_pkg_file":
+            # 调试（只读）：读 AstrBot 包内文件，用来排查框架行为（如 /help）
+            try:
+                import astrbot as _pkg
+
+                base = Path(_pkg.__file__).resolve().parent
+                rel = str(body.get("path") or "").strip()
+                if not rel:
+                    return {"status": "ok", "data": {"base": str(base)}}
+                p = (base / rel).resolve()
+                if not str(p).startswith(str(base) + os.sep):
+                    return {"status": "error", "message": "只允许读 astrbot 包内文件"}
+                if not p.is_file():
+                    return {"status": "error", "message": f"文件不存在: {p}"}
+                text = p.read_text(encoding="utf-8", errors="replace")
+                return {
+                    "status": "ok",
+                    "data": {"path": str(p), "size": len(text), "text": text[:15000]},
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
         if action == "clean_cache":
             try:
                 self._scan_cache.clear()
                 return {"status": "ok", "data": {"message": "模型/预设缓存已清"}}
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "expand_lora":
+            # 调试：验证「lora=模板名」会被展开成哪些 LoRA
+            try:
+                lora_spec = str(body.get("lora") or "").strip()
+                preset_name = self._preset(str(body.get("preset") or ""))
+                fixed, notes, err = self._fix_lora_specs(preset_name, lora_spec)
+                return {
+                    "status": "ok",
+                    "data": {
+                        "input": lora_spec,
+                        "preset": preset_name,
+                        "expanded": fixed,
+                        "notes": notes,
+                        "error": err,
+                    },
+                }
             except Exception as exc:  # noqa: BLE001
                 return {"status": "error", "message": str(exc)[:300]}
 
@@ -1951,6 +2348,91 @@ class NcdComfyPlugin(star.Star):
                         "running": sorted(ids.get("running") or []),
                         "pending": sorted(ids.get("pending") or []),
                         "ours": ours,
+                    },
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "proactive_private_fire":
+            # 调试：立刻让已开启的私聊主动发一次（不等排期），用于验证效果
+            try:
+                self._proactive_guard_load()
+                targets = [
+                    u
+                    for u in list(self._proactive_guard.keys())
+                    if ":FriendMessage:" in str(u) and self._proactive_enabled_for(u)
+                ]
+                if not targets:
+                    return {
+                        "status": "ok",
+                        "data": {
+                            "message": "没有开启私聊主动的会话；先在私聊发 /主动回复 开",
+                            "results": [],
+                        },
+                    }
+                results = []
+                for umo in targets:
+                    text = await self._proactive_private_generate(umo)
+                    if not text:
+                        results.append({"umo": umo, "sent": False, "reason": "SKIP"})
+                        continue
+                    ok = await self._send_plain(umo, text)
+                    if ok:
+                        await self._proactive_private_store(umo, text)
+                        st = self._proactive_private.setdefault(umo, {})
+                        st["last_sent"] = time.time()
+                        st["noreply"] = int(st.get("noreply") or 0) + 1
+                        st["count"] = int(st.get("count") or 0) + 1
+                        st["day"] = time.strftime("%Y-%m-%d")
+                        low, high, _dm, _sg = self._proactive_private_limits()
+                        st["next"] = self._proactive_private_pick_next(
+                            time.time(), low, high
+                        )
+                        self._proactive_save()
+                    results.append({"umo": umo, "sent": ok, "text": text})
+                return {"status": "ok", "data": {"results": results}}
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "presets_probe":
+            # 调试：列出所有预设的解析结果与底模清单（验证新工作流是否注册成功）
+            try:
+                rows = []
+                for _name, _meta in presets.PRESETS.items():
+                    item = {
+                        "preset": _name,
+                        "label": _meta.get("label"),
+                        "desc": _meta.get("desc"),
+                        "eta": _meta.get("eta"),
+                    }
+                    try:
+                        _g = presets.load_graph(_name)
+                        item["nodes"] = len(_g)
+                        item["summary"] = presets.summarize(_g)
+                    except Exception as _exc:  # noqa: BLE001
+                        item["error"] = f"{type(_exc).__name__}: {_exc}"
+                    try:
+                        item["models"] = len(await asyncio.to_thread(self._scan, _name))
+                    except Exception as _exc:  # noqa: BLE001
+                        item["models_error"] = str(_exc)[:150]
+                    rows.append(item)
+                return {"status": "ok", "data": {"presets": rows}}
+            except Exception as exc:  # noqa: BLE001
+                return {"status": "error", "message": str(exc)[:300]}
+
+        if action == "codex_reset":
+            # 用插件内置的法典副本强制覆盖（换新版法典时用）
+            try:
+                self._ensure_codex(force=True)
+                self._codex_cache = {}
+                self._codex_index_cache = None
+                return {
+                    "status": "ok",
+                    "data": {
+                        "message": "内置法典已重新安装",
+                        "sfw_lines": len(self._codex_lines("sfw")),
+                        "nsfw_lines": len(self._codex_lines("nsfw")),
+                        "chapters": len(self._codex_index(["sfw", "nsfw"], limit=400)),
                     },
                 }
             except Exception as exc:  # noqa: BLE001
@@ -2528,6 +3010,11 @@ class NcdComfyPlugin(star.Star):
             "audit_recent": self._audit_recent[-10:],
             "queue_entries": queue_entries,
         }
+        # ★ 2026-11-17：把额度/限流摘要发布到总线，供 monitor 的设备状态图使用
+        try:
+            data["quota_summary"] = self._quota_summary_for_bus()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 额度摘要发布失败: {exc}")
         try:
             BUS_STATE.parent.mkdir(parents=True, exist_ok=True)
             tmp = BUS_STATE.with_suffix(".tmp")
@@ -2535,6 +3022,39 @@ class NcdComfyPlugin(star.Star):
             os.replace(tmp, BUS_STATE)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 写面板状态失败: {exc}")
+
+    def _quota_summary_for_bus(self) -> dict:
+        """额度面板的数字摘（总线发布用，30 秒缓存，给 monitor 状态图）。"""
+        now = time.time()
+        cache = getattr(self, "_quota_summary_cache", None)
+        if cache and now - float(cache[0]) < 30.0:
+            return cache[1]
+        eng = self._quota_engine()
+        d = eng.dashboard(now)
+        daily = d.get("ranking") or []
+        glob = d.get("global") or {}
+        pools = d.get("pools") or {}
+        window = d.get("window") or {}
+        totals = d.get("totals") or {}
+        summary = {
+            "private_count": int(glob.get("count") or 0),
+            "private_limit": int(glob.get("limit") or 0),
+            "private_triggered": bool(glob.get("triggered")),
+            "group_count": int(glob.get("group_count") or 0),
+            "group_total": int(glob.get("group_total") or 0),
+            "users": len(daily),
+            "total_images": int(totals.get("images") or 0),
+            "total_users": int(totals.get("users") or 0),
+            "bans": len(d.get("bans") or []),
+            "throttle_pool": len(pools.get("throttle") or []),
+            "canvas_pool": len(pools.get("canvas") or []),
+            "window_label": str(window.get("label") or ""),
+            "window_key": str(window.get("key") or ""),
+            "window_remaining": int(window.get("remaining") or 0),
+            "ts": now,
+        }
+        self._quota_summary_cache = (now, summary)
+        return summary
 
     def _build_queue_entries(self) -> list[dict]:
         """构建排队列表（按队列顺序展开为每张一条），给面板做卡片式可视化。
@@ -2675,7 +3195,11 @@ class NcdComfyPlugin(star.Star):
           Krea2 预设能选到 Anima 的底模，采样时直接报 shape 不匹配。
         """
         meta = presets.PRESETS[preset]
-        kind = "checkpoints" if meta.get("model_kind") == "checkpoint" else "diffusion_models"
+        kind = {
+            "checkpoint": "checkpoints",
+            "unet": "diffusion_models",
+            "unet_gguf": "diffusion_models_gguf",
+        }.get(str(meta.get("model_kind") or "unet"), "diffusion_models")
         key = f"model:{kind}:{preset}"
         hit = self._scan_cache.get(key)
         if hit and time.time() - hit[0] < 60:
@@ -3352,6 +3876,341 @@ class NcdComfyPlugin(star.Star):
                     return data
         return None
 
+    def _raw_aiocqhttp_segments(self, event: AstrMessageEvent) -> list:
+        """取 aiocqhttp 原始消息段（AstrBot 把 event 塞进了 abm.raw_message）。"""
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if raw is None:
+            return []
+        if isinstance(raw, dict):
+            segs = raw.get("message")
+        else:
+            segs = getattr(raw, "message", None)
+        if segs is None:
+            try:
+                segs = raw["message"]  # type: ignore[index]
+            except Exception:  # noqa: BLE001
+                return []
+        return list(segs or [])
+
+    @staticmethod
+    def _seg_get(seg, key: str, default=""):
+        if isinstance(seg, dict):
+            return seg.get(key, default)
+        try:
+            return seg[key]  # type: ignore[index]
+        except Exception:  # noqa: BLE001
+            return getattr(seg, key, default)
+
+    @staticmethod
+    def _seg_data(seg) -> dict:
+        data = None
+        if isinstance(seg, dict):
+            data = seg.get("data")
+        else:
+            try:
+                data = seg["data"]  # type: ignore[index]
+            except Exception:  # noqa: BLE001
+                data = getattr(seg, "data", None)
+        return data if isinstance(data, dict) else {}
+
+    def _read_local_ref(self, file_field: str) -> bytes | None:
+        """file 字段本身就是本地路径/file:// 时直接读。"""
+        text = str(file_field or "").strip()
+        if not text:
+            return None
+        if text.startswith("file://"):
+            from urllib.request import url2pathname
+
+            text = url2pathname(text[len("file://"):])
+        try:
+            path = Path(text)
+            if path.is_file():
+                data = path.read_bytes()
+                if data:
+                    logger.info(f"[comfy] 参考图直接读到本地文件: {path.name}")
+                    return data[: 12 * 1024 * 1024]
+        except OSError:
+            pass
+        return None
+
+    async def _onebot_images_bytes(self, event: AstrMessageEvent) -> list[bytes]:
+        """从 OneBot 原始段 + 引用消息里收集**所有**图片字节（群聊引用图兜底）。"""
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return []
+        try:
+            segs = self._raw_aiocqhttp_segments(event)
+        except Exception:  # noqa: BLE001
+            segs = []
+        if not segs:
+            return []
+
+        images: list[dict] = []
+        reply_ids: list[str] = []
+        for seg in segs:
+            typ = str(self._seg_get(seg, "type") or "")
+            data = self._seg_data(seg)
+            if typ == "image":
+                images.append(data)
+            elif typ == "reply":
+                rid = str(data.get("id") or "")
+                if rid:
+                    reply_ids.append(rid)
+
+        async def _bytes_of(data: dict) -> bytes | None:
+            file_field = str(data.get("file") or "")
+            got = self._read_local_ref(file_field)
+            if got:
+                return got
+            for cand in (file_field, str(data.get("url") or "")):
+                cand = cand.strip()
+                if not cand or len(cand) > 4000:
+                    continue
+                try:
+                    info = await bot.call_action("get_image", file=cand)
+                except Exception:  # noqa: BLE001
+                    continue
+                if isinstance(info, dict):
+                    for key in ("file", "path", "file_path"):
+                        got = self._read_local_ref(str(info.get(key) or ""))
+                        if got:
+                            return got
+                    b64 = str(info.get("base64") or "")
+                    if b64:
+                        try:
+                            import base64 as _b64
+
+                            return _b64.b64decode(b64)[: 12 * 1024 * 1024]
+                        except Exception:  # noqa: BLE001
+                            pass
+            return None
+
+        out: list[bytes] = []
+        for data in images:
+            got = await _bytes_of(data)
+            if got:
+                out.append(got)
+        for rid in reply_ids:
+            try:
+                msg = await bot.call_action("get_msg", message_id=int(rid))
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(msg, dict):
+                continue
+            for seg in msg.get("message") or []:
+                if str(self._seg_get(seg, "type") or "") != "image":
+                    continue
+                got = await _bytes_of(self._seg_data(seg))
+                if got:
+                    out.append(got)
+        return out
+
+    async def _onebot_image_bytes(self, event: AstrMessageEvent) -> bytes | None:
+        """兜底：问 NapCat 要原始图片文件（get_image / get_msg）。
+
+        用户图因为 rkey 失效导致 AstrBot 下载 400 时，NapCat 本地缓存通常还在，
+        OneBot 的 get_image 能直接返回本地路径。
+        """
+        bot = getattr(event, "bot", None)
+        if bot is None:
+            return None
+        try:
+            segs = self._raw_aiocqhttp_segments(event)
+        except Exception:  # noqa: BLE001
+            segs = []
+        if not segs:
+            return None
+
+        # 收集：当前消息里的图 + 引用消息 id
+        images: list[dict] = []
+        reply_ids: list[str] = []
+        for seg in segs:
+            typ = str(self._seg_get(seg, "type") or "")
+            data = self._seg_data(seg)
+            if typ == "image":
+                images.append(data)
+            elif typ == "reply":
+                rid = str(data.get("id") or "")
+                if rid:
+                    reply_ids.append(rid)
+
+        async def _bytes_of(data: dict) -> bytes | None:
+            file_field = str(data.get("file") or "")
+            # 1) file 就是本地路径
+            got = self._read_local_ref(file_field)
+            if got:
+                return got
+            # 2) 问协议端要本地文件
+            candidates = [file_field, str(data.get("url") or "")]
+            for cand in candidates:
+                cand = cand.strip()
+                if not cand or len(cand) > 4000:
+                    continue
+                try:
+                    info = await bot.call_action("get_image", file=cand)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[comfy] get_image 失败 {cand[:60]}: {exc}")
+                    continue
+                if isinstance(info, dict):
+                    for key in ("file", "path", "file_path"):
+                        got = self._read_local_ref(str(info.get(key) or ""))
+                        if got:
+                            return got
+                    b64 = str(info.get("base64") or "")
+                    if b64:
+                        try:
+                            import base64 as _b64
+
+                            return _b64.b64decode(b64)[: 12 * 1024 * 1024]
+                        except Exception:  # noqa: BLE001
+                            pass
+            return None
+
+        for data in images:
+            got = await _bytes_of(data)
+            if got:
+                logger.info("[comfy] 参考图走协议端兜底（下载失败但拿到了本地文件）")
+                return got
+
+        # 3) 引用消息里的图：get_msg 再找一次
+        for rid in reply_ids:
+            try:
+                msg = await bot.call_action("get_msg", message_id=int(rid))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[comfy] get_msg 失败 {rid}: {exc}")
+                continue
+            if not isinstance(msg, dict):
+                continue
+            for seg in msg.get("message") or []:
+                typ = str(self._seg_get(seg, "type") or "")
+                if typ != "image":
+                    continue
+                got = await _bytes_of(self._seg_data(seg))
+                if got:
+                    logger.info("[comfy] 参考图从引用消息兜底拿到（get_msg → get_image）")
+                    return got
+        return None
+
+    def _component_images_bytes(self, comps, depth: int = 0) -> list[bytes]:
+        """收集一组消息段里的**所有**图片字节（qwen 多图参考用）。"""
+        out: list[bytes] = []
+        if not comps or depth > 3:
+            return out
+        for comp in comps:
+            if isinstance(comp, Comp.Image):
+                path = getattr(comp, "path", None) or getattr(comp, "file", None)
+                if path and Path(str(path)).is_file():
+                    data = Path(str(path)).read_bytes()
+                    if data:
+                        out.append(data[: 12 * 1024 * 1024])
+                continue
+            chain = getattr(comp, "chain", None)
+            if chain and not isinstance(comp, Comp.Image):
+                out.extend(self._component_images_bytes(chain, depth + 1))
+        return out
+
+    async def _message_images_bytes(self, event: AstrMessageEvent) -> list[bytes]:
+        """当前消息（含引用消息）里的全部图片；组件拿不到时走协议端兜底。
+
+        ★ 群聊里「引用别人的图 + 文本命令」时，AstrBot 事件常常只有 Reply 和文本，
+          图既不在组件里、也不一定在 Reply.chain 里，所以这里还要从原始 OneBot
+          段和 get_msg 里翻。
+        """
+        data = self._component_images_bytes(event.get_messages() or [])
+        if data:
+            return data
+        try:
+            many = await self._onebot_images_bytes(event)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 协议端多图兜底失败: {exc}")
+            many = []
+        if many:
+            return many
+        one = await self._onebot_image_bytes(event)
+        return [one] if one else []
+
+    @staticmethod
+    def _is_message_ref(spec: str) -> bool:
+        return str(spec or "").strip().lower() in (
+            "auto", "自动", "自己选", "自动选",
+            "message", "msg", "image", "图", "这张", "消息图",
+        )
+
+    async def _collect_reference_list(
+        self, specs: list[str], event: AstrMessageEvent, limit: int
+    ) -> list[bytes]:
+        """按 specs 收集最多 limit 张参考图（去重）。"""
+        import hashlib as _hashlib
+
+        out: list[bytes] = []
+        seen: set[str] = set()
+
+        def _add(data: bytes | None) -> None:
+            if not data or len(out) >= limit:
+                return
+            digest = _hashlib.sha1(data).hexdigest()
+            if digest in seen:
+                return
+            seen.add(digest)
+            out.append(data)
+
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        clean = [str(s).strip() for s in specs if str(s).strip()]
+        if clean and self._is_message_ref(clean[0]):
+            for data in await self._message_images_bytes(event):
+                _add(data)
+                if len(out) >= limit:
+                    break
+            # ★ 群聊引用图常见失败：当前消息/引用链都没解析出图
+            #   回退：最近缓存用户图 → 旧单图逻辑（含历史最近用户图）→ auto
+            if not out:
+                cached = self._last_user_image_bytes.get(umo)
+                if cached and time.time() - cached[0] < 1800:
+                    _add(cached[1])
+                    if out:
+                        logger.info("[comfy] 参考图用最近缓存用户图兜底")
+            if not out:
+                try:
+                    _add(await self._reference_bytes("message", event))
+                    if out:
+                        logger.info("[comfy] 参考图回退到 reference=message 的旧兜底（历史图）")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[comfy] reference=message 兜底失败: {exc}")
+            if not out and clean[0].strip().lower() in (
+                "auto", "自动", "自己选", "自动选"
+            ):
+                try:
+                    _add(await self._reference_bytes("auto", event))
+                    if out:
+                        logger.info("[comfy] 参考图回退到 reference=auto 的旧兜底")
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug(f"[comfy] reference=auto 兜底失败: {exc}")
+            if out and umo:
+                # 这次拿到的图顺手进缓存，下次同会话引用图失败还能用
+                self._last_user_image_bytes[umo] = (time.time(), out[0])
+        for spec in clean:
+            if len(out) >= limit:
+                break
+            if self._is_message_ref(spec):
+                continue
+            try:
+                _add(await self._reference_bytes(spec, event))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 取参考图失败 spec={spec!r}: {exc}")
+        return out
+
+    async def _freeze_references(
+        self, specs: list[str], event: AstrMessageEvent, limit: int
+    ) -> list[str]:
+        """把多张易失参考图落成稳定路径（异步出图入队前用）。"""
+        paths: list[str] = []
+        for data in await self._collect_reference_list(specs, event, limit):
+            try:
+                paths.append(self._save_ref_bytes(data, "ref"))
+            except OSError as exc:
+                logger.warning(f"[comfy] 冻结参考图失败: {exc}")
+        return [p for p in paths if p]
+
     def _reference_ready(
         self, reference: str, event: AstrMessageEvent
     ) -> str | None:
@@ -3670,6 +4529,14 @@ class NcdComfyPlugin(star.Star):
             if data:
                 logger.info("[comfy] reference=auto 用当前/引用消息图")
                 return data
+            cached = self._last_user_image_bytes.get(umo)
+            if cached and time.time() - cached[0] < 1800:
+                logger.info("[comfy] reference=auto 用缓存用户图")
+                return cached[1]
+            data = await self._onebot_image_bytes(event)
+            if data:
+                logger.info("[comfy] reference=auto 用协议端兜底图")
+                return data
             # 2) 会话历史里最近一张用户图；3) 最后生成的图。
             data = await self._history_image_bytes(umo, user_only=True)
             if data:
@@ -3724,6 +4591,20 @@ class NcdComfyPlugin(star.Star):
                                 return Path(str(p)).read_bytes()
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[comfy] 异步取图失败: {exc}")
+            # ★ 图片到达时已经抓过缓存（_capture_user_image），优先用
+            _umo_cache = str(getattr(event, "unified_msg_origin", "") or "")
+            cached = self._last_user_image_bytes.get(_umo_cache)
+            if cached and time.time() - cached[0] < 1800:
+                logger.info("[comfy] reference=message 用缓存用户图")
+                return cached[1]
+            # ★ 4.29.4 + NapCat rkey 失效：AstrBot 下载 gchat 图 400，
+            #   直接问协议端要本地文件（通常还能拿到）
+            try:
+                data = await self._onebot_image_bytes(event)
+                if data:
+                    return data
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 协议端取图兜底失败: {exc}")
             # ★ 12:27 的实际坑：引用消息只解析出 Reply，chain 为空，图在
             #   上一条用户消息里。message 取不到时回退到历史最近一张用户图。
             umo = str(getattr(event, "unified_msg_origin", "") or "")
@@ -3826,6 +4707,75 @@ class NcdComfyPlugin(star.Star):
                     continue
             name_part, _, strength = spec.partition(":")
             prefix = "+" if add_on else ""
+            # ★ 画风模板：lora 参数直接写模板名，先展开成模板里的 LoRA 配比再校验
+            tpl = self._style_find(name_part)
+            if tpl and prefix == "":
+                tpl_items = list(tpl.get("items") or [])
+                if not tpl_items:
+                    return lora, notes, (
+                        f"画风模板「{tpl.get('name')}」里还没有 LoRA，"
+                        "先去操控台「画风模板法典」补上。"
+                        + TOOL_RETRY_HINT
+                    )
+                try:
+                    mult = float(strength) if str(strength).strip() else 1.0
+                except (TypeError, ValueError):
+                    mult = 1.0
+                if mult <= 0:
+                    mult = 1.0
+                expanded = 0
+                for item in tpl_items:
+                    item_lora = str(item.get("lora") or "").strip()
+                    if not item_lora:
+                        continue
+                    try:
+                        weight = float(item.get("weight") or 1.0) * mult
+                    except (TypeError, ValueError):
+                        weight = mult
+                    weight = max(0.0, min(2.0, weight))
+                    resolved = ""
+                    try:
+                        resolved = self._resolve_name(item_lora, pool, "LoRA")
+                    except ComfyError:
+                        other = ""
+                        try:
+                            other = self._resolve_name(
+                                item_lora, self._scan_loras(), "LoRA"
+                            )
+                        except ComfyError:
+                            other = ""
+                        same, why = pick_family_lora(
+                            os.path.basename(
+                                str(other or item_lora).replace("/", "\\")
+                            ),
+                            pool,
+                        )
+                        if same:
+                            resolved = same
+                            notes.append(
+                                f"{os.path.basename(item_lora)} → {same}（{why}）"
+                            )
+                    if not resolved:
+                        return lora, notes, (
+                            f"画风模板「{tpl.get('name')}」里的 LoRA "
+                            f"「{os.path.basename(item_lora)}」不在 "
+                            f"{presets.PRESETS[preset_name]['label']} 这一族。"
+                            "去操控台把这行换成同族 LoRA，或单独用 lora 参数指定。"
+                            + TOOL_RETRY_HINT
+                        )
+                    out_specs.append(f"{resolved}:{weight:g}")
+                    expanded += 1
+                if expanded:
+                    notes.append(
+                        f"画风模板「{tpl.get('name')}」展开为 {expanded} 个 LoRA"
+                    )
+                    logger.info(
+                        f"[comfy] 入队前画风模板「{tpl.get('name')}」已展开为 {expanded} 个 LoRA"
+                    )
+                    continue
+                return lora, notes, (
+                    f"画风模板「{tpl.get('name')}」里没有可用的 LoRA。"
+                )
             try:
                 self._resolve_name(name_part, pool, "LoRA")
                 out_specs.append(prefix + spec)
@@ -4002,6 +4952,43 @@ class NcdComfyPlugin(star.Star):
             return ""
         return _random.choice(items)
 
+    # --------------------- 会话级 Tips 屏蔽（/屏蔽tips） --------------------- #
+    def _tips_muted_path(self):
+        return (
+            Path(PLUGIN_DIR).parents[2]
+            / "data"
+            / "plugin_data"
+            / "ncd_comfy"
+            / "tips_muted.json"
+        )
+
+    def _tips_muted_sessions(self) -> dict:
+        try:
+            p = self._tips_muted_path()
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    return {str(k): bool(v) for k, v in data.items() if v}
+        except Exception:  # noqa: BLE001
+            pass
+        return {}
+
+    def _tips_muted_save(self, sessions: dict) -> None:
+        p = self._tips_muted_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        data = {str(k): True for k, v in sessions.items() if v}
+        p.write_text(
+            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+
+    def _tips_muted(self, event) -> bool:
+        """当前会话是否屏蔽了出图 Tips。"""
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            return bool(umo and self._tips_muted_sessions().get(umo))
+        except Exception:  # noqa: BLE001
+            return False
+
     # ------------------------- LoRA 画风模板 ------------------------- #
     def _styles_path(self):
         return (
@@ -4045,6 +5032,8 @@ class NcdComfyPlugin(star.Star):
                     "id": str(s.get("id") or f"style{idx + 1}").strip()[:40],
                     "name": name,
                     "desc": str(s.get("desc") or "").strip()[:120],
+                    # ★ 底模：有的画风必须配特定底模，模板里存一份推荐值
+                    "model": str(s.get("model") or "").strip()[:200],
                     "items": items,
                 }
             )
@@ -4069,6 +5058,48 @@ class NcdComfyPlugin(star.Star):
             json.dumps({"styles": styles}, ensure_ascii=False, indent=1),
             encoding="utf-8",
         )
+
+    def _all_models_for_picker(self) -> list[dict]:
+        """操控台「底模」下拉用：所有预设可用的底模，按预设分组。"""
+        out: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for preset_name in presets.PRESETS:
+            try:
+                items = self._scan(preset_name)
+            except Exception:  # noqa: BLE001
+                continue
+            label = str(presets.PRESETS[preset_name].get("label") or preset_name)
+            for m in items or []:
+                name = str(m.get("name") or "")
+                if not name:
+                    continue
+                key = (name, preset_name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(
+                    {
+                        "name": name,
+                        "preset": preset_name,
+                        "preset_label": label,
+                        "size_mb": m.get("size_mb") or 0,
+                    }
+                )
+        return out
+
+    def _template_model_for(self, lora_spec: str) -> tuple[str, str]:
+        """从 lora 参数里找模板自带的底模；返回 (底模名, 模板名)。"""
+        for spec in re.split(r"[,，]", str(lora_spec or "")):
+            name_part = spec.strip().split(":")[0].strip()
+            if not name_part:
+                continue
+            tpl = self._style_find(name_part)
+            if not tpl:
+                continue
+            model = str(tpl.get("model") or "").strip()
+            if model:
+                return model, str(tpl.get("name") or "")
+        return "", ""
 
     def _style_find(self, want: str) -> dict | None:
         """按名字找模板（大小写不敏感）。"""
@@ -4174,6 +5205,7 @@ class NcdComfyPlugin(star.Star):
         cfg: float = 0.0,
         denoise: float = 0.0,
         simple: bool = False,
+        style_names: list[str] | None = None,
     ) -> str:
         """出图参数卡片：每个类别单独一行，值在下一行，信息全量不截断。"""
         accel = os.path.basename(str(self._conf_str("comfy_default_lora") or ""))
@@ -4181,6 +5213,15 @@ class NcdComfyPlugin(star.Star):
 
         blocks.append("模型：")
         blocks.append(str(used_model or "未知"))
+
+        _styles_txt = [str(s).strip() for s in (style_names or []) if str(s).strip()]
+        if _styles_txt:
+            _uniq: list[str] = []
+            for _s in _styles_txt:
+                if _s not in _uniq:
+                    _uniq.append(_s)
+            blocks.append("画风模板：")
+            blocks.append("、".join(_uniq))
 
         if loras:
             _lines: list[str] = []
@@ -4261,7 +5302,7 @@ class NcdComfyPlugin(star.Star):
             parts.append(f"🔄 切换底模：{os.path.basename(model)}（第一次加载会慢一点）")
         if parts:
             # ★ 只在「确实要加载权重」时发这一句；别的进度一律不推。
-            _tip = self._tip()
+            _tip = "" if self._tips_muted(event) else self._tip()
             await self._notify(
                 event,
                 "⏳ 正在加载模型权重…出图后直接把图发你。"
@@ -4355,6 +5396,9 @@ class NcdComfyPlugin(star.Star):
             "model",
             "lora",
             "reference",
+            "reference2",
+            "reference3",
+            "references",
             "denoise",
             "force",
             # ★ 2026-11-02（盲审 P2-9）：这些也决定出图结果，
@@ -4513,6 +5557,11 @@ class NcdComfyPlugin(star.Star):
         token = _ASYNC_RUN.set(True)
         quota_token = _QUOTA_JOB_ID.set(str((job or {}).get("job_id") or ""))
         snap_token = _QUOTA_SNAPSHOT.set((job or {}).get("quota"))
+        # ★ references（千问多图参考的稳定路径）不是工具参数，走 ContextVar 传给
+        #   comfy_generate，避免 "unexpected keyword argument"
+        kwargs = dict(kwargs or {})
+        ref_token = _REF_PATHS.set(list(kwargs.pop("references", None) or []))
+        style_token = _STYLE_NAMES.set(tuple(kwargs.pop("style_names", None) or ()))
         logger.info(f"[comfy] 后台任务开始 → {umo}")
         try:
             result = await self.comfy_generate(event, **kwargs)
@@ -4534,6 +5583,8 @@ class NcdComfyPlugin(star.Star):
             _ASYNC_RUN.reset(token)
             _QUOTA_JOB_ID.reset(quota_token)
             _QUOTA_SNAPSHOT.reset(snap_token)
+            _REF_PATHS.reset(ref_token)
+            _STYLE_NAMES.reset(style_token)
         if isinstance(result, str):
             # ★ 后台任务提前返回文字（参数被拒/画幅提醒）时，日志里必须留下一行，
             #   否则表现就是“入队后凭空消失”，前面那五次就是这么查不出来的。
@@ -5102,6 +6153,53 @@ class NcdComfyPlugin(star.Star):
             "切换：/简化生图信息 on 或 /简化生图信息 off"
         )
 
+    @filter.command("屏蔽tips", alias={"屏蔽tip", "隐藏tips", "关闭tips"})
+    async def cmd_mute_tips(self, event: AstrMessageEvent):
+        """会话级开关：屏蔽/恢复出图时附带的随机 Tips。"""
+        if not self._is_admin_event(event):
+            yield event.plain_result("这个指令只有管理员能用。")
+            return
+        raw = str(getattr(event, "message_str", "") or "").strip()
+        args = ""
+        for prefix in (
+            "/屏蔽tips",
+            "／屏蔽tips",
+            "/屏蔽tip",
+            "／屏蔽tip",
+            "/隐藏tips",
+            "／隐藏tips",
+            "/关闭tips",
+            "／关闭tips",
+        ):
+            if raw.startswith(prefix):
+                args = raw[len(prefix) :].strip()
+                break
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        sessions = self._tips_muted_sessions()
+        cur = bool(sessions.get(umo, False))
+        word = args.lower()
+        if word in {"on", "开", "开启", "1", "true", "是"}:
+            sessions[umo] = True
+            self._tips_muted_save(sessions)
+            yield event.plain_result("本会话出图 Tips：已屏蔽（不再夹带随机小提示）")
+            return
+        if word in {"off", "关", "关闭", "0", "false", "否"}:
+            sessions.pop(umo, None)
+            self._tips_muted_save(sessions)
+            yield event.plain_result("本会话出图 Tips：已恢复")
+            return
+        # 无参数：切换
+        if cur:
+            sessions.pop(umo, None)
+            self._tips_muted_save(sessions)
+            yield event.plain_result("本会话出图 Tips：已恢复")
+        else:
+            sessions[umo] = True
+            self._tips_muted_save(sessions)
+            yield event.plain_result(
+                "本会话出图 Tips：已屏蔽\n恢复：/屏蔽tips off"
+            )
+
     @filter.command("审核", alias={"出图审核"})
     async def audit_cmd(self, event: AstrMessageEvent, arg: GreedyStr = ""):
         """查看/切换审核档位（A 严 / B 宽 / C 无）；管理员还能设全局档位。"""
@@ -5305,9 +6403,11 @@ class NcdComfyPlugin(star.Star):
 
     @filter.command("主动回复", alias={"主动发言"})
     async def proactive_cmd(self, event: AstrMessageEvent, arg: GreedyStr = ""):
-        """查看/开关群聊主动发言。"""
-        if not self._is_admin_event(event):
-            yield event.plain_result("只有管理员 / 副管理员能改主动发言。")
+        """查看/开关主动发言（群聊限管理员；私聊本人可开关自己的）。"""
+        # ★ 2026-11-16：私聊不再要求管理员（只影响自己的会话）；
+        #   群聊开关仍限管理员/副管理员。私聊“开”是否可用由白名单控制。
+        if self._is_group_chat(event) and not self._is_admin_event(event):
+            yield event.plain_result("只有管理员 / 副管理员能改本群主动发言。")
             return
         raw_arg = str(arg or "").strip()
         if not raw_arg or (" " not in raw_arg and len(raw_arg) <= 3):
@@ -5329,10 +6429,7 @@ class NcdComfyPlugin(star.Star):
 
         if not parts or head in ("状态", "status", "?"):
             if not self._is_group_chat(event):
-                yield event.plain_result(
-                    f"主动发言默认：{'开' if self._conf_bool('comfy_proactive_enabled', True) else '关'}\n"
-                    "在群里用 /主动回复 开|关 控制单个群。"
-                )
+                yield event.plain_result(self._proactive_private_status(umo))
                 return
             interval_txt = "1~90 分钟随机"
             yield event.plain_result(
@@ -5366,7 +6463,39 @@ class NcdComfyPlugin(star.Star):
             return
 
         if not self._is_group_chat(event):
-            yield event.plain_result("开关只对群聊有意义；在群里发 /主动回复 开|关。")
+            self._proactive_guard_load()
+            self._proactive_guard[umo] = target
+            self._proactive_guard_save()
+            if target and not self._proactive_private_allowed(event):
+                yield event.plain_result(
+                    "私聊主动消息目前只对白名单开放；找 bot 管理员把你的 QQ 加进白名单。"
+                )
+                return
+            if target:
+                low, high, _dm, _sg = self._proactive_private_limits()
+                st = self._proactive_private.setdefault(umo, {})
+                st["next"] = self._proactive_private_pick_next(
+                    time.time(), low, high
+                )
+                st.setdefault("count", 0)
+                st.setdefault("noreply", 0)
+                st["day"] = time.strftime("%Y-%m-%d")
+                self._proactive_save()
+                if self._proactive_task is None or self._proactive_task.done():
+                    self._proactive_task = asyncio.create_task(self._proactive_loop())
+                logger.info(f"[comfy] 私聊主动消息 {umo} → 开")
+                yield event.plain_result(
+                    "私聊主动消息已打开。\n"
+                    "之后每 0.5~12 小时随机主动找你一次；0~8 点不发；每天最多 "
+                    f"{self._conf_int('comfy_proactive_private_daily_max', 4)} 条。\n"
+                    f"下次大概：{time.strftime('%m-%d %H:%M', time.localtime(st['next']))}\n"
+                    "关：/主动回复 关"
+                )
+            else:
+                self._proactive_private.pop(umo, None)
+                self._proactive_save()
+                logger.info(f"[comfy] 私聊主动消息 {umo} → 关")
+                yield event.plain_result("私聊主动消息已关闭。")
             return
         self._proactive_guard_load()
         self._proactive_guard[umo] = target
@@ -5391,7 +6520,7 @@ class NcdComfyPlugin(star.Star):
             raw = json.loads(self._proactive_file().read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             return
-        if self._proactive_mentions or self._proactive_sent:
+        if self._proactive_mentions or self._proactive_sent or self._proactive_private:
             return  # 内存里已有（别用磁盘旧值覆盖刚记下的 @）
         if isinstance(raw, dict):
             self._proactive_mentions = {
@@ -5407,6 +6536,11 @@ class NcdComfyPlugin(star.Star):
                 str(k): [str(x) for x in (v or [])]
                 for k, v in (raw.get("recent") or {}).items()
             }
+            self._proactive_private = {
+                str(k): dict(v)
+                for k, v in (raw.get("private") or {}).items()
+                if isinstance(v, dict)
+            }
 
     def _proactive_save(self) -> None:
         try:
@@ -5420,6 +6554,7 @@ class NcdComfyPlugin(star.Star):
                         "sent": self._proactive_sent,
                         "next": self._proactive_next,
                         "recent": self._proactive_recent_lines,
+                        "private": self._proactive_private,
                     },
                     ensure_ascii=False,
                 ),
@@ -5428,6 +6563,194 @@ class NcdComfyPlugin(star.Star):
             os.replace(tmp, path)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 主动发言状态保存失败: {exc}")
+
+    # ---- 私聊主动消息 ----------------------------------------------------
+    @staticmethod
+    def _weekday_cn() -> str:
+        return "一二三四五六日"[time.localtime().tm_wday]
+
+    @staticmethod
+    def _quiet_end_ts(ts: float, quiet_end: int) -> float:
+        """ts 之后第一个 quiet_end 点的时间戳（0~23 时）。"""
+        lt = time.localtime(ts)
+        day0 = time.mktime(
+            (lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1)
+        )
+        base = day0 + (int(quiet_end) % 24) * 3600
+        while base <= ts:
+            base += 86400
+        return base
+
+    def _proactive_private_pick_next(self, now: float, low: float, high: float) -> float:
+        """随机 0.5~12h 排期；落在静默时段就顺延到静默结束后 0.5~2 小时。"""
+        low = max(60.0, float(low))
+        high = max(low, float(high))
+        nxt = now + random.uniform(low, high)
+        qs = self._conf_int("comfy_proactive_private_quiet_start", 0)
+        qe = self._conf_int("comfy_proactive_private_quiet_end", 8)
+        try:
+            if proactive.in_quiet_hours(time.localtime(nxt).tm_hour, qs, qe):
+                nxt = self._quiet_end_ts(nxt, qe) + random.uniform(1800.0, 7200.0)
+        except Exception:  # noqa: BLE001
+            pass
+        return nxt
+
+    def _proactive_private_tomorrow(self, now: float) -> float:
+        """明天静默结束后 0.5~2 小时（日限用完后顺延）。"""
+        qe = self._conf_int("comfy_proactive_private_quiet_end", 8)
+        base = self._quiet_end_ts(now, qe)
+        if time.localtime(base).tm_mday == time.localtime(now).tm_mday:
+            base += 86400
+        return base + random.uniform(1800.0, 7200.0)
+
+    def _proactive_private_limits(self) -> tuple[float, float, int, float]:
+        min_gap = max(
+            60.0, self._conf_float("comfy_proactive_private_min_gap_min", 30) * 60
+        )
+        max_gap = max(
+            min_gap, self._conf_float("comfy_proactive_private_max_gap_min", 720) * 60
+        )
+        daily_max = max(1, self._conf_int("comfy_proactive_private_daily_max", 4))
+        silent_gap = max(
+            min_gap, self._conf_float("comfy_proactive_private_silent_gap_min", 180) * 60
+        )
+        return min_gap, max_gap, daily_max, silent_gap
+
+    async def _proactive_private_generate(self, umo: str) -> str:
+        """用该私聊的真实会话上下文，让模型主动找一句话；空串 = 这次不说。"""
+        ctx = await self._proactive_context(umo)
+        now_txt = time.strftime("%Y-%m-%d %H:%M")
+        prompt = (
+            "现在是你和 TA 的私聊，下面是你们最近的消息"
+            "（User 是 TA，Assistant 是你之前说过的话）：\n"
+            f"{ctx or '（最近没有消息）'}\n\n"
+            f"现在是 {now_txt}（星期{self._weekday_cn()}）。这会儿没人给你发消息，"
+            "你想主动发一句。\n"
+            "规则：\n"
+            "1. 可以开新话题：分享一件小事、吐槽、问 TA 近况、聊画画/图/心情，"
+            "不要每次都问“在吗”；\n"
+            "2. 一句话，不超过 40 字，像人随手发出来的，语气符合你平时说话的风格；\n"
+            "3. 不要复述上面的聊天内容，不要连着追问，不要提 AI/模型/上下文/提示词；\n"
+            "4. 如果你确实没什么想说的，只回复 SKIP。\n"
+            "只输出要发的那句话，或者 SKIP。"
+        )
+        try:
+            provider = await self.context.get_using_provider_async(umo)
+            if provider is None:
+                return ""
+            resp = await asyncio.wait_for(
+                provider.text_chat(prompt=prompt), timeout=60
+            )
+            raw = getattr(resp, "completion_text", "") or ""
+            return proactive.parse_decision(raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[comfy] 私聊主动生成失败: {exc}")
+            return ""
+
+    async def _proactive_private_store(self, umo: str, text: str) -> None:
+        """把主动消息写回会话历史（用户回复时模型能看到自己上一句）。"""
+        try:
+            cm = getattr(self.context, "conversation_manager", None)
+            if cm is None:
+                return
+            cid = await cm.get_curr_conversation_id(umo)
+            if not cid:
+                return
+            conv = await cm.get_conversation(umo, cid)
+            if not conv:
+                return
+            try:
+                history = json.loads(getattr(conv, "history", "") or "[]")
+            except Exception:  # noqa: BLE001
+                history = []
+            if not isinstance(history, list):
+                return
+            history.append({"role": "assistant", "content": str(text)})
+            await cm.update_conversation(umo, cid, history=history)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 私聊主动消息写入历史失败: {exc}")
+
+    def _proactive_private_allowed(self, event: AstrMessageEvent) -> bool:
+        """私聊主动白名单：留空=所有人；填了 QQ 号（逗号/空格分隔）=仅名单内。"""
+        try:
+            raw = self._conf_str("comfy_proactive_private_whitelist")
+        except Exception:  # noqa: BLE001
+            raw = ""
+        if not raw:
+            return True
+        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        if not sender:
+            return False
+        ids = [x for x in re.split(r"[,，\s]+", raw) if x]
+        return sender in ids
+
+    def _proactive_private_status(self, umo: str) -> str:
+        self._proactive_guard_load()
+        on = self._proactive_enabled_for(umo)
+        st = self._proactive_private.get(umo) or {}
+        bits = [f"私聊主动消息：{'开' if on else '关'}"]
+        if on:
+            nxt = float(st.get("next") or 0.0)
+            bits.append(
+                "下次大概：" + (time.strftime("%m-%d %H:%M", time.localtime(nxt)) if nxt else "待排期")
+            )
+            bits.append(
+                f"今天已发：{int(st.get('count') or 0)}/"
+                f"{self._conf_int('comfy_proactive_private_daily_max', 4)} 条"
+            )
+        bits.append("间隔：0.5~12 小时随机；0~8 点不发；连续没回复会拉长间隔")
+        bits.append("改：/主动回复 开　/主动回复 关")
+        return "\n".join(bits)
+
+    async def _proactive_private_tick(self, now: float) -> None:
+        """私聊主动消息检查（每 5 分钟被 _proactive_tick 调一次）。"""
+        if not self._conf_bool("comfy_proactive_private_enabled", True):
+            return
+        self._proactive_guard_load()
+        quiet_start = self._conf_int("comfy_proactive_private_quiet_start", 0)
+        quiet_end = self._conf_int("comfy_proactive_private_quiet_end", 8)
+        min_gap, max_gap, daily_max, silent_gap = self._proactive_private_limits()
+        hour = time.localtime(now).tm_hour
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        for umo in list(self._proactive_guard.keys()):
+            if ":FriendMessage:" not in str(umo):
+                continue
+            if not self._proactive_enabled_for(umo):
+                continue
+            st = self._proactive_private.setdefault(umo, {})
+            if str(st.get("day") or "") != today:
+                st["day"] = today
+                st["count"] = 0
+            if proactive.in_quiet_hours(hour, quiet_start, quiet_end):
+                continue
+            if int(st.get("count") or 0) >= daily_max:
+                nxt = float(st.get("next") or 0.0)
+                if not nxt or nxt <= now:
+                    st["next"] = self._proactive_private_tomorrow(now)
+                    self._proactive_save()
+                continue
+            nxt = float(st.get("next") or 0.0)
+            if nxt <= 0:
+                st["next"] = self._proactive_private_pick_next(now, min_gap, max_gap)
+                self._proactive_save()
+                continue
+            if now < nxt:
+                continue
+            text = await self._proactive_private_generate(umo)
+            if text:
+                ok = await self._send_plain(umo, text)
+                if ok:
+                    st["count"] = int(st.get("count") or 0) + 1
+                    st["last_sent"] = now
+                    st["noreply"] = int(st.get("noreply") or 0) + 1
+                    await self._proactive_private_store(umo, text)
+                    hist = list(self._proactive_recent_lines.get(umo) or [])
+                    hist.append(text)
+                    self._proactive_recent_lines[umo] = hist[-3:]
+                    logger.info(f"[comfy] 私聊主动消息 → {umo}：{text[:50]}")
+            low = silent_gap if int(st.get("noreply") or 0) >= 2 else min_gap
+            st["next"] = self._proactive_private_pick_next(now, low, max_gap)
+            self._proactive_save()
 
     def _proactive_gap_ranges(self) -> tuple[tuple[float, float], tuple[float, float]]:
         """两个档位的随机间隔（秒）：24h 内 10~90 分钟；24~48h 180~240 分钟。"""
@@ -5515,6 +6838,13 @@ class NcdComfyPlugin(star.Star):
                 raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[comfy] 主动发言检查失败: {exc}")
+            # ★ 2026-11-19：私聊主动消息独立于群主动开关（群主动关着也要跑）
+            try:
+                await self._proactive_private_tick(time.time())
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[comfy] 私聊主动消息检查失败: {exc}")
             await asyncio.sleep(300)
 
     async def _proactive_tick(self) -> None:
@@ -5583,10 +6913,24 @@ class NcdComfyPlugin(star.Star):
     async def _note_bot_mention(self, event: AstrMessageEvent) -> None:
         """记录群活跃：最近消息时间 + 最近被 @ 时间。"""
         try:
-            if not self._is_group_chat(event):
-                return
             umo = str(getattr(event, "unified_msg_origin", "") or "")
             if not umo:
+                return
+            if not self._is_group_chat(event):
+                # ★ 私聊：用户说话 = 有互动，重置"连续没回复"计数
+                self._proactive_load_if_needed()
+                st = self._proactive_private.get(umo)
+                if st is not None:
+                    st["last_user"] = time.time()
+                    st["noreply"] = 0
+                    if not st.get("next"):
+                        self._proactive_guard_load()
+                        if self._proactive_enabled_for(umo):
+                            low, high, _dm, _sg = self._proactive_private_limits()
+                            st["next"] = self._proactive_private_pick_next(
+                                time.time(), low, high
+                            )
+                            self._proactive_save()
                 return
             # 所有群消息都记（判断「群里正热闹就别插嘴」）
             self._group_last_msg[umo] = time.time()
@@ -5610,6 +6954,82 @@ class NcdComfyPlugin(star.Star):
                 self._proactive_task = asyncio.create_task(self._proactive_loop())
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 记录群活跃失败: {exc}")
+
+    @filter.event_message_type(EventMessageType.ALL)
+    async def _capture_user_image(self, event: AstrMessageEvent) -> None:
+        """用户发图时立刻抓字节缓存：AstrBot 下载失败（rkey 400）时的兜底。"""
+        try:
+            comps = list(event.get_messages() or [])
+            if not any(isinstance(c, Comp.Image) for c in comps):
+                return
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if not umo:
+                return
+            data = self._component_image_bytes(comps)
+            source = "组件本地路径"
+            if not data:
+                data = await self._onebot_image_bytes(event)
+                source = "协议端 get_image"
+            if data:
+                now = time.time()
+                self._last_user_image_bytes[umo] = (now, data)
+                while len(self._last_user_image_bytes) > 30:
+                    self._last_user_image_bytes.pop(
+                        next(iter(self._last_user_image_bytes)), None
+                    )
+                try:
+                    path = self._save_ref_bytes(data, "ref")
+                    # 诊断：把图片原始 URL 打出来（只用于排查 rkey 失效），
+                    # 方便在电脑上直接复测这个链接是 400 还是能下
+                    _urls = []
+                    for _c in comps:
+                        if isinstance(_c, Comp.Image):
+                            _u = str(getattr(_c, "url", "") or "")
+                            _f = str(getattr(_c, "file", "") or "")
+                            if _u.startswith("http"):
+                                _urls.append(_u[:600])
+                            elif _f.startswith("http"):
+                                _urls.append(_f[:600])
+                    logger.info(
+                        f"[comfy] 已缓存用户图（{source}）：{Path(path).name} "
+                        f"→ {umo}（{len(data)} 字节）"
+                        + (f" | url={_urls[0]}" if _urls else "")
+                    )
+                except OSError as exc:
+                    logger.warning(f"[comfy] 用户图落盘失败（仅内存缓存）: {exc}")
+                return
+            # 全失败：打一条诊断，看看 Image 组件和原始段到底有什么
+            try:
+                comp_info = []
+                for c in comps:
+                    if isinstance(c, Comp.Image):
+                        comp_info.append(
+                            {
+                                "file": str(getattr(c, "file", "") or "")[:80],
+                                "url": str(getattr(c, "url", "") or "")[:100],
+                                "path": str(getattr(c, "path", "") or "")[:80],
+                            }
+                        )
+                raw = self._raw_aiocqhttp_segments(event)
+                raw_info = []
+                for seg in raw[:6]:
+                    typ = str(self._seg_get(seg, "type") or "")
+                    data_d = self._seg_data(seg) if typ == "image" else {}
+                    raw_info.append(
+                        {
+                            "type": typ,
+                            "file": str(data_d.get("file") or "")[:80],
+                            "url": str(data_d.get("url") or "")[:100],
+                        }
+                    )
+                logger.warning(
+                    "[comfy] 用户图抓取失败（AstrBot 下载失败且协议端兜底没拿到）："
+                    f"components={comp_info} raw={raw_info}"
+                )
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning(f"[comfy] 用户图诊断日志生成失败: {exc2}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 捕获用户图失败（忽略）: {exc}")
 
     def _proactive_load_if_needed(self) -> None:
         if not self._proactive_mentions:
@@ -5676,6 +7096,37 @@ class NcdComfyPlugin(star.Star):
     # ------------------------------------------------------------------
     #  认主：管理员身份注入
     # ------------------------------------------------------------------
+    @filter.on_llm_request()
+    async def _note_cached_user_image(
+        self, event: AstrMessageEvent, req: ProviderRequest
+    ) -> None:
+        """用户发图时告诉模型：图已缓存成参考图，reference=message 直接能用。
+
+        背景：AstrBot 4.29.x 下载 QQ 图片失败时，多模态输入会整张丢掉，
+        模型以为“没图”。但 comfy 插件已经从协议端把图抓下来缓存了，
+        所以这里补一句提示，避免模型回“看不到图/图没传过来”。
+        """
+        try:
+            comps = event.get_messages() or []
+            if not any(isinstance(c, Comp.Image) for c in comps):
+                return
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            cached = self._last_user_image_bytes.get(umo)
+            if not cached or time.time() - cached[0] > 600:
+                return
+            base = (req.system_prompt or "").rstrip()
+            if "[参考图已缓存]" in base:
+                return
+            line = (
+                "[参考图已缓存] 用户这条消息里带了图片，图片字节已保存到本机 ref_cache；"
+                "出图时把 reference 设为 message（或 auto）就能用这张图改，"
+                "不要回复“看不到图/图没传过来”。"
+            )
+            req.system_prompt = (base + "\n\n" + line).strip()
+            logger.info(f"[comfy] 已注入参考图缓存提示 → {umo}")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[comfy] 参考图缓存提示注入失败: {exc}")
+
     @filter.on_llm_request()
     async def _mark_owner(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
         """让模型始终知道最高管理员是谁（按 QQ 认，不按称呼认）。"""
@@ -5862,8 +7313,11 @@ class NcdComfyPlugin(star.Star):
             / "codex"
         )
 
-    def _ensure_codex(self) -> dict[str, Path]:
-        """确保两份法典可用：优先配置目录，缺失时从旧绘图插件复制一次。"""
+    def _ensure_codex(self, force: bool = False) -> dict[str, Path]:
+        """确保两份法典可用：优先配置目录，缺失时从插件内置副本/旧绘图插件复制。
+
+        force=True：用插件内置副本强制覆盖（法典换新版时用）。
+        """
         root = self._codex_root()
         root.mkdir(parents=True, exist_ok=True)
         files = {"sfw": root / "sfw.txt", "nsfw": root / "nsfw.txt"}
@@ -5883,9 +7337,13 @@ class NcdComfyPlugin(star.Star):
         for cat in files:
             srcs.setdefault(cat, []).append(bundled / f"{cat}.txt")
         for cat, dst in files.items():
-            if dst.exists() and dst.stat().st_size > 0:
+            if not force and dst.exists() and dst.stat().st_size > 0:
                 continue
-            for src in srcs.get(cat) or []:
+            candidates = list(srcs.get(cat) or [])
+            if force:
+                # 强制刷新时优先用插件内置副本
+                candidates.sort(key=lambda p: 0 if p.parent.name == "codex_bundled" else 1)
+            for src in candidates:
                 if not src.is_file():
                     continue
                 try:
@@ -6145,7 +7603,10 @@ class NcdComfyPlugin(star.Star):
                 "请直接用一句话告诉用户：「电脑那边没连上，现在画不了，等连上再画」。"
             )
 
-        lines = ["ComfyUI 出图入口已打开。四个工作流（用 preset 参数选，留空=默认）："]
+        lines = [
+            f"ComfyUI 出图入口已打开。{len(presets.PRESETS)} 个工作流"
+            "（用 preset 参数选，留空=默认）："
+        ]
         if notice:
             lines.insert(0, notice)
 
@@ -6153,17 +7614,22 @@ class NcdComfyPlugin(star.Star):
         #     用户明确要求：给的是「该调哪个工具」的提示，而且必须省 token ——
         #     所以这里只列模板名 + 工具用途，不铺模板配比、也不铺法典 24 个章节。
         try:
-            _style_names = [
-                str(s.get("name") or "") for s in self._styles_load() if s.get("name")
-            ][:8]
+            _style_bits: list[str] = []
+            for _s in self._styles_load()[:8]:
+                _nm = str(_s.get("name") or "").strip()
+                if not _nm:
+                    continue
+                _mdl = os.path.basename(str(_s.get("model") or ""))
+                _style_bits.append(f"{_nm}（底模 {_mdl}）" if _mdl else _nm)
         except Exception:  # noqa: BLE001
-            _style_names = []
+            _style_bits = []
         lines.append("")
         lines.append("★★ 工具速查（先看这里，按需调用）★★")
-        if _style_names:
+        if _style_bits:
             lines.append(
-                "· 画风模板：「" + "」「".join(_style_names) + "」"
-                " —— lora 参数直接写模板名（可加 :权重）"
+                "· 画风模板：「" + "」「".join(_style_bits) + "」"
+                " —— lora 参数写模板名即可（自带底模会一起切）；"
+                "要看模板里的 LoRA 配比 → comfy_models(kind=\"template\")"
             )
         else:
             lines.append("· 画风模板：暂无；lora 参数直接写 LoRA 文件名")
@@ -6182,12 +7648,21 @@ class NcdComfyPlugin(star.Star):
             except presets.WorkflowError as exc:
                 lines.append(f"· {name}（{meta['label']}）⚠ 工作流有问题：{exc}")
                 continue
-            lines.append(
-                f"· {name} —— {meta['label']}，约 {meta['eta']} 秒/张"
+            _desc = str(meta.get("desc") or "").strip()
+            _line = (
+                f"· {name} —— {meta['label']}"
+                + (f"：{_desc}" if _desc else "")
+                + f"，约 {meta['eta']} 秒/张"
                 f"（{info['width']}×{info['height']}，{info['steps']} 步，CFG {info['cfg']:g}，"
                 f"{info['sampler_name']}/{info['scheduler']}）\n"
                 f"  底模：{info['model']}"
             )
+            if meta.get("requires_reference"):
+                _line += (
+                    f"\n  ★ 必须带参考图（1~{int(meta.get('max_references') or 3)} 张；"
+                    "发多张图并把 reference 设为 message 即可）"
+                )
+            lines.append(_line)
         # ★ 2026-11-06：宽审核下告诉模型没有内容限制（不用回避/劝阻）
         if self._audit_level(event) == "loose":
             lines.append(
@@ -6300,6 +7775,8 @@ class NcdComfyPlugin(star.Star):
         model: str = "",
         lora: str = "",
         reference: str = "",
+        reference2: str = "",
+        reference3: str = "",
         denoise: float = 0.0,
         control: str = "",
         control_type: str = "",
@@ -6325,8 +7802,11 @@ class NcdComfyPlugin(star.Star):
                 10~15 个，开头 masterpiece, best quality, highres）；krea2/anima/moss
                 可用自然语言，但角色名/标志特征保留英文 tag。
             negative(string): 负面提示词；留空 = 工作流里那个（通常为空）。
-            preset(string): 工作流：sdxl（约25s）/ krea2（约30s）/ anima（约40s）/
-                moss（约60s）；留空 = 配置里的默认。
+            preset(string): 工作流：
+                sdxl（快速，经典二次元图）/ anima（快速，新一代二次元生图）/
+                krea2（慢速，美学绘图）/ moss（中速，消费级显卡最强）/
+                qwen（慢速，参考/融合/角色去衣全能，**必须带参考图 1~3 张**）；
+                留空 = 配置里的默认。
             size(string): 画幅，如 "720x960"，或简写 竖/横/方；留空 = 工作流默认；
                 图生图时留空 = 跟参考图一样大（按比例缩到上限内）。
             width(int): 宽（8 的倍数）；和 height 一起覆盖 size。
@@ -6343,11 +7823,16 @@ class NcdComfyPlugin(star.Star):
                   · "鬼针草:0.8"     → 加速 + 鬼针草（**替换**默认风格）
                   · "+鬼针草:0.8"    → 加速 + 默认风格 + 鬼针草（**叠加**）
                 ★ 加速 LoRA 始终在最前面（仅步数 4~14 时叠，>14 步不叠），不会被替换。
-            reference(string): **普通降噪图生图**（不锁结构）：留空 = 文生图；
+            reference(string): **参考图/普通降噪图生图**：留空 = 文生图；
                 "auto" = 插件自动找（当前/引用消息 → 最近用户图 → 最近生成图）；
                 "message" = 这条或被引用消息里的图；"last" = 上一张生成的图。
                 用户要“改这张 / 重绘 / 换风格 / 换服装”才用；只是说“参考这个风格”
                 时可以留空按文生图写 tags。
+                ★ qwen（千问编辑）预设下支持 1~3 张：reference="message" 会把
+                  本条/被引用消息里的前几张图依次作为图1/图2/图3；也可以用
+                  reference2 / reference3 再指定两张。
+            reference2(string): 第二张参考图（qwen 多图用），写法同 reference。
+            reference3(string): 第三张参考图（qwen 多图用），写法同 reference。
             denoise(float): 普通图生图的重绘强度 0.05~1（越大越像重画）；0 = 配置默认。
             control(string): **结构控制图生图**（ControlNet，锁姿势/构图/线稿）：
                 留空 = 不用；auto/message/last 取图方式同 reference。
@@ -6396,6 +7881,18 @@ class NcdComfyPlugin(star.Star):
         else:
             logger.info("[comfy] 前台参数解析开始")
 
+        # ★ 画风模板法典：模板自带推荐底模时，调用方没显式给 model 就自动套用
+        if not str(model or "").strip():
+            try:
+                _tpl_model, _tpl_name = self._template_model_for(lora)
+            except Exception:  # noqa: BLE001
+                _tpl_model, _tpl_name = "", ""
+            if _tpl_model:
+                model = _tpl_model
+                logger.info(
+                    f"[comfy] 画风模板「{_tpl_name}」自带底模 → {os.path.basename(_tpl_model)}"
+                )
+
         # ★ 2026-11-02（盲审 P2-3）：先把清单预热进线程池。
         #   后面十几处 _scan / _scan_loras / _presets_with_model 都是同步调用，
         #   远程模式下每次都是 8 秒 HTTP；预热后命中的是 60 秒缓存（微秒级），
@@ -6414,6 +7911,21 @@ class NcdComfyPlugin(star.Star):
         ref_raw = str(reference or "").strip().lower()
         auto_ref = ref_raw in ("auto", "自动", "自己选", "自动选")
         message_ref = auto_ref or ref_raw in ("message", "msg", "image", "图", "这张", "消息图")
+        # ★ 千问编辑流：多图参考（reference / reference2 / reference3）
+        _multi_ref = False
+        _max_refs = 1
+        _requires_ref = False
+        try:
+            _meta_guess = presets.PRESETS.get(self._preset((preset or "").strip().lower()))
+            if _meta_guess:
+                _max_refs = max(1, int(_meta_guess.get("max_references") or 1))
+                _requires_ref = bool(_meta_guess.get("requires_reference"))
+                _multi_ref = _max_refs > 1
+        except Exception:  # noqa: BLE001
+            _max_refs, _requires_ref = 1, False
+        _ref_specs = [
+            str(x).strip() for x in (reference, reference2, reference3) if str(x).strip()
+        ]
         # 控制图来自当前/引用消息时也必须同步：后台任务开始时临时图可能已经被清掉
         ctrl_raw = str(control or "").strip().lower()
         ctrl_sync = bool(ctrl_raw) and ctrl_raw not in ("last", "上一张")
@@ -6433,6 +7945,10 @@ class NcdComfyPlugin(star.Star):
             preset_early, _ = await asyncio.to_thread(
                 self._auto_preset_for_model, model, self._preset(want_early)
             )
+            # ★ 私聊降质期：千问编辑流直接禁用（入队前拦，别让模型先说“在画了”）
+            _qwen_block = self._qwen_degrade_block(event, preset_early)
+            if _qwen_block:
+                return _qwen_block
             # ★ 控制类型必须在这里就校验：入队后再报错，模型已经对用户说了
             #   “在画了”，用户会先看到失败再看到一句假装在画的话。
             if ctrl_raw:
@@ -6441,12 +7957,26 @@ class NcdComfyPlugin(star.Star):
                     return ctrl_err
             elif str(control_type or "").strip():
                 return "出图失败：给了 control_type 但没给 control 图。"
-            ref_err = self._reference_ready(reference, event)
-            if ref_err:
-                return ref_err
+            if not _multi_ref:
+                ref_err = self._reference_ready(reference, event)
+                if ref_err:
+                    return ref_err
+            elif _requires_ref and not _ref_specs:
+                return (
+                    "出图失败：千问编辑流必须带参考图（1~3 张）。\n"
+                    "让用户发图/引用图再画，或改用其他工作流。"
+                )
             # ★ 带消息图/控制图的请求也走异步：入队前先把易失图冻结成稳定副本。
             #   否则 MOSS/ControlNet 重任务会卡在同步路径，撞 AstrBot 工具 180 秒超时。
-            if message_ref:
+            _ref_paths: list[str] = []
+            if _multi_ref:
+                _ref_paths = await self._freeze_references(_ref_specs, event, _max_refs)
+                if _requires_ref and not _ref_paths:
+                    return (
+                        "出图失败：千问编辑流没拿到参考图。\n"
+                        "把图直接发在消息里（1~3 张，或引用一张图）再试。"
+                    )
+            elif message_ref:
                 frozen_ref = await self._freeze_reference(reference, event, "ref")
                 if not frozen_ref:
                     return (
@@ -6504,6 +8034,12 @@ class NcdComfyPlugin(star.Star):
                 # ★ 入队前就拦下：作为工具结果返回，模型当轮就能改
                 logger.info(f"[comfy] 入队前 LoRA 校验失败: {_lora_err[:120]}")
                 return f"出图失败：{_lora_err}"
+            _style_names: list[str] = []
+            for _note in _lora_notes or []:
+                for _m in re.finditer(r"画风模板「([^」]+)」", str(_note)):
+                    _sn = _m.group(1).strip()
+                    if _sn and _sn not in _style_names:
+                        _style_names.append(_sn)
             job_kwargs = {
                 "prompt": prompt,
                 "negative": negative,
@@ -6517,6 +8053,9 @@ class NcdComfyPlugin(star.Star):
                 "model": model,
                 "lora": lora,
                 "reference": reference,
+                "reference2": reference2,
+                "reference3": reference3,
+                "references": _ref_paths,
                 "denoise": denoise,
                 "control": control,
                 "control_type": control_type,
@@ -6526,6 +8065,7 @@ class NcdComfyPlugin(star.Star):
                 "control_preprocess": control_preprocess,
                 "upscale": upscale,
                 "force": force,
+                "style_names": _style_names,
             }
             dup = self._duplicate_image_job(
                 str(getattr(event, "unified_msg_origin", "") or ""), job_kwargs
@@ -6576,6 +8116,11 @@ class NcdComfyPlugin(star.Star):
         # 模型在别的家族目录里时，唯一命中就自动切预设（见 _auto_preset_for_model）
         preset_name, auto_preset_note = self._auto_preset_for_model(model, preset_name)
 
+        # ★ 私聊降质期：千问编辑流直接禁用
+        _qwen_block = self._qwen_degrade_block(event, preset_name)
+        if _qwen_block:
+            return _qwen_block
+
         try:
             graph = presets.load_graph(preset_name)
             info = presets.summarize(graph)
@@ -6585,9 +8130,28 @@ class NcdComfyPlugin(star.Star):
         max_side = self._conf_int("comfy_max_side", 1920)
         max_pixels = int(self._conf_float("comfy_max_mp", 2.7648) * 1e6)
 
-        # ---- 图生图：先把参考图拿下来 ----
+        # ---- 参考图：单图走旧逻辑，千问编辑流支持 1~3 张 ----
+        _meta_now = presets.PRESETS[preset_name]
+        _max_refs = max(1, int(_meta_now.get("max_references") or 1))
+        _requires_ref = bool(_meta_now.get("requires_reference"))
+        _ref_specs = [
+            str(x).strip() for x in (reference, reference2, reference3) if str(x).strip()
+        ]
         ref_bytes: bytes | None = None
-        if (reference or "").strip():
+        ref_bytes_list: list[bytes] = []
+        _ref_paths_now = _REF_PATHS.get() or []
+        if _ref_paths_now:
+            # 后台任务：用入队前冻结好的稳定路径
+            for _p in list(_ref_paths_now)[: _max_refs]:
+                try:
+                    ref_bytes_list.append(Path(str(_p)).read_bytes())
+                except OSError as exc:
+                    logger.warning(f"[comfy] 读冻结参考图失败 {_p}: {exc}")
+        elif _max_refs > 1:
+            ref_bytes_list = await self._collect_reference_list(
+                _ref_specs, event, _max_refs
+            )
+        elif (reference or "").strip():
             ref_bytes = await self._reference_bytes(reference, event)
             if not ref_bytes:
                 if auto_ref:
@@ -6601,6 +8165,13 @@ class NcdComfyPlugin(star.Star):
                     "把图直接发在消息里（或引用一张图）再试；"
                     "不想用参考图就把 reference 留空。"
                 )
+        if _max_refs > 1:
+            if _requires_ref and not ref_bytes_list:
+                return (
+                    "出图失败：千问编辑流必须带参考图（1~3 张）。\n"
+                    "把图直接发在消息里/引用一张再试，或改用其他工作流。"
+                )
+            ref_bytes = ref_bytes_list[0] if ref_bytes_list else None
 
         # ---- ControlNet 控制图（和 reference 分开：可以同时图生图 + 控构图） ----
         ctrl_bytes: bytes | None = None
@@ -6666,7 +8237,8 @@ class NcdComfyPlugin(star.Star):
         #     步数 4~14  → 加速档：自动叠加速 LoRA，CFG 用 comfy_cfg（默认 1.0）
         #     步数 >14   → 正常档：不叠加速 LoRA，CFG 回落 comfy_cfg_normal（默认 5.5）
         #   以前 CFG 跟着预设走（moss 永远 1.0），50 步那种正常档也吃 CFG 1，画面发灰。
-        fast_mode = 4 <= int(steps_val) <= 14
+        # ★ 千问编辑流的 6 步是模型原生步数，不是「加速档」，别按加速档处理
+        fast_mode = preset_name != "qwen" and 4 <= int(steps_val) <= 14
         explicit_cfg = float(cfg or 0)
         conf_cfg = float(self._conf_float("comfy_cfg", 0) or 0)
         other_cfg = float(self._conf_float("comfy_cfg_other", 0) or 0)
@@ -6812,6 +8384,10 @@ class NcdComfyPlugin(star.Star):
                         logger.info(
                             f"[comfy] 画风模板展开：{_tpl['name']} → {_added} 个 LoRA"
                         )
+                        _cur_styles = list(_STYLE_NAMES.get() or ())
+                        if str(_tpl["name"]) not in _cur_styles:
+                            _cur_styles.append(str(_tpl["name"]))
+                            _STYLE_NAMES.set(tuple(_cur_styles))
                         continue
                     try:
                         resolved = self._resolve_name(name_part, pool, "LoRA")
@@ -6909,6 +8485,8 @@ class NcdComfyPlugin(star.Star):
         #   现在：只要步数在 4~14（加速档），就把加速 LoRA 插到最前面，
         #   风格 LoRA 串在它后面（presets._insert_loras 是链式的 LoraLoader）。
         auto_lora = self._conf_str("comfy_default_lora")
+        if preset_name == "qwen":
+            auto_lora = ""  # 千问编辑流不叠 8 步蒸馏加速 LoRA
         if not auto_lora and preset_name == "moss":
             # ★ 新装的机器（比如纯电脑版）默认配置是空的。以前这时候完全不叠
             #   加速 LoRA，4~14 步直接糊；现在自动在本族里找「8-steps」权重兜底。
@@ -6991,9 +8569,20 @@ class NcdComfyPlugin(star.Star):
             try:
                 if not await asyncio.to_thread(client.healthy_sync):
                     await client.ensure_server()
-                # ★ 图生图：先把参考图传进 ComfyUI 的 input 目录
+                # ★ 参考图：先把图传进 ComfyUI 的 input 目录（千问支持 1~3 张）
                 ref_name = ""
-                if ref_bytes:
+                ref_names: list[str] = []
+                if _max_refs > 1 and ref_bytes_list:
+                    for _idx, _rb in enumerate(ref_bytes_list[: _max_refs]):
+                        try:
+                            ref_names.append(
+                                await client.upload_image(
+                                    _rb, f"ref{_idx + 1}_{uuid.uuid4().hex[:8]}.png"
+                                )
+                            )
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning(f"[comfy] 上传参考图 {_idx + 1} 失败: {exc}")
+                elif ref_bytes:
                     ref_name = await client.upload_image(
                         ref_bytes, f"ref_{uuid.uuid4().hex[:8]}.png"
                     )
@@ -7043,6 +8632,7 @@ class NcdComfyPlugin(star.Star):
                     loras=loras or None,
                     filename_prefix=self._conf_str("comfy_filename_prefix") or None,
                     source_image=ref_name or None,
+                    reference_images=ref_names or None,
                     denoise=(denoise_val if ref_name else None),
                     preset=preset_name,
                     control_image=ctrl_name or None,
@@ -7079,7 +8669,7 @@ class NcdComfyPlugin(star.Star):
                         mode_label = "图生图（普通降噪）"
                     else:
                         mode_label = "文生图"
-                    _tip2 = self._tip()
+                    _tip2 = "" if self._tips_muted(event) else self._tip()
                     await self._notify(
                         event,
                         f"🖌️ 开始采样了…（{mode_label}）"
@@ -7186,6 +8776,7 @@ class NcdComfyPlugin(star.Star):
             filename,
             {
                 "prompt": text,
+                "negative": negative,
                 "preset": preset_name,
                 "model": os.path.basename(used_model),
                 "loras": [
@@ -7194,6 +8785,11 @@ class NcdComfyPlugin(star.Star):
                 ],
                 "width": w,
                 "height": h,
+                "steps": steps_val,
+                "cfg": cfg_val,
+                "seed": seed_val,
+                "denoise": (denoise_val if ref_name else 0.0),
+                "upscale": up_scale_text,
                 "seconds": round(elapsed, 1),
             },
         )
@@ -7206,6 +8802,7 @@ class NcdComfyPlugin(star.Star):
                 cfg=cfg_val,
                 denoise=(denoise_val if ref_name else 0.0),
                 simple=self._simple_caption_on(umo_ev),
+                style_names=list(_STYLE_NAMES.get() or ()),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"[comfy] 生成图注失败（只丢文案，不影响出图）: {exc}")
@@ -7563,6 +9160,41 @@ class NcdComfyPlugin(star.Star):
                 "4x_foolhardy_Remacri.pth（细节保留）"
             )
             return "\n".join(lines)
+        if want in ("template", "templates", "模板", "画风模板"):
+            styles = self._styles_load()
+            kw = str(q or "").strip().lower()
+            if kw:
+                styles = [
+                    s
+                    for s in styles
+                    if kw in str(s.get("name") or "").lower()
+                    or kw in str(s.get("desc") or "").lower()
+                ]
+            if not styles:
+                hint = f"关键词「{q}」下" if kw else "还没有"
+                return (
+                    f"{hint}画风模板。模板在操控台「画风模板法典」里配；"
+                    "comfy_generate 的 lora 参数直接写模板名即可。"
+                )
+            lines = [
+                f"画风模板（{len(styles)} 个；comfy_generate 的 lora 参数直接写模板名，"
+                "会自动展开成下面的 LoRA 配比，可加 :权重 整体缩放）："
+            ]
+            for s in styles[:20]:
+                desc = f" —— {s.get('desc')}" if s.get("desc") else ""
+                lines.append(f"· {s.get('name')}{desc}")
+                model = os.path.basename(str(s.get("model") or ""))
+                if model:
+                    lines.append(f"   自带底模：{model}")
+                for item in (s.get("items") or [])[:10]:
+                    lora_name = os.path.basename(str(item.get("lora") or ""))
+                    if not lora_name:
+                        continue
+                    lines.append(f"   - {lora_name} × {item.get('weight')}")
+            if len(styles) > 20:
+                lines.append(f"……还有 {len(styles) - 20} 个模板")
+            return "\n".join(lines)
+
         if want in ("lora", "loras", "lo"):
             # ★ 支持按预设过滤 + 关键词搜索：库里 79 个，固定截断会让模型找不到目标
             #   （实际踩过：bot 说「anima 的清单里没有 DeepSeek」，其实是被切掉了）
@@ -8276,13 +9908,38 @@ class NcdComfyPlugin(star.Star):
         path.write_bytes(data)
         meta = meta or {}
         items = {e["file"]: e for e in self._history_read(umo)}
+
+        def _num(key: str):
+            try:
+                return float(meta.get(key))
+            except (TypeError, ValueError):
+                return None
+
         items[path.name] = {
             "file": path.name,
             "ts": time.time(),
             "size": len(data),
-            "prompt": str(meta.get("prompt") or "")[:300],
+            # ★ 图库大图要完整显示：prompt 不截断（只防极端超长把索引撑爆）
+            "prompt": str(meta.get("prompt") or "")[:4000],
+            "negative": str(meta.get("negative") or "")[:2000],
             "preset": str(meta.get("preset") or ""),
             "model": str(meta.get("model") or ""),
+            "loras": [
+                {
+                    "name": str(it.get("name") or "")[:200],
+                    "strength": it.get("strength"),
+                }
+                for it in (meta.get("loras") or [])[:20]
+                if isinstance(it, dict)
+            ],
+            "width": int(_num("width") or 0),
+            "height": int(_num("height") or 0),
+            "steps": _num("steps"),
+            "cfg": _num("cfg"),
+            "seed": _num("seed"),
+            "denoise": _num("denoise"),
+            "upscale": str(meta.get("upscale") or ""),
+            "seconds": _num("seconds"),
         }
         self._history_prune(umo, list(items.values()))
         return path

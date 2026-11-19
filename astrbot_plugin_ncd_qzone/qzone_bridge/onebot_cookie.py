@@ -1,0 +1,510 @@
+"""Helpers for acquiring QQ 空间 cookies from OneBot clients."""
+
+from __future__ import annotations
+
+import asyncio
+import inspect
+import json
+import re
+from typing import Any
+
+from .parser import cookie_header, normalize_cookie_fields, normalize_uin, parse_cookie_text
+
+COOKIE_ACTIONS = ("get_cookies", "get_credentials")
+LOGIN_INFO_ACTIONS = ("get_login_info",)
+ONEBOT_ACTION_CALLER_ATTRS = (
+    "call_action",
+    "call_api",
+    "request",
+    "call",
+    "send_api",
+    "send_action",
+    "request_api",
+    "api_call",
+    "callAction",
+    "callApi",
+    "sendAction",
+    "sendApi",
+    "requestAction",
+    "requestApi",
+)
+ONEBOT_ACTION_OWNER_ATTRS = (
+    "api",
+    "client",
+    "bot",
+    "onebot",
+    "cqhttp",
+    "api_client",
+    "adapter",
+    "platform",
+    "protocol",
+    "connection",
+    "websocket",
+    "ws",
+    "http",
+)
+COOKIE_DOMAIN_FALLBACKS = ("user.qzone.qq.com", "qzone.qq.com", "h5.qzone.qq.com", "mobile.qzone.qq.com")
+COOKIE_VALUE_KEYS = (
+    "cookies",
+    "cookie",
+    "cookie_text",
+    "cookie_str",
+    "cookies_str",
+    "data",
+    "result",
+    "retdata",
+    "ret_data",
+    "payload",
+    "response",
+)
+COOKIE_ACTION_TIMEOUT_SECONDS = 5.0
+COOKIE_NAME_ALLOWLIST = {
+    "uin",
+    "p_uin",
+    "skey",
+    "p_skey",
+    "pt4_token",
+    "pt_key",
+    "pt_login_sig",
+    "clientkey",
+    "superkey",
+    "qzonetoken",
+    "qm_keyst",
+    "qm_sid",
+    "o_cookie",
+    "uin_cookie",
+    "skey2",
+    "rv2",
+    "ptcz",
+    "lskey",
+    "ldw",
+    "g_tk",
+    "gtk",
+    "bkn",
+    "csrf_token",
+    "pskey",
+    "qqmusic_key",
+}
+COOKIE_META_KEYS = {
+    "domain",
+    "path",
+    "expires",
+    "max_age",
+    "secure",
+    "httponly",
+    "ret",
+    "code",
+    "status",
+    "message",
+    "msg",
+    "error",
+    "errno",
+    "errcode",
+    "success",
+}
+
+_COOKIE_PAIR_RE = re.compile(
+    r"\b(?:uin|p_uin|skey|p_skey|pt4_token|pt_key|pt_login_sig|clientkey|superkey|qzonetoken|qm_keyst|qm_sid|o_cookie|uin_cookie|skey2|rv2|ptcz|lskey|ldw|g_tk|gtk|bkn|csrf_token|pskey|qqmusic_key)\s*=",
+    re.I,
+)
+
+
+def _is_cookie_string(value: str) -> bool:
+    text = value.strip()
+    return bool(text) and "=" in text and bool(_COOKIE_PAIR_RE.search(text))
+
+
+def _cookie_mapping_to_text(mapping: dict[str, Any]) -> str:
+    items: list[str] = []
+    for key, value in mapping.items():
+        normalized = str(key).strip()
+        if not normalized:
+            continue
+        lower = normalized.lower()
+        if lower in COOKIE_META_KEYS:
+            continue
+        if lower not in COOKIE_NAME_ALLOWLIST:
+            continue
+        if value in (None, ""):
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            items.append(f"{normalized}={value}")
+    return "; ".join(items)
+
+
+def _cookie_pair_object_to_text(value: dict[str, Any]) -> str:
+    name = value.get("name") or value.get("key")
+    cookie_value = value.get("value")
+    if name and isinstance(cookie_value, (str, int, float, bool)):
+        normalized = str(name).strip()
+        if normalized and normalized.lower() not in COOKIE_META_KEYS:
+            return f"{normalized}={cookie_value}"
+    return ""
+
+
+def _extract_uin_from_payload(payload: Any, *, _depth: int = 0, _seen: set[int] | None = None) -> int:
+    if _seen is None:
+        _seen = set()
+    if payload is None or _depth > 8:
+        return 0
+    if isinstance(payload, bool):
+        return 0
+    if isinstance(payload, (int, float)):
+        value = int(payload)
+        return value if value > 0 else 0
+    if isinstance(payload, bytes):
+        try:
+            payload = payload.decode("utf-8")
+        except Exception:
+            return 0
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return 0
+        if text.startswith("{") or text.startswith("["):
+            try:
+                return _extract_uin_from_payload(json.loads(text), _depth=_depth + 1, _seen=_seen)
+            except Exception:
+                return 0
+        cleaned = text.lstrip("oO")
+        return int(cleaned) if cleaned.isdigit() else 0
+    if isinstance(payload, (list, tuple)):
+        for item in payload:
+            uin = _extract_uin_from_payload(item, _depth=_depth + 1, _seen=_seen)
+            if uin:
+                return uin
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+
+    obj_id = id(payload)
+    if obj_id in _seen:
+        return 0
+    _seen.add(obj_id)
+
+    for key in ("uin", "user_id", "uid", "qq", "account"):
+        if key in payload:
+            uin = _extract_uin_from_payload(payload.get(key), _depth=_depth + 1, _seen=_seen)
+            if uin:
+                return uin
+
+    for key in ("data", "result", "retdata", "ret_data", "payload", "response"):
+        if key in payload:
+            uin = _extract_uin_from_payload(payload.get(key), _depth=_depth + 1, _seen=_seen)
+            if uin:
+                return uin
+
+    for value in payload.values():
+        if isinstance(value, (dict, list, tuple, str, bytes, int, float)):
+            uin = _extract_uin_from_payload(value, _depth=_depth + 1, _seen=_seen)
+            if uin:
+                return uin
+    return 0
+
+
+async def fetch_login_uin(bot: Any) -> int:
+    for action in LOGIN_INFO_ACTIONS:
+        try:
+            payload = await asyncio.wait_for(
+                call_onebot_action(bot, action),
+                timeout=COOKIE_ACTION_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            continue
+        uin = _extract_uin_from_payload(payload)
+        if uin:
+            return uin
+    return 0
+
+
+def _inject_login_uin(cookie_text: str, uin: int) -> str:
+    if not uin:
+        return cookie_text
+    try:
+        if normalize_uin(parse_cookie_text(cookie_text)):
+            return cookie_text
+    except Exception:
+        pass
+    prefix = f"uin=o{uin}; p_uin=o{uin}"
+    cookie_text = cookie_text.strip()
+    if not cookie_text:
+        return prefix
+    return f"{prefix}; {cookie_text}"
+
+
+def _merge_cookie_texts(parts: list[str]) -> str:
+    merged: dict[str, str] = {}
+    for part in parts:
+        if not part:
+            continue
+        try:
+            cookies = parse_cookie_text(part)
+        except Exception:
+            continue
+        for key, value in cookies.items():
+            if key not in merged:
+                merged[key] = value
+    return cookie_header(merged) if merged else ""
+
+
+def _merge_cookie_dicts(base: dict[str, str], incoming: dict[str, str]) -> dict[str, str]:
+    merged = dict(base)
+    for key, value in normalize_cookie_fields(incoming).items():
+        if value and key not in merged:
+            merged[key] = value
+    return merged
+
+
+def _has_auth_cookie(cookies: dict[str, str]) -> bool:
+    normalized = normalize_cookie_fields(cookies)
+    return any(normalized.get(key) for key in ("p_skey", "skey", "skey2"))
+
+
+def extract_cookie_text(payload: Any, *, _depth: int = 0, _seen: set[int] | None = None) -> str:
+    """Extract a Cookie header string from OneBot action payloads."""
+
+    if _seen is None:
+        _seen = set()
+    if payload is None or _depth > 8:
+        return ""
+    if isinstance(payload, bytes):
+        try:
+            payload = payload.decode("utf-8")
+        except Exception:
+            return ""
+    if isinstance(payload, str):
+        text = payload.strip()
+        if not text:
+            return ""
+        if text.startswith("{") or text.startswith("["):
+            try:
+                return extract_cookie_text(json.loads(text), _depth=_depth + 1, _seen=_seen)
+            except Exception:
+                pass
+        return text if _is_cookie_string(text) else ""
+    if isinstance(payload, (list, tuple)):
+        parts: list[str] = []
+        for item in payload:
+            text = extract_cookie_text(item, _depth=_depth + 1, _seen=_seen)
+            if text:
+                parts.append(text)
+        return _merge_cookie_texts(parts)
+    if not isinstance(payload, dict):
+        return ""
+
+    obj_id = id(payload)
+    if obj_id in _seen:
+        return ""
+    _seen.add(obj_id)
+
+    pair_text = _cookie_pair_object_to_text(payload)
+    if pair_text:
+        return pair_text
+
+    parts: list[str] = []
+    mapped_text = _cookie_mapping_to_text(payload)
+    if mapped_text:
+        parts.append(mapped_text)
+
+    for key in COOKIE_VALUE_KEYS:
+        if key in payload:
+            text = extract_cookie_text(payload.get(key), _depth=_depth + 1, _seen=_seen)
+            if text:
+                parts.append(text)
+
+    for value in payload.values():
+        if isinstance(value, (dict, list, tuple, str, bytes)):
+            text = extract_cookie_text(value, _depth=_depth + 1, _seen=_seen)
+            if text:
+                parts.append(text)
+    return _merge_cookie_texts(parts)
+
+
+def _unique(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        item = str(item).strip()
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        result.append(item)
+    return result
+
+
+def iter_cookie_domains(configured_domain: str) -> list[str]:
+    """Yield domain candidates for OneBot cookie requests."""
+
+    domain = (configured_domain or "").strip()
+    candidates: list[str] = []
+    if domain:
+        candidates.append(domain)
+        if "://" in domain:
+            try:
+                from urllib.parse import urlsplit
+
+                parsed = urlsplit(domain)
+                host = parsed.netloc or parsed.path
+                if host:
+                    candidates.append(host)
+                    candidates.append(f"https://{host}")
+                    candidates.append(f"https://{host}/")
+            except Exception:
+                pass
+    for fallback in COOKIE_DOMAIN_FALLBACKS:
+        candidates.append(fallback)
+        candidates.append(f"https://{fallback}")
+        candidates.append(f"https://{fallback}/")
+    return _unique(candidates)
+
+
+async def call_onebot_action(bot: Any, action: str, **params: Any) -> Any:
+    """Call a OneBot action via direct method or call_action fallback."""
+
+    method = getattr(bot, action, None)
+    if callable(method):
+        result = _invoke_onebot_action_callable(method, "", params)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    callers = list(iter_onebot_action_callers(bot))
+    if not callers:
+        raise AttributeError("OneBot client does not expose a supported action caller")
+
+    last_error: TypeError | None = None
+    for call_action in callers:
+        try:
+            result = _invoke_onebot_action_callable(call_action, action, params)
+        except TypeError as exc:
+            last_error = exc
+            continue
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    if last_error is not None:
+        raise last_error
+    raise AttributeError("OneBot client does not expose a supported action caller")
+
+
+def iter_onebot_action_callers(bot: Any) -> tuple[Any, ...]:
+    """Return callable API dispatchers from common OneBot protocol-client wrappers."""
+
+    callers: list[Any] = []
+    seen_owners: set[int] = set()
+    seen_callers: set[int] = set()
+    owners: list[Any] = [bot]
+    index = 0
+    while index < len(owners):
+        owner = owners[index]
+        index += 1
+        if owner is None:
+            continue
+        owner_id = id(owner)
+        if owner_id in seen_owners:
+            continue
+        seen_owners.add(owner_id)
+        for attr in ONEBOT_ACTION_CALLER_ATTRS:
+            try:
+                caller = getattr(owner, attr, None)
+            except Exception:
+                caller = None
+            if callable(caller):
+                caller_id = id(caller)
+                if caller_id not in seen_callers:
+                    seen_callers.add(caller_id)
+                    callers.append(caller)
+        for attr in ONEBOT_ACTION_OWNER_ATTRS:
+            try:
+                nested = getattr(owner, attr, None)
+            except Exception:
+                nested = None
+            if nested is not None and id(nested) not in seen_owners:
+                owners.append(nested)
+    return tuple(callers)
+
+
+def _invoke_onebot_action_callable(call_action: Any, action: str, params: dict[str, Any]) -> Any:
+    """Invoke OneBot client callables across common protocol-end wrappers."""
+
+    attempts: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    if action:
+        envelope_params = dict(params)
+        attempts.extend(
+            [
+                ((action,), dict(params)),
+                ((), {"action": action, **params}),
+                ((action, params), {}),
+                ((action,), {"params": params}),
+                ((), {"action": action, "params": params}),
+                (({"action": action, "params": envelope_params},), {}),
+                (({"action": action, "data": envelope_params},), {}),
+                (({"action": action, "payload": envelope_params},), {}),
+                (({"api": action, "params": envelope_params},), {}),
+                (({"api": action, "data": envelope_params},), {}),
+                ((action,), {"data": params}),
+                ((), {"action": action, "data": params}),
+                ((action,), {"payload": params}),
+                ((), {"action": action, "payload": params}),
+            ]
+        )
+    else:
+        attempts.extend(
+            [
+                ((), dict(params)),
+                ((params,), {}),
+                ((), {"params": params}),
+                ((), {"data": params}),
+                ((), {"payload": params}),
+            ]
+        )
+
+    last_error: TypeError | None = None
+    for args, kwargs in attempts:
+        try:
+            return call_action(*args, **kwargs)
+        except TypeError as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    return call_action(action, **params) if action else call_action(**params)
+
+
+async def fetch_cookie_text(bot: Any, *, domain: str) -> str:
+    """Try several OneBot actions and domains until a Cookie header is found."""
+
+    login_uin: int | None = None
+    best_cookies: dict[str, str] = {}
+    for action in COOKIE_ACTIONS:
+        for candidate_domain in iter_cookie_domains(domain):
+            for call_kwargs in ({"domain": candidate_domain}, {}):
+                try:
+                    payload = await asyncio.wait_for(
+                        call_onebot_action(bot, action, **call_kwargs),
+                        timeout=COOKIE_ACTION_TIMEOUT_SECONDS,
+                    )
+                except Exception:
+                    continue
+                cookie_text = extract_cookie_text(payload)
+                if not cookie_text:
+                    continue
+                try:
+                    cookies = parse_cookie_text(cookie_text)
+                except Exception:
+                    cookies = {}
+                if not normalize_uin(cookies):
+                    if login_uin is None:
+                        login_uin = await fetch_login_uin(bot)
+                    if login_uin:
+                        cookie_text = _inject_login_uin(cookie_text, login_uin)
+                        try:
+                            cookies = parse_cookie_text(cookie_text)
+                        except Exception:
+                            cookies = {}
+                candidate_cookies = _merge_cookie_dicts(best_cookies, cookies)
+                if normalize_uin(candidate_cookies) and _has_auth_cookie(candidate_cookies):
+                    best_cookies = candidate_cookies
+    if normalize_uin(best_cookies) and _has_auth_cookie(best_cookies):
+        return cookie_header(best_cookies)
+    return ""

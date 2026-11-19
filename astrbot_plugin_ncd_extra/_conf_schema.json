@@ -109,7 +109,13 @@
   },
   "ncd_deputy_admin": {
     "type": "string",
-    "description": "副管理员 QQ（仅当主管理员不在本群时才生效，留空 = 不启用）",
+    "description": "副管理员 QQ，多个用逗号或换行分隔（仅当主管理员不在本群时才生效，留空 = 不启用）",
+    "default": ""
+  },
+  "ncd_pc_linkd": {
+    "type": "string",
+    "description": "电脑侧 linkd 地址",
+    "hint": "/拉起向日葵 用：默认 http://192.168.137.1:8201。\n留空=默认；改端口/换电脑时填这里。",
     "default": ""
   }
 }

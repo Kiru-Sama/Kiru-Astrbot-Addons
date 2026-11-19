@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>状态图背景</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --border: #e6e8ec;
+    --text: #1f2328;
+    --muted: #6b7280;
+    --accent: #3b82f6;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --bad: #ef4444;
+    --track: #eceef2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --card: #171a21;
+      --border: #262b35;
+      --text: #e6e8ec;
+      --muted: #9aa3b2;
+      --track: #232833;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 14px;
+    margin-bottom: 14px;
+  }
+  .card h2 { font-size: 15px; margin: 0 0 10px; }
+  .modes { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .mode-btn {
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text);
+    border-radius: 10px;
+    padding: 8px 14px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .mode-btn.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .row { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-bottom: 12px; }
+  .row label { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
+  input[type="range"] { accent-color: var(--accent); width: 150px; }
+  .btn {
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    border-radius: 10px;
+    padding: 8px 16px;
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .btn.ghost { background: transparent; color: var(--accent); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .upload {
+    border: 1px dashed var(--border);
+    border-radius: 10px;
+    padding: 8px 14px;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 13px;
+  }
+  .upload:hover { border-color: var(--accent); color: var(--accent); }
+  #hint { color: var(--muted); font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+  .grid.drop {
+    outline: 2px dashed var(--accent);
+    outline-offset: 6px;
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--accent) 8%, transparent);
+  }
+  .tile {
+    position: relative;
+    border: 2px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    background: var(--track);
+    cursor: pointer;
+    aspect-ratio: 3 / 4;
+  }
+  .tile.on { border-color: var(--accent); }
+  .tile img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .tile .tag {
+    position: absolute; left: 0; right: 0; bottom: 0;
+    background: linear-gradient(transparent, rgba(0,0,0,.62));
+    color: #fff; font-size: 11px; padding: 16px 8px 6px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tile .del {
+    position: absolute; right: 6px; top: 6px;
+    border: 0; border-radius: 8px;
+    background: rgba(0,0,0,.55); color: #fff;
+    width: 24px; height: 24px; cursor: pointer; font-size: 13px;
+  }
+  .tile.builtin .tag { background: linear-gradient(transparent, rgba(0,0,0,.62)); }
+  .tile.builtin { cursor: default; }
+  .preview img { width: 100%; border-radius: 12px; display: block; border: 1px solid var(--border); }
+  .empty { color: var(--muted); font-size: 13px; padding: 18px 0; text-align: center; }
+  .msg { font-size: 12px; margin-left: 8px; }
+  .msg.err { color: var(--bad); }
+  .msg.ok { color: var(--ok); }
+</style>
+</head>
+<body>
+  <h1>状态图背景</h1>
+  <div class="sub">/设备状态 信息图的底图：内置默认 / 指定一张 / 随机轮换</div>
+
+  <div class="card">
+    <h2>显示模式</h2>
+    <div class="modes" id="modes">
+      <button class="mode-btn" data-mode="builtin">内置默认</button>
+      <button class="mode-btn" data-mode="single">指定一张</button>
+      <button class="mode-btn" data-mode="random">随机轮换</button>
+    </div>
+    <div class="row">
+      <label>模糊 <input type="range" id="blur" min="1" max="30" step="1" value="9"><span id="blurVal">9</span></label>
+      <label>压暗 <input type="range" id="dim" min="0" max="0.6" step="0.02" value="0.22"><span id="dimVal">0.22</span></label>
+    </div>
+    <div class="row">
+      <button class="btn" id="saveBtn">保存设置</button>
+      <button class="btn ghost" id="previewBtn">生成一张状态图预览</button>
+      <span class="msg" id="saveMsg"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>背景图库</h2>
+    <div class="toolbar">
+      <label class="upload">＋ 上传图片<input type="file" id="fileInput" accept="image/*" multiple hidden></label>
+      <span id="hint">支持 jpg / png / webp，单张 ≤ 15MB；可一次多选，或直接把多张图拖到下面图库里</span>
+    </div>
+    <div id="grid" class="grid"></div>
+  </div>
+
+  <div class="card preview">
+    <h2>状态图预览</h2>
+    <div id="previewBox" class="empty">点上面「生成一张状态图预览」看效果</div>
+  </div>
+
+<script>
+(function () {
+  const P = window.AstrBotPluginPage;
+  const state = { settings: {}, files: [], key: 0 };
+  const $ = (id) => document.getElementById(id);
+
+  function msg(text, ok) {
+    const el = $("saveMsg");
+    el.textContent = text || "";
+    el.className = "msg " + (ok ? "ok" : "err");
+    if (text) setTimeout(() => { el.textContent = ""; }, 4000);
+  }
+
+  function setMode(mode) {
+    state.settings.mode = mode;
+    document.querySelectorAll(".mode-btn").forEach((b) =>
+      b.classList.toggle("on", b.dataset.mode === mode)
+    );
+    renderTiles();
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  function renderTiles() {
+    const grid = $("grid");
+    const mode = state.settings.mode || "builtin";
+    const current = state.settings.current || "";
+    const cards = [];
+    cards.push(
+      '<div class="tile builtin ' +
+        (mode === "builtin" ? "on" : "") +
+        '" data-name=""><img alt="内置默认" style="display:none">' +
+        '<div class="tag">内置默认背景</div></div>'
+    );
+    state.files.forEach((f) => {
+      cards.push(
+        '<div class="tile ' +
+          (mode === "single" && current === f.name ? "on" : "") +
+          '" data-name="' + esc(f.name) + '">' +
+          '<img data-src="' + esc(f.name) + '" alt="" style="display:none">' +
+          '<button class="del" data-del="' + esc(f.name) + '" title="删除">×</button>' +
+          '<div class="tag">' + esc(f.name) + '</div></div>'
+      );
+    });
+    grid.innerHTML = cards.join("");
+    // 内置默认缩略图（等 data_url 拿到再显示，避免破图图标）
+    const builtinImg = grid.querySelector('.tile.builtin img');
+    if (builtinImg) {
+      builtinImg.alt = "内置默认";
+      loadPreviewImage("builtin", builtinImg);
+    }
+    grid.querySelectorAll("img[data-src]").forEach((img) => loadPreviewImage(img.dataset.src, img));
+    grid.querySelectorAll(".tile").forEach((tile) => {
+      tile.addEventListener("click", (ev) => {
+        if (ev.target.closest(".del")) return;
+        const name = tile.dataset.name || "";
+        if (tile.classList.contains("builtin")) {
+          state.settings.mode = "builtin";
+          state.settings.current = "";
+        } else {
+          state.settings.mode = "single";
+          state.settings.current = name;
+        }
+        setMode(state.settings.mode);
+      });
+    });
+    grid.querySelectorAll(".del").forEach((btn) => {
+      btn.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        const name = btn.dataset.del;
+        if (!name) return;
+        if (!confirm("删除背景「" + name + "」？")) return;
+        try {
+          const r = await P.apiPost("/ncd-monitor/status-bg-delete", { name });
+          if (r && r.ok) {
+            state.files = r.files || [];
+            if (state.settings.current === name) {
+              state.settings.mode = "builtin";
+              state.settings.current = "";
+            }
+            setMode(state.settings.mode);
+            msg("已删除", true);
+          } else {
+            msg((r && r.error) || "删除失败", false);
+          }
+        } catch (e) {
+          msg("删除失败: " + e, false);
+        }
+      });
+    });
+  }
+
+  async function loadPreviewImage(name, imgEl) {
+    const key = (state.key++).toString();
+    imgEl.dataset.key = key;
+    try {
+      const r = await P.apiGet("/ncd-monitor/status-bg-preview", { name: name || "builtin" });
+      if (imgEl.dataset.key !== key) return;
+      if (r && r.ok && r.data_url) {
+        imgEl.src = r.data_url;
+        imgEl.style.display = "block";
+      }
+    } catch (e) { /* 忽略 */ }
+  }
+
+  async function load() {
+    try {
+      const r = await P.apiGet("/ncd-monitor/status-bg");
+      state.settings = (r && r.settings) || {};
+      state.files = (r && r.files) || [];
+      $("blur").value = state.settings.blur != null ? state.settings.blur : 9;
+      $("dim").value = state.settings.dim != null ? state.settings.dim : 0.22;
+      $("blurVal").textContent = $("blur").value;
+      $("dimVal").textContent = $("dim").value;
+      setMode(state.settings.mode || "builtin");
+    } catch (e) {
+      msg("加载设置失败: " + e, false);
+    }
+  }
+
+  async function save() {
+    const payload = {
+      mode: state.settings.mode || "builtin",
+      current: state.settings.current || "",
+      blur: parseFloat($("blur").value),
+      dim: parseFloat($("dim").value),
+    };
+    try {
+      $("saveBtn").disabled = true;
+      const r = await P.apiPost("/ncd-monitor/status-bg-save", payload);
+      if (r && r.ok) {
+        msg("已保存", true);
+      } else {
+        msg((r && r.error) || "保存失败", false);
+      }
+    } catch (e) {
+      msg("保存失败: " + e, false);
+    } finally {
+      $("saveBtn").disabled = false;
+    }
+  }
+
+  async function uploadFiles(files) {
+    const list = Array.from(files || []).filter((f) => /^image\//.test(f.type));
+    if (!list.length) {
+      msg("没有可上传的图片", false);
+      return;
+    }
+    let okCount = 0;
+    let failCount = 0;
+    let skipCount = 0;
+    for (let i = 0; i < list.length; i++) {
+      const file = list[i];
+      msg("正在上传 " + (i + 1) + "/" + list.length + "：" + file.name, true);
+      try {
+        const b64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result).split(",")[1] || "");
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        const r = await P.apiPost("/ncd-monitor/status-bg-upload", { name: file.name, b64 });
+        if (r && r.ok) {
+          state.files = r.files || state.files;
+          if (r.duplicate) {
+            skipCount++;
+          } else {
+            okCount++;
+          }
+        } else {
+          failCount++;
+        }
+      } catch (e) {
+        failCount++;
+      }
+    }
+    renderTiles();
+    msg(
+      "上传完成：成功 " + okCount + " 张"
+        + (skipCount ? "，跳过重复 " + skipCount + " 张" : "")
+        + (failCount ? "，失败 " + failCount + " 张" : ""),
+      failCount === 0
+    );
+  }
+
+  async function previewStatus() {
+    $("previewBox").className = "empty";
+    $("previewBox").textContent = "渲染中…（约 1~2 秒）";
+    try {
+      const r = await P.apiGet("/ncd-monitor/status-images", { preview: "1" });
+      const data = r && r.data && r.data.images && r.data.images[0];
+      if (data && data.b64) {
+        $("previewBox").className = "preview";
+        $("previewBox").innerHTML =
+          '<img alt="状态图预览" src="data:image/png;base64,' + data.b64 + '">';
+      } else {
+        $("previewBox").className = "empty";
+        $("previewBox").textContent = "预览失败（看服务器日志）";
+      }
+    } catch (e) {
+      $("previewBox").className = "empty";
+      $("previewBox").textContent = "预览失败: " + e;
+    }
+  }
+
+  document.querySelectorAll(".mode-btn").forEach((btn) => {
+    btn.addEventListener("click", () => setMode(btn.dataset.mode));
+  });
+  $("blur").addEventListener("input", () => { $("blurVal").textContent = $("blur").value; });
+  $("dim").addEventListener("input", () => { $("dimVal").textContent = $("dim").value; });
+  $("saveBtn").addEventListener("click", save);
+  $("previewBtn").addEventListener("click", previewStatus);
+  $("fileInput").addEventListener("change", (ev) => {
+    uploadFiles(ev.target.files);
+    ev.target.value = "";
+  });
+
+  // ★ 拖拽多张图到图库区域也能上传
+  const dropZone = $("grid");
+  ["dragenter", "dragover"].forEach((evName) => {
+    dropZone.addEventListener(evName, (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      dropZone.classList.add("drop");
+    });
+  });
+  ["dragleave", "drop"].forEach((evName) => {
+    dropZone.addEventListener(evName, (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      if (evName === "dragleave" && ev.relatedTarget && dropZone.contains(ev.relatedTarget)) return;
+      dropZone.classList.remove("drop");
+    });
+  });
+  dropZone.addEventListener("drop", (ev) => {
+    uploadFiles(ev.dataTransfer && ev.dataTransfer.files);
+  });
+
+  // 等 bridge 就绪
+  let tries = 0;
+  function boot() {
+    if (window.AstrBotPluginPage && window.AstrBotPluginPage.apiGet) {
+      load();
+      return;
+    }
+    if (tries++ < 100) setTimeout(boot, 50);
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

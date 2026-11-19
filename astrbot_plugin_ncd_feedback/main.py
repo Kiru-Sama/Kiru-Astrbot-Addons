@@ -36,6 +36,25 @@ STORE = DATA_DIR / "items.jsonl"
 STATUS_LABEL = {"new": "待处理", "done": "已处理", "dropped": "已忽略"}
 
 
+def _qq_list(raw) -> list[str]:
+    """把配置里的 QQ 名单解析成去重列表（保序）。
+
+    支持逗号、中文逗号、分号、空格和换行分隔：
+        "111,222" / "111，222" / "111\n222" / "111 222"
+    """
+    import re
+
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    out: list[str] = []
+    for part in re.split(r"[,，;；\s]+", s):
+        p = part.strip()
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
 class NcdFeedbackPlugin(star.Star):
     def __init__(self, context: star.Context, config: dict[str, Any] | None = None) -> None:
         super().__init__(context, config)
@@ -43,7 +62,7 @@ class NcdFeedbackPlugin(star.Star):
         self._conf: dict[str, Any] = config or {}
         # 管理员 QQ 从配置读（源码/发布包里不再出现私人 QQ 号）
         self._PRIMARY_ADMIN = str(self._conf.get('ncd_primary_admin') or '').strip()
-        self._DEPUTY_ADMIN = str(self._conf.get('ncd_deputy_admin') or '').strip()
+        self._DEPUTY_ADMINS = _qq_list(self._conf.get('ncd_deputy_admin'))
         self._items: list[dict] | None = None
         self._register_web()
 
@@ -165,7 +184,7 @@ class NcdFeedbackPlugin(star.Star):
     # ★ 2026-11-02：管理员 QQ 不再写死在代码里（发布包会带 PII）。
     #   值从配置读：ncd_primary_admin / ncd_deputy_admin（见 _conf_schema.json）。
     _PRIMARY_ADMIN = ""
-    _DEPUTY_ADMIN = ""
+    _DEPUTY_ADMINS: list[str] = []
 
     def _deputy_allowed(self, event) -> bool:
         """副管理员：只在「主管理员不在当前群」时按管理员对待。
@@ -175,7 +194,7 @@ class NcdFeedbackPlugin(star.Star):
         """
         try:
             sender = str(event.get_sender_id() or "")
-            if sender != self._DEPUTY_ADMIN:
+            if sender not in self._DEPUTY_ADMINS:
                 return False
             gid = str(event.get_group_id() or "")
             if not gid:
@@ -245,7 +264,7 @@ class NcdFeedbackPlugin(star.Star):
     #  命令
     # ------------------------------------------------------------------
     @filter.command("反馈", alias={"feedback", "建议"})
-    async def cmd_feedback(self, event: AstrMessageEvent, body: GreedyStr = "") -> None:
+    async def cmd_feedback(self, event: AstrMessageEvent, body: GreedyStr) -> None:
         """提交一条反馈：/反馈 [分类] 内容"""
         text = str(body or "").strip()
         if not text:
@@ -287,7 +306,10 @@ class NcdFeedbackPlugin(star.Star):
         lines = [f"📮 待处理反馈（共 {len(items)} 条）："]
         for it in items[:10]:
             when = time.strftime("%m-%d %H:%M", time.localtime(it.get("ts", 0)))
-            lines.append(f"#{it['id']} [{it['category']}] {when} · {it['text'][:60]}")
+            tag = "（已回复）" if it.get("replied_at") else ""
+            lines.append(
+                f"#{it['id']} [{it['category']}] {when} · {it['text'][:60]}{tag}"
+            )
         lines.append("")
         lines.append("处理：/反馈处理 <编号>　忽略：/反馈忽略 <编号>")
         yield event.plain_result("\n".join(lines))
@@ -303,6 +325,113 @@ class NcdFeedbackPlugin(star.Star):
     async def cmd_drop(self, event: AstrMessageEvent, fid: str = "") -> None:
         """把某条反馈标记为已忽略"""
         yield event.plain_result(self._set_status(str(fid).strip(), "dropped"))
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("反馈清空", alias={"清空反馈", "反馈全清"})
+    async def cmd_clear(self, event: AstrMessageEvent) -> None:
+        """清空全部反馈（先自动备份，仅管理员 / 副管理员）"""
+        if not self._is_admin(event):
+            yield event.plain_result("只有管理员 / 副管理员能清空反馈。")
+            return
+        items = self._load()
+        total = len(items)
+        if not total:
+            yield event.plain_result("反馈列表已经是空的。")
+            return
+        # 先备份，再清空（备份失败就不动，避免丢数据）
+        backup_name = ""
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            backup = DATA_DIR / f"items.jsonl.bak-{stamp}"
+            if STORE.is_file():
+                backup.write_bytes(STORE.read_bytes())
+            backup_name = backup.name
+            olds = sorted(
+                DATA_DIR.glob("items.jsonl.bak-*"),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for p in olds[10:]:
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            yield event.plain_result(f"备份失败，没有清空（避免丢数据）：{exc}")
+            return
+        self._items = []
+        self._save_all()
+        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        logger.info(
+            f"[feedback] 管理员 {sender} 清空反馈 {total} 条（备份 {backup_name}）"
+        )
+        yield event.plain_result(
+            f"已清空 {total} 条反馈。\n备份：{backup_name or '（无旧文件）'}"
+        )
+
+    @filter.command("反馈回复", alias={"回复反馈"})
+    async def cmd_reply(self, event: AstrMessageEvent, body: GreedyStr) -> None:
+        """回复某条反馈的提交者：/反馈回复 <编号> 想说的话"""
+        if not self._is_admin(event):
+            yield event.plain_result("只有管理员 / 副管理员能回复反馈。")
+            return
+        raw = str(body or "").strip()
+        if not raw:
+            yield event.plain_result(
+                "用法：/反馈回复 <编号> 想说的话\n"
+                "例：/反馈回复 cbdf31bc 这个会排进下个版本"
+            )
+            return
+        fid, _, content = raw.partition(" ")
+        fid = fid.strip().lstrip("#")
+        content = content.strip()
+        if not fid or not content:
+            yield event.plain_result(
+                "要带上编号和内容，比如：/反馈回复 cbdf31bc 这个会排进下个版本"
+            )
+            return
+        item = None
+        for it in self._load():
+            if it.get("id") == fid or str(it.get("id") or "").startswith(fid):
+                item = it
+                break
+        if item is None:
+            yield event.plain_result(f"没找到编号 {fid} 的反馈。")
+            return
+        target = str(item.get("umo") or "")
+        if not target:
+            yield event.plain_result(
+                f"#{item['id']} 没有可回复的会话（提交时没带 umo）。"
+            )
+            return
+        text = f"【反馈 #{item['id']} 回复】\n{content}"
+        try:
+            await asyncio.wait_for(
+                self.context.send_message(
+                    target, MessageChain(chain=[Comp.Plain(text)])
+                ),
+                timeout=20,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[feedback] 回复 #{item['id']} 失败: {exc}")
+            yield event.plain_result(f"回复 #{item['id']} 失败了：{exc}")
+            return
+        item["replied_at"] = time.time()
+        item["reply_text"] = content[:400]
+        item["reply_by"] = str(
+            getattr(event, "get_sender_id", lambda: "")() or ""
+        )
+        self._save_all()
+        where = item.get("group") or "私聊"
+        to = item.get("sender") or item.get("sender_id") or "?"
+        logger.info(
+            f"[feedback] 已回复 #{item['id']} → {target}: {content[:60]}"
+        )
+        yield event.plain_result(
+            f"已回复 #{item['id']}（发送到 {where} / {to}）。\n"
+            "反馈状态没变，处理完记得 /反馈处理 编号"
+        )
 
     def _set_status(self, fid: str, status: str) -> str:
         if not fid:
@@ -354,7 +483,7 @@ class NcdFeedbackPlugin(star.Star):
             return
         umo = str(item.get("umo") or "")
         plat = umo.split(":", 1)[0] if ":" in umo else ""
-        admins = [a for a in dict.fromkeys([self._PRIMARY_ADMIN, self._DEPUTY_ADMIN]) if a]
+        admins = [a for a in dict.fromkeys([self._PRIMARY_ADMIN, *self._DEPUTY_ADMINS]) if a]
         if not admins:
             logger.warning(f"[feedback] 新反馈 #{item['id']}：没配管理员，无法推送")
             return
@@ -364,7 +493,8 @@ class NcdFeedbackPlugin(star.Star):
         text = (
             f"【新反馈 #{item['id']}】[{item['category']}]\n"
             f"来自：{item.get('group') or '私聊'} / {item.get('sender') or item.get('sender_id') or '?'}\n"
-            f"{item['text']}"
+            f"{item['text']}\n\n"
+            f"回复：/反馈回复 {item['id']} 内容"
         )
         for admin in admins:
             try:

@@ -7,8 +7,8 @@
   },
   "ncd_deputy_admin": {
     "type": "string",
-    "description": "副管理员 QQ（群聊里可以改人格）",
-    "hint": "留空 = 没有副管理员。",
+    "description": "副管理员 QQ，多个用逗号或换行分隔（群聊里可以改人格）",
+    "hint": "留空 = 没有副管理员。多个用逗号分隔，例如 111,222。",
     "default": ""
   }
 }

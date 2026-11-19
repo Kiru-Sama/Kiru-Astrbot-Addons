@@ -1,0 +1,312 @@
+{
+  "1": {
+    "inputs": {
+      "unet_name": "Qwen\\Qwen-Rapid-NSFW-v23_Q4_K（千问 Rapid NSFW v23 Q4）.gguf"
+    },
+    "class_type": "UnetLoaderGGUF",
+    "_meta": {
+      "title": "Unet Loader (GGUF)",
+      "cnr_id": "ComfyUI-GGUF",
+      "aux_id": "city96/ComfyUI-GGUF",
+      "ver": "795e45156ece99afbc3efef911e63fcb46e6a20d"
+    }
+  },
+  "3": {
+    "inputs": {
+      "clip_name": "Qwen2.5-VL-7B-Instruct-Q3_K_S.gguf",
+      "type": "qwen_image"
+    },
+    "class_type": "CLIPLoaderGGUF",
+    "_meta": {
+      "title": "CLIPLoader (GGUF)",
+      "cnr_id": "ComfyUI-GGUF",
+      "aux_id": "city96/ComfyUI-GGUF",
+      "ver": "795e45156ece99afbc3efef911e63fcb46e6a20d"
+    }
+  },
+  "4": {
+    "inputs": {
+      "shift": 3.1,
+      "sampling": "flow",
+      "model": [
+        "1",
+        0
+      ]
+    },
+    "class_type": "ModelSamplingAuraFlow",
+    "_meta": {
+      "title": "采样算法（AuraFlow）",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.48"
+    }
+  },
+  "5": {
+    "inputs": {
+      "prompt": "将图1与图2与图3的少女一块躺在床上",
+      "clip": [
+        "3",
+        0
+      ],
+      "vae": [
+        "6",
+        0
+      ],
+      "image1": [
+        "8",
+        0
+      ],
+      "image2": [
+        "9",
+        0
+      ],
+      "image3": [
+        "10",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "正面文本编码 Qwen Image 编辑 Plus",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.59"
+    }
+  },
+  "6": {
+    "inputs": {
+      "vae_name": "qwen_image_vae（千问图像 VAE）.safetensors"
+    },
+    "class_type": "VAELoader",
+    "_meta": {
+      "title": "加载VAE",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.48"
+    }
+  },
+  "7": {
+    "inputs": {
+      "prompt": "",
+      "clip": [
+        "3",
+        0
+      ],
+      "vae": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "TextEncodeQwenImageEditPlus",
+    "_meta": {
+      "title": "文本编码 Qwen Image 编辑 Plus",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.59"
+    }
+  },
+  "8": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "14",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "缩放图像（像素）",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.50"
+    }
+  },
+  "9": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "12",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "缩放图像（像素）",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.50"
+    }
+  },
+  "10": {
+    "inputs": {
+      "upscale_method": "lanczos",
+      "megapixels": 1,
+      "resolution_steps": 1,
+      "image": [
+        "13",
+        0
+      ]
+    },
+    "class_type": "ImageScaleToTotalPixels",
+    "_meta": {
+      "title": "缩放图像（像素）",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.50"
+    }
+  },
+  "11": {
+    "inputs": {
+      "strength": 1,
+      "pre_cfg": false,
+      "model": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "CFGNorm",
+    "_meta": {
+      "title": "CFG归一化",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.50"
+    }
+  },
+  "12": {
+    "inputs": {
+      "image": "Image_1794805020884_864.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图2",
+      "cnr_id": "comfy-core",
+      "ver": "0.28.0"
+    }
+  },
+  "13": {
+    "inputs": {
+      "image": "Image_1794800953403_648.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图3",
+      "cnr_id": "comfy-core",
+      "ver": "0.28.0"
+    }
+  },
+  "14": {
+    "inputs": {
+      "image": "1793981567932.jpeg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "图1",
+      "cnr_id": "comfy-core",
+      "ver": "0.28.0"
+    }
+  },
+  "15": {
+    "inputs": {
+      "reference_latents_method": "index_timestep_zero",
+      "conditioning": [
+        "7",
+        0
+      ]
+    },
+    "class_type": "FluxKontextMultiReferenceLatentMethod",
+    "_meta": {
+      "title": "Edit Model Reference Method",
+      "cnr_id": "comfy-core",
+      "ver": "0.5.1"
+    }
+  },
+  "16": {
+    "inputs": {
+      "reference_latents_method": "index_timestep_zero",
+      "conditioning": [
+        "5",
+        0
+      ]
+    },
+    "class_type": "FluxKontextMultiReferenceLatentMethod",
+    "_meta": {
+      "title": "Edit Model Reference Method",
+      "cnr_id": "comfy-core",
+      "ver": "0.5.1"
+    }
+  },
+  "18": {
+    "inputs": {
+      "seed": 490252934709921,
+      "steps": 6,
+      "cfg": 1,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1,
+      "model": [
+        "11",
+        0
+      ],
+      "positive": [
+        "16",
+        0
+      ],
+      "negative": [
+        "15",
+        0
+      ],
+      "latent_image": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "K采样器",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.48"
+    }
+  },
+  "19": {
+    "inputs": {
+      "filename_prefix": "ComfyUI",
+      "images": [
+        "20",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "保存图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.28.0"
+    }
+  },
+  "20": {
+    "inputs": {
+      "samples": [
+        "18",
+        0
+      ],
+      "vae": [
+        "6",
+        0
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE解码",
+      "cnr_id": "comfy-core",
+      "ver": "0.3.48"
+    }
+  },
+  "21": {
+    "inputs": {
+      "width": 720,
+      "height": 960,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "空Latent图像",
+      "cnr_id": "comfy-core",
+      "ver": "0.44.2"
+    }
+  }
+}

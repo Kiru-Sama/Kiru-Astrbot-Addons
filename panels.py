@@ -23,10 +23,12 @@ import ctypes
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.error
 import urllib.request
 import webbrowser
@@ -194,8 +196,64 @@ SERIAL = "STS0219701030196"
 LOCAL_PORT = 16185          # 电脑侧 adb 转发端口
 REMOTE_PORT = 6185          # 手机 AstrBot WebUI
 
-PHONE_IP = "192.168.137.71"
-NAPCAT_IP = "192.168.137.71"
+def _probe_phone(ip: str, timeout: float = 0.4) -> bool:
+    """探测某个 IP 上手机 AstrBot 的 6185 是否开着。"""
+    try:
+        with socket.create_connection((ip, 6185), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _discover_phone_ip(
+    default: str = "192.168.137.71", force_scan: bool = False
+) -> str:
+    """手机重启/重连热点后 DHCP 可能换 IP；自动找开着 6185 的那台。
+
+    顺序：环境变量 NCD_PHONE_IP → phone_ip.txt 缓存（先探测）→ 扫热点网段 → 旧默认。
+    找到后写回 phone_ip.txt，下次启动秒开。
+    force_scan=True：跳过缓存探测，直接重新扫网段（代理失败时用）。
+    """
+    env_ip = str(os.environ.get("NCD_PHONE_IP", "") or "").strip()
+    if env_ip:
+        return env_ip
+    here = os.path.dirname(os.path.abspath(__file__))
+    cache = os.path.join(here, "phone_ip.txt")
+    if not force_scan:
+        try:
+            with open(cache, "r", encoding="utf-8") as f:
+                cached = f.read().strip()
+            if cached and _probe_phone(cached):
+                return cached
+        except OSError:
+            pass
+    found = ""
+    try:
+        hosts = [f"192.168.137.{i}" for i in range(2, 255)]
+        with ThreadPoolExecutor(max_workers=64) as pool:
+            futures = {pool.submit(_probe_phone, h, 0.3): h for h in hosts}
+            for fut in as_completed(futures):
+                try:
+                    if fut.result():
+                        found = futures[fut]
+                        break
+                except Exception:  # noqa: BLE001
+                    continue
+    except Exception:  # noqa: BLE001
+        found = ""
+    if found:
+        try:
+            with open(cache, "w", encoding="utf-8") as f:
+                f.write(found)
+        except OSError:
+            pass
+        print(f"[panel] 自动发现手机 IP：{found}")
+        return found
+    return default
+
+
+PHONE_IP = _discover_phone_ip()
+NAPCAT_IP = PHONE_IP
 
 # 手机端 dashboard 已改成 0.0.0.0，优先走热点；连不上才退回 USB 转发
 ASTRBOT_CANDIDATES = [
@@ -204,6 +262,48 @@ ASTRBOT_CANDIDATES = [
 ]
 ASTRBOT = ASTRBOT_CANDIDATES[0]
 NAPCAT = f"http://{NAPCAT_IP}:6099"
+
+
+def _apply_phone_ip(ip: str) -> None:
+    """更新全局手机地址（代理/登录都读这几个全局）。"""
+    global PHONE_IP, NAPCAT_IP, ASTRBOT_CANDIDATES, ASTRBOT, NAPCAT
+    if not ip:
+        return
+    PHONE_IP = ip
+    NAPCAT_IP = ip
+    ASTRBOT_CANDIDATES = [f"http://{ip}:6185", f"http://127.0.0.1:{LOCAL_PORT}"]
+    ASTRBOT = ASTRBOT_CANDIDATES[0]
+    NAPCAT = f"http://{ip}:6099"
+
+
+def _refresh_phone_ip(force: bool = False) -> str:
+    """重新探测手机 IP；变了就更新全局 base（代理失败时调用）。"""
+    try:
+        ip = _discover_phone_ip(force_scan=force)
+    except Exception:  # noqa: BLE001
+        return PHONE_IP
+    if ip and ip != PHONE_IP:
+        print(f"[面板] 手机 IP 变更：{PHONE_IP} → {ip}", flush=True)
+        _apply_phone_ip(ip)
+    return PHONE_IP
+
+
+def _ip_watchdog() -> None:
+    """每 60 秒确认一次手机还在旧 IP 上；不在就重新扫（平时只 probe，一次 0.4s）。"""
+    while True:
+        time.sleep(60)
+        try:
+            _refresh_phone_ip(force=False)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _is_napcat_base(base: str) -> bool:
+    return base == NAPCAT or ":6099" in base
+
+
+def _fresh_base(base: str) -> str:
+    return NAPCAT if _is_napcat_base(base) else ASTRBOT
 PC_API = "http://192.168.137.1:8201"      # 电脑侧 linkd（/sysinfo 提供电脑资源；8200 拉起器已退役）
 USERNAME = "astrbot"
 PASSWORD = "NcdPass2026"
@@ -213,11 +313,12 @@ ASTRBOT_PORT = 9003         # AstrBot Dashboard 免登录反代（注入 token �
 
 PAGES = [
     ("监控面板", "astrbot_plugin_ncd_monitor", "monitor"),
-    ("出图额度", "astrbot_plugin_ncd_comfy", "quota"),
+    ("出图额度", "astrbot_plugin_ncd_comfy", "gallery"),
     ("提示注入", "astrbot_plugin_ncd_inject", "inject"),
     ("记忆", "astrbot_plugin_ncd_memory", "memory"),
     ("防睡眠", "astrbot_plugin_ncd_awake", "awake"),
     ("反馈", "astrbot_plugin_ncd_feedback", "feedback"),
+    ("状态图背景", "astrbot_plugin_ncd_monitor", "status"),
 ]
 
 # 失败结果只缓存 15 秒：服务短暂抖动后面板能自己恢复，而不是钉住 5 分钟
@@ -264,7 +365,15 @@ window.addEventListener("message", async (ev) => {
     let data;
     try { data = JSON.parse(text); } catch (e) { data = text; }
     if (!r.ok) throw new Error("HTTP " + r.status);
-    reply({ kind: "response", requestId, ok: true, data });
+    // ★ 与 AstrBot 官方父窗口行为一致：把 {status, message, data} 的业务 data 解包后再回给页面
+    //   （之前直接回整包，页面按 r.ok / r.settings 取都是 undefined → 数据显示不出来）
+    let payload = data;
+    if (data && typeof data === "object" && !Array.isArray(data)
+        && Object.prototype.hasOwnProperty.call(data, "status")
+        && Object.prototype.hasOwnProperty.call(data, "data")) {
+      payload = data.data;
+    }
+    reply({ kind: "response", requestId, ok: true, data: payload });
   } catch (err) {
     reply({ kind: "response", requestId, ok: false, error: String((err && err.message) || err) });
   }
@@ -543,31 +652,47 @@ class Handler(BaseHTTPRequestHandler):
                 pass
 
     def _proxy(self, base: str, subpath: str) -> None:
-        url = base.rstrip("/") + subpath
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         headers = {}
         for k, v in self.headers.items():
             if k.lower() in _FORWARD_HEADERS:
                 headers[k] = v
-        req = urllib.request.Request(url, data=body, headers=headers, method=self.command)
-        try:
+
+        def _do(target: str):
+            url = target.rstrip("/") + subpath
+            req = urllib.request.Request(url, data=body, headers=headers, method=self.command)
             with urllib.request.urlopen(req, timeout=30) as r:
                 self._send(r.status, r.headers.get("Content-Type", ""), r.read())
+            return target
+
+        try:
+            _do(base)
         except urllib.error.HTTPError as exc:
             self._send(exc.code, exc.headers.get("Content-Type", ""), exc.read())
         except Exception as exc:  # noqa: BLE001
-            msg = f"代理失败: {type(exc).__name__}: {exc}\n目标: {url}".encode("utf-8")
+            # 手机可能换了 IP：强制重新探测，换新 base 再试一次
+            _refresh_phone_ip(force=True)
+            retry_base = _fresh_base(base)
+            target = retry_base.rstrip("/") + subpath
+            if retry_base != base:
+                try:
+                    _do(retry_base)
+                    return
+                except Exception as exc2:  # noqa: BLE001
+                    exc = exc2
+            msg = f"代理失败: {type(exc).__name__}: {exc}\n目标: {target}".encode("utf-8")
             self._send(502, "text/plain; charset=utf-8", msg)
 
     def _relay(self, raw: str) -> None:
         """兜底：先问 AstrBot，404 再问 NapCat（覆盖两边的绝对资源路径）。"""
-        for base in (ASTRBOT, NAPCAT):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length else None
+
+        def _send_via(base: str) -> str:
+            """返回 'ok' / '404' / 'error'。"""
             url = base.rstrip("/") + raw
-            length = int(self.headers.get("Content-Length") or 0)
-            body = self.rfile.read(length) if length else None
             headers = {k: v for k, v in self.headers.items() if k.lower() in _FORWARD_HEADERS}
-            # ★ 插件页的数据接口（/api/plug/...）要 Bearer JWT，浏览器不带，由我们补
             if base is ASTRBOT and raw.startswith("/api/"):
                 headers.setdefault("Authorization", _auth_header().get("Authorization", ""))
                 headers = {k: v for k, v in headers.items() if v}
@@ -575,16 +700,39 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with urllib.request.urlopen(req, timeout=30) as r:
                     self._send(r.status, r.headers.get("Content-Type", ""), r.read())
-                    return
+                    return "ok"
             except urllib.error.HTTPError as exc:
-                if exc.code == 404 and base is ASTRBOT:
-                    continue          # 换 NapCat 再试
+                if exc.code == 404:
+                    return "404"
                 self._send(exc.code, exc.headers.get("Content-Type", ""), exc.read())
-                return
+                return "error"
             except Exception as exc:  # noqa: BLE001
+                _last["err"] = exc
+                return "down"
+
+        _last: dict = {}
+        for base in (ASTRBOT, NAPCAT):
+            res = _send_via(base)
+            if res == "ok":
+                return
+            if res == "error":
+                return
+            if res == "down":
+                # 手机换 IP 的可能：强制重新探测后重试一次
+                _refresh_phone_ip(force=True)
+                new_base = _fresh_base(base)
+                if new_base != base:
+                    res2 = _send_via(new_base)
+                    if res2 == "ok":
+                        return
+                    if res2 == "error":
+                        return
+                exc = _last.get("err")
+                url = new_base.rstrip("/") + raw
                 self._send(502, "text/plain; charset=utf-8",
                            f"代理失败: {type(exc).__name__}: {exc}\n目标: {url}".encode("utf-8"))
                 return
+            # res == '404' → 继续下一个 base
         self._send(404, "text/plain; charset=utf-8", b"not found")
 
     def do_GET(self) -> None:
@@ -842,14 +990,23 @@ class AstrbotHandler(BaseHTTPRequestHandler):
             auth = _auth_header().get("Authorization", "")
             if auth:
                 headers["Authorization"] = auth
-        req = urllib.request.Request(ASTRBOT.rstrip("/") + self.path, data=body,
-                                     headers=headers, method=self.command)
-        try:
+        def _send_to(base: str):
+            req = urllib.request.Request(base.rstrip("/") + self.path, data=body,
+                                         headers=headers, method=self.command)
             with urllib.request.urlopen(req, timeout=30) as r:
                 self._send(r.status, r.headers.get("Content-Type", ""), r.read())
+
+        try:
+            _send_to(ASTRBOT)
         except urllib.error.HTTPError as exc:
             self._send(exc.code, exc.headers.get("Content-Type", ""), exc.read())
         except Exception as exc:  # noqa: BLE001
+            _refresh_phone_ip(force=True)
+            try:
+                _send_to(ASTRBOT)
+                return
+            except Exception as exc2:  # noqa: BLE001
+                exc = exc2
             self._send(502, "text/plain; charset=utf-8", f"astrbot proxy: {exc}".encode("utf-8"))
 
     do_GET = _go
@@ -905,6 +1062,7 @@ def main() -> None:
     print(f"[面板] 服务已启动: {url}", flush=True)
     threading.Thread(target=_serve_napcat, daemon=True).start()
     threading.Thread(target=_serve_astrbot, daemon=True).start()
+    threading.Thread(target=_ip_watchdog, daemon=True).start()
     if not no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
     try:

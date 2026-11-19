@@ -58,6 +58,23 @@ PLUGIN_DIR = Path(__file__).resolve().parent
 ANNOUNCE_DIR = PLUGIN_DIR.parents[1] / "plugin_data" / "ncd_announce"
 
 
+def _qq_list(raw) -> list[str]:
+    """把配置里的 QQ 名单解析成去重列表（保序）。
+
+    支持逗号、中文逗号、分号、空格和换行分隔：
+        "111,222" / "111，222" / "111\n222" / "111 222"
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    out: list[str] = []
+    for part in re.split(r"[,，;；\s]+", s):
+        p = part.strip()
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
 # AstrBot 自带的轮次切分 / 渲染；私有路径，拿不到就用下面的本地实现顶上。
 try:  # pragma: no cover - 依赖 AstrBot 版本
     from astrbot.core.agent.context.round_utils import (
@@ -116,7 +133,7 @@ def parse_onoff(text: str) -> bool | None:
     return None
 
 
-ANNOUNCE_FOOTER = "此消息不会进入bot上下文"
+ANNOUNCE_FOOTER = "此消息不会进入bot上下文。屏蔽公告请发指令/屏蔽公告"
 ANNOUNCE_COMMANDS = ("公告", "广播", "announce", "broadcast")
 ANNOUNCE_PREFIXES = ("/", "／", "\\", "＼")
 
@@ -426,7 +443,7 @@ class NcdExtraPlugin(star.Star):
         self._conf: dict[str, Any] = config or {}
         # 管理员 QQ 从配置读（源码/发布包里不再出现私人 QQ 号）
         self._PRIMARY_ADMIN = str(self._conf.get('ncd_primary_admin') or '').strip()
-        self._DEPUTY_ADMIN = str(self._conf.get('ncd_deputy_admin') or '').strip()
+        self._DEPUTY_ADMINS = _qq_list(self._conf.get('ncd_deputy_admin'))
         self._announce_task: asyncio.Task | None = None
         self._announce_recent: dict[str, float] = {}
         self._announce_lock = asyncio.Lock()
@@ -489,7 +506,7 @@ class NcdExtraPlugin(star.Star):
     # ★ 2026-11-02：管理员 QQ 不再写死在代码里（发布包会带 PII）。
     #   值从配置读：ncd_primary_admin / ncd_deputy_admin（见 _conf_schema.json）。
     _PRIMARY_ADMIN = ""
-    _DEPUTY_ADMIN = ""
+    _DEPUTY_ADMINS: list[str] = []
 
     def _deputy_allowed(self, event) -> bool:
         """副管理员：只在「主管理员不在当前群」时按管理员对待。
@@ -499,7 +516,7 @@ class NcdExtraPlugin(star.Star):
         """
         try:
             sender = str(event.get_sender_id() or "")
-            if sender != self._DEPUTY_ADMIN:
+            if sender not in self._DEPUTY_ADMINS:
                 return False
             gid = str(event.get_group_id() or "")
             if not gid:
@@ -704,8 +721,9 @@ class NcdExtraPlugin(star.Star):
                     f"好友已占满 {max_targets} 个名额，本轮没有群被发送"
                     "（好友与群共用 announce_max_targets）"
                 )
+        targets = self.filter_muted_targets(targets[:max_targets], skipped)
         label = {"friend": "好友", "group": "群", "all": "好友+群"}[scope]
-        return bot, targets[:max_targets], label, skipped
+        return bot, targets, label, skipped
 
     async def _send_announce_one(self, bot, target: dict, text: str) -> None:
         if target.get("kind") == "group":
@@ -863,6 +881,70 @@ class NcdExtraPlugin(star.Star):
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"[extra] 公告结果私聊发送失败: {exc}")
             self._announce_task = None
+
+    # ---- 公告屏蔽名单：用户自己发 /屏蔽公告 维护，广播时过滤 ---- #
+    def _announce_muted_path(self) -> Path:
+        return ANNOUNCE_DIR / "muted.json"
+
+    def _load_announce_muted(self) -> dict[str, dict[str, dict]]:
+        """{"friend": {uid: {ts,name}}, "group": {gid: {ts,name}}}"""
+        empty: dict[str, dict[str, dict]] = {"friend": {}, "group": {}}
+        try:
+            path = self._announce_muted_path()
+            if not path.is_file():
+                return empty
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return empty
+            for kind in ("friend", "group"):
+                bucket = data.get(kind)
+                if isinstance(bucket, dict):
+                    empty[kind] = {
+                        str(k): (v if isinstance(v, dict) else {})
+                        for k, v in bucket.items()
+                        if str(k).strip()
+                    }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 读公告屏蔽名单失败: {exc}")
+        return empty
+
+    def _save_announce_muted(self, data: dict[str, dict[str, dict]]) -> None:
+        try:
+            path = self._announce_muted_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 写公告屏蔽名单失败: {exc}")
+
+    def _announce_muted_ids(self) -> tuple[set[str], set[str]]:
+        data = self._load_announce_muted()
+        return set(data.get("friend") or {}), set(data.get("group") or {})
+
+    def filter_muted_targets(
+        self, targets: list[dict], skipped: dict[str, list[str]] | None = None
+    ) -> list[dict]:
+        """把用户用 /屏蔽公告 屏蔽掉的好友/群从广播目标里去掉。"""
+        muted_friends, muted_groups = self._announce_muted_ids()
+        kept: list[dict] = []
+        for target in targets or []:
+            kind = str(target.get("kind") or "")
+            tid = str(target.get("id") or "")
+            hit = (kind == "friend" and tid in muted_friends) or (
+                kind == "group" and tid in muted_groups
+            )
+            if hit:
+                if skipped is not None:
+                    skipped.setdefault("muted", []).append(
+                        f"{target.get('name')}({tid})"
+                    )
+                logger.info(f"[extra] 公告跳过已屏蔽目标 {kind}:{tid}")
+                continue
+            kept.append(target)
+        return kept
 
     # ---------------------------- 时区 ---------------------------- #
     def _tz_name(self, umo: str | None = None) -> str:
@@ -1113,7 +1195,7 @@ class NcdExtraPlugin(star.Star):
         body = compose_announcement(content)
         if not body:
             yield event.plain_result(
-                "用法：/公告 内容\n正文末尾会自动补一行：此消息不会进入bot上下文"
+                "用法：/公告 内容\n正文末尾会自动补一行：" + ANNOUNCE_FOOTER
             )
             return
 
@@ -1194,6 +1276,256 @@ class NcdExtraPlugin(star.Star):
             yield event.plain_result(error)
             return
         yield event.plain_result(ack)
+
+    # ====================================================================== #
+    # /屏蔽公告 —— 不想收公告的人自己退订
+    # ====================================================================== #
+    @filter.command(
+        "屏蔽公告",
+        alias={"拒收公告", "announce_mute", "公告屏蔽"},
+    )
+    async def announce_mute(
+        self, event: AstrMessageEvent, args: GreedyStr = ""
+    ):
+        """屏蔽本会话的公告；/屏蔽公告 取消 恢复接收。"""
+        action = str(args or "").strip().lower()
+        unfreeze = action in {
+            "取消", "恢复", "解除", "关闭", "关", "off", "取消屏蔽", "恢复接收",
+        }
+        group_id = ""
+        try:
+            group_id = str(event.get_group_id() or "")
+        except Exception:  # noqa: BLE001
+            group_id = ""
+        if group_id:
+            kind, target_id, label = "group", group_id, "本群"
+            if not self._group_admin(event):
+                yield event.plain_result(
+                    "群里要管理员来发这个指令才能屏蔽本群公告。\n"
+                    "（不想看公告可以退回私聊，或让群管发一次）"
+                )
+                return
+        else:
+            try:
+                target_id = str(event.get_sender_id() or "")
+            except Exception:  # noqa: BLE001
+                target_id = ""
+            kind, label = "friend", "你"
+        if not target_id:
+            yield event.plain_result("拿不到会话标识，屏蔽失败。")
+            return
+        data = self._load_announce_muted()
+        bucket = data.setdefault(kind, {})
+        if unfreeze:
+            removed = bucket.pop(target_id, None)
+            self._save_announce_muted(data)
+            if removed:
+                yield event.plain_result(f"已恢复接收公告（{label}）。")
+            else:
+                yield event.plain_result(f"{label}本来就没有屏蔽公告。")
+            return
+        bucket[target_id] = {
+            "ts": int(time.time()),
+            "name": self._announce_target_name(event, label),
+        }
+        self._save_announce_muted(data)
+        yield event.plain_result(
+            f"已屏蔽公告（{label}）。之后 /公告 不会再发到这里。\n"
+            "想恢复发送：/屏蔽公告 取消"
+        )
+
+    def _group_admin(self, event: AstrMessageEvent) -> bool:
+        """群管理员 / 群主 / bot 管理员 视为有权限。"""
+        if self._announce_admin(event):
+            return True
+        try:
+            sender = getattr(getattr(event, "message_obj", None), "sender", None)
+            role = str(getattr(sender, "role", "") or "").lower()
+            if role in {"admin", "owner"}:
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            return bool(event.is_admin())
+        except Exception:  # noqa: BLE001
+            return False
+
+    # ====================================================================== #
+    # /拉起向日葵 —— 仅最高管理员：让电脑启动向日葵远程控制
+    # ====================================================================== #
+    def _top_admin_id(self) -> str:
+        try:
+            return str(self._conf.get("ncd_primary_admin") or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _pc_linkd_base(self) -> str:
+        try:
+            base = str(self._conf.get("ncd_pc_linkd") or "").strip()
+        except Exception:  # noqa: BLE001
+            base = ""
+        return (base or "http://192.168.137.1:8201").rstrip("/")
+
+    @filter.command("拉起向日葵", alias={"远程", "向日葵"})
+    async def cmd_run_sunlogin(self, event: AstrMessageEvent):
+        """让电脑启动向日葵远程控制（仅最高管理员）"""
+        top = self._top_admin_id()
+        sender = str(getattr(event, "get_sender_id", lambda: "")() or "")
+        if not top or sender != top:
+            yield event.plain_result("只有最高管理员能远程拉起向日葵。")
+            return
+        url = self._pc_linkd_base() + "/run?app=sunlogin"
+        try:
+            import urllib.request as _u
+
+            with _u.urlopen(url, timeout=25) as resp:
+                data = json.loads(resp.read().decode("utf-8", "replace"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 拉起向日葵失败: {exc}")
+            yield event.plain_result(f"拉起失败（电脑 linkd 没响应）：{exc}")
+            return
+        if data.get("ok") and data.get("already"):
+            yield event.plain_result("向日葵已经在运行了。")
+        elif data.get("ok") and data.get("started"):
+            yield event.plain_result(
+                f"已让电脑启动向日葵（pid {data.get('pid')}），等几秒就能连。"
+            )
+        else:
+            yield event.plain_result(f"拉起失败：{data.get('error') or data}")
+
+    # ====================================================================== #
+    # /禁言 —— 本会话静默：bot 不接收消息、不回复
+    # ====================================================================== #
+    def _silenced_path(self) -> Path:
+        return ANNOUNCE_DIR / "silenced.json"
+
+    def _load_silenced(self) -> dict[str, dict]:
+        try:
+            raw = self._silenced_path().read_text(encoding="utf-8")
+            data = json.loads(raw)
+        except (OSError, ValueError):
+            return {}
+        sessions = data.get("sessions") if isinstance(data, dict) else None
+        return sessions if isinstance(sessions, dict) else {}
+
+    def _save_silenced(self, sessions: dict[str, dict]) -> None:
+        try:
+            ANNOUNCE_DIR.mkdir(parents=True, exist_ok=True)
+            self._silenced_path().write_text(
+                json.dumps({"sessions": sessions}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 保存禁言状态失败：{exc}")
+        # 缓存随写入同步，避免每轮 LLM 请求都读盘
+        self._silenced_cache = dict(sessions)
+        self._silenced_loaded = True
+
+    def _silenced_sessions(self) -> dict[str, dict]:
+        if not getattr(self, "_silenced_loaded", False):
+            self._silenced_cache = self._load_silenced()
+            self._silenced_loaded = True
+        return getattr(self, "_silenced_cache", {}) or {}
+
+    def _session_silenced(self, umo: str) -> bool:
+        return bool(umo) and umo in self._silenced_sessions()
+
+    @filter.command("禁言", alias={"沉默", "silence"})
+    async def silence_session(
+        self, event: AstrMessageEvent, args: GreedyStr = ""
+    ):
+        """让 bot 不接收本会话消息；/禁言 取消 恢复，/禁言 状态 查询。"""
+        action = str(args or "").strip().lower()
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        if not umo:
+            yield event.plain_result("拿不到会话标识，操作失败。")
+            return
+        try:
+            group_id = str(event.get_group_id() or "")
+        except Exception:  # noqa: BLE001
+            group_id = ""
+        if group_id and not self._group_admin(event):
+            yield event.plain_result(
+                "群里要管理员（群管/群主）或 bot 管理员来发这个指令，才能禁言本群。"
+            )
+            return
+        sessions = dict(self._silenced_sessions())
+        on = umo in sessions
+        if action in {"状态", "status"}:
+            yield event.plain_result(
+                "本会话目前：已禁言（bot 不接收消息、不回复）"
+                if on
+                else "本会话目前：未禁言"
+            )
+            return
+        if action in {
+            "取消", "解除", "恢复", "关闭", "关", "off",
+            "取消禁言", "解禁", "解除禁言",
+        }:
+            if not on:
+                yield event.plain_result("本会话本来就没有禁言。")
+                return
+            sessions.pop(umo, None)
+            self._save_silenced(sessions)
+            logger.info(f"[extra] 会话解除禁言：{umo}")
+            yield event.plain_result("已解除禁言：bot 恢复接收本会话消息。")
+            return
+        if on:
+            yield event.plain_result("本会话已经是禁言状态。\n恢复：/禁言 取消")
+            return
+        sessions[umo] = {
+            "ts": int(time.time()),
+            "by": str(event.get_sender_id() or ""),
+            "name": self._announce_target_name(event, "本会话"),
+            "group": group_id,
+        }
+        self._save_silenced(sessions)
+        logger.info(f"[extra] 会话已禁言：{umo}")
+        yield event.plain_result(
+            "已禁言本会话：bot 不再接收这里的消息，也不会回复。\n"
+            "恢复：/禁言 取消"
+        )
+
+    def _is_silence_command(self, msg: str) -> bool:
+        """这条消息是不是 /禁言 指令本身（禁言状态里要放行）。"""
+        text = str(msg or "").strip().lstrip("/").strip()
+        if not text:
+            return False
+        first = re.split(r"\s+", text, maxsplit=1)[0].lower()
+        return first in {"禁言", "沉默", "silence"} or text.startswith(("禁言", "沉默"))
+
+    @filter.on_llm_request()
+    async def _silence_block(self, event: AstrMessageEvent, request) -> None:
+        """禁言会话：拦掉 LLM 请求（不接收、不回复）；/禁言 指令本身放行。"""
+        try:
+            umo = str(getattr(event, "unified_msg_origin", "") or "")
+            if not umo or not self._session_silenced(umo):
+                return
+            msg = ""
+            try:
+                msg = str(event.get_message_str() or "")
+            except Exception:  # noqa: BLE001
+                msg = ""
+            if self._is_silence_command(msg):
+                return
+            event.stop_event()
+            logger.info(f"[extra] 禁言会话，已拦截消息：{umo}")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[extra] 禁言拦截失败：{exc}")
+
+    def _announce_target_name(self, event: AstrMessageEvent, fallback: str) -> str:
+        try:
+            if fallback == "本群":
+                group = getattr(getattr(event, "message_obj", None), "group", None)
+                name = str(getattr(group, "group_name", "") or "")
+                if name:
+                    return name[:60]
+            name = str(event.get_sender_name() or "")
+            if name:
+                return name[:60]
+        except Exception:  # noqa: BLE001
+            pass
+        return fallback
 
     @filter.command(
         "公告记录",

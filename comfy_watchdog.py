@@ -7,14 +7,18 @@
   · 进程退出 → 指数退避重启（5s → 300s 封顶）
   · **不主动关它**（不做空闲卸载/关机，那是它的反面）
 
-为什么单独写：
-  之前由手机上的 AstrBot 插件 POST /start 远程拉起（comfy_launcher 8200），
-  代价是一次冷启动 60~90 秒、空闲 30 分钟被关、还要处理端口绑定重试。
-  进程生命周期属于操作系统，放回 Windows 层后，插件只管 HTTP。
+★ 2026-11-18：外挂模型库（F 盘 USB）启动就绪防抖
+  ComfyUI 如果在 F 盘没挂稳时启动，folder_paths 会缓存空列表，
+  之后即使 F 盘恢复也不会重扫 → 出图报 "Value not in list"（假掉盘）。
+  现在：
+    1. 启动前等 extra_model_paths.yaml 里的外挂目录可枚举（最多 180 秒）；
+    2. 启动后抽样检查 UnetLoaderGGUF 列表，空就重启一次（最多 2 次）。
 """
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
 import sys
 import time
@@ -24,6 +28,7 @@ from pathlib import Path
 # ★ 2026-11-07：极简版从 F 盘（USB 外接，报 Ntfs 错误）挪到 E 盘（NVMe）
 #   旧路径 F:\ComfyUI_min 已废弃；可用环境变量 NCD_COMFY_DIR 覆盖
 import os as _os
+
 COMFY_DIR = Path(_os.environ.get("NCD_COMFY_DIR") or r"E:\comfyuiMINI")
 PYTHON = COMFY_DIR / "python_embeded" / "python.exe"
 MAIN = COMFY_DIR / "ComfyUI" / "main.py"
@@ -64,6 +69,85 @@ def healthy(timeout: float = 3.0) -> bool:
         return False
 
 
+def _model_lib_roots() -> list[Path]:
+    """从 extra_model_paths.yaml 里取 base_path（避免引入 yaml 依赖）。"""
+    roots: list[Path] = []
+    cfg = COMFY_DIR / "ComfyUI" / "extra_model_paths.yaml"
+    try:
+        text = cfg.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return roots
+    for line in text.splitlines():
+        m = re.search(r"^\s*base_path\s*:\s*(.+?)\s*$", line)
+        if not m:
+            continue
+        raw = m.group(1).strip().strip('"').strip("'")
+        if raw:
+            roots.append(Path(raw))
+    return roots
+
+
+def _model_lib_ready() -> bool:
+    """外挂模型库关键目录可枚举且非空（ComfyUI 启动扫描的前提）。"""
+    roots = _model_lib_roots()
+    if not roots:
+        return True  # 没配外挂路径：不阻塞
+    for root in roots:
+        try:
+            if not root.is_dir():
+                continue
+        except OSError:
+            continue
+        for sub in ("diffusion_models", "text_encoders"):
+            d = root / sub
+            try:
+                if not d.is_dir():
+                    break
+                if not any(d.iterdir()):
+                    break
+            except OSError:
+                break
+        else:
+            return True
+    return False
+
+
+def _wait_model_lib(max_wait: float = 180.0) -> bool:
+    t0 = time.time()
+    while time.time() - t0 < max_wait:
+        if _model_lib_ready():
+            return True
+        log("外挂模型库还没就绪（F 盘未挂稳？），等待中…")
+        time.sleep(5)
+    return False
+
+
+def _gguf_ok() -> bool:
+    """启动后抽检：UnetLoaderGGUF 列表为空 = 模型库没扫到（半残实例）。"""
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{PORT}/object_info/UnetLoaderGGUF", timeout=10
+        ) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+        spec = (
+            (d.get("UnetLoaderGGUF") or {})
+            .get("input", {})
+            .get("required", {})
+            .get("unet_name")
+        )
+        if not spec:
+            return True  # 节点不在：不归我管
+        if isinstance(spec[0], list):
+            vals = spec[0]
+        elif len(spec) > 1 and isinstance(spec[1], dict):
+            vals = spec[1].get("options") or []
+        else:
+            vals = []
+        return bool(vals)
+    except Exception:
+        return True  # 判断不了就不折腾
+
+
 _LOCK_PORT = 8202
 _lock_sock = None
 
@@ -90,12 +174,25 @@ def main() -> int:
     log(f"看护启动：{COMFY_DIR}  端口 {PORT}")
     proc: subprocess.Popen | None = None
     backoff = 5.0
+    retry_bad = 0
     while True:
         try:
             if healthy():
                 if proc is not None:
                     log("ComfyUI 已就绪")
                     proc = None
+                # 就绪后抽检一次模型清单（防止"能连但模型没扫到"的半残实例）
+                if not _gguf_ok():
+                    retry_bad += 1
+                    if retry_bad <= 2:
+                        log(f"模型清单为空（第 {retry_bad} 次），重启 ComfyUI 重新扫描")
+                        _kill_comfy()
+                        time.sleep(8)
+                        backoff = 5.0
+                        continue
+                    log("模型清单仍为空（已重试 2 次），先保持现状，等外挂盘恢复")
+                else:
+                    retry_bad = 0
                 backoff = 5.0
                 time.sleep(10)
                 continue
@@ -109,6 +206,12 @@ def main() -> int:
                 log(f"ComfyUI 进程退出（code={proc.returncode}），{backoff:.0f} 秒后重启")
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 300.0)
+
+            # ★ 先等外挂模型库就绪，再启动 ComfyUI（防止缓存空列表）
+            if not _wait_model_lib():
+                log("外挂模型库 180 秒仍未就绪，先不启动（避免半残实例），30 秒后重试")
+                time.sleep(30)
+                continue
 
             log("启动 ComfyUI …")
             proc = subprocess.Popen(  # noqa: S603
@@ -130,6 +233,33 @@ def main() -> int:
         except Exception as exc:  # noqa: BLE001
             log(f"看护异常：{type(exc).__name__}: {exc}")
             time.sleep(15)
+
+
+def _kill_comfy() -> None:
+    """杀掉 8199 上的 ComfyUI 进程（自愈重启用）。"""
+    try:
+        out = subprocess.run(
+            ["netstat", "-ano"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout or ""
+        for line in out.splitlines():
+            if f":{PORT}" in line and "LISTENING" in line:
+                pid = line.split()[-1].strip()
+                if pid.isdigit() and int(pid) > 4:
+                    subprocess.run(
+                        ["taskkill", "/PID", pid, "/F"],
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                    )
+                    log(f"已结束旧 ComfyUI pid={pid}")
+                    return
+    except Exception as exc:  # noqa: BLE001
+        log(f"结束 ComfyUI 失败：{exc}")
 
 
 if __name__ == "__main__":

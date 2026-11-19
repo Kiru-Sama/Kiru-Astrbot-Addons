@@ -60,7 +60,7 @@
   "comfy_preset": {
     "type": "string",
     "description": "默认工作流",
-    "hint": "sdxl（约25秒）/ krea2（约30秒）/ anima（约40秒）/ moss（约60秒）。\n★ 对话里可以让模型用 preset 参数临时换，不写就用这个默认。",
+    "hint": "sdxl：快速，经典二次元图 / anima：快速，新一代二次元生图 / krea2：慢速，美学绘图 / moss：中速，消费级显卡最强 / qwen：慢速，参考/融合/角色去衣等全能（需 1~3 张参考图）。\n★ 对话里可以让模型用 preset 参数临时换，不写就用这个默认。",
     "default": "sdxl"
   },
   "comfy_min_model_gb": {
@@ -533,7 +533,7 @@
   },
   "ncd_deputy_admin": {
     "type": "string",
-    "description": "副管理员 QQ（仅当主管理员不在本群时才生效，留空 = 不启用）",
+    "description": "副管理员 QQ，多个用逗号或换行分隔（仅当主管理员不在本群时才生效，留空 = 不启用）",
     "default": ""
   },
   "comfy_linkd": {
@@ -643,5 +643,53 @@
     "description": "画图入口有效期（小时）",
     "hint": "comfy_tools 的参数说明过多久后必须重新调一次；默认 16 小时。直出图（/生图提示词）不计入。",
     "default": 16
+  },
+  "comfy_proactive_private_enabled": {
+    "type": "bool",
+    "description": "私聊主动消息总开关",
+    "hint": "开（默认）：私聊里 /主动回复 开 后生效。关：无论私聊设置都不主动发。",
+    "default": true
+  },
+  "comfy_proactive_private_min_gap_min": {
+    "type": "int",
+    "description": "私聊主动间隔下限（分钟）",
+    "hint": "默认 30 分钟。每次发完从 下限~上限 之间随机。",
+    "default": 30
+  },
+  "comfy_proactive_private_max_gap_min": {
+    "type": "int",
+    "description": "私聊主动间隔上限（分钟）",
+    "hint": "默认 720 分钟（12 小时）。",
+    "default": 720
+  },
+  "comfy_proactive_private_daily_max": {
+    "type": "int",
+    "description": "私聊每天最多主动几条",
+    "hint": "默认 4 条。到上限后顺延到第二天早上。",
+    "default": 4
+  },
+  "comfy_proactive_private_quiet_start": {
+    "type": "int",
+    "description": "私聊主动静默开始（时）",
+    "hint": "默认 0 点。静默时段内不发，顺延到结束后 0.5~2 小时。",
+    "default": 0
+  },
+  "comfy_proactive_private_quiet_end": {
+    "type": "int",
+    "description": "私聊主动静默结束（时）",
+    "hint": "默认 8 点。",
+    "default": 8
+  },
+  "comfy_proactive_private_silent_gap_min": {
+    "type": "int",
+    "description": "连续没回复后的间隔下限（分钟）",
+    "hint": "默认 180。连续 2 次主动都没得到回复时，改用这个下限，避免刷屏。",
+    "default": 180
+  },
+  "comfy_proactive_private_whitelist": {
+    "type": "string",
+    "description": "私聊主动白名单（QQ 号）",
+    "hint": "留空 = 所有人可在自己的私聊里 /主动回复 开。\n填了 QQ 号（逗号/空格分隔）= 只有名单内的人能开。\n群聊开关始终只限管理员/副管理员。",
+    "default": ""
   }
 }

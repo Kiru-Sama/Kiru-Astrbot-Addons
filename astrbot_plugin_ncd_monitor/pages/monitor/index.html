@@ -1636,12 +1636,10 @@
         <div class="kv"><span class="k">请求</span><span class="v" id="usageDailyCalls">—</span></div>
         <div class="kv"><span class="k">累计（自 <span id="usageTotalSince">—</span>）</span><span class="v" id="usageTotalCum">—</span></div>
         <div class="usage-mode">
-          <span class="h2sub">最近 30 天</span>
-          <button class="mbtn on" id="usageModeBar" data-mode="bar" onclick="setUsageMode('bar')">条</button>
-          <button class="mbtn" id="usageModeLine" data-mode="line" onclick="setUsageMode('line')">线</button>
+          <span class="h2sub">最近 30 天 · 柱状 + 折线</span>
         </div>
+        <canvas id="usageDailyChart" class="usage-canvas" height="150"></canvas>
         <div class="usage-days" id="usageDailyDays"></div>
-        <canvas id="usageDailyChart" class="usage-canvas" height="120" hidden></canvas>
         <div class="usage-hint" id="usageDailyHint"></div>
       </div>
     </div>
@@ -2108,18 +2106,16 @@ function renderUsageDaily(d) {
 
   const box = $("usageDailyDays");
   const cv = $("usageDailyChart");
-  if (_usageDailyMode === "line") {
-    box.hidden = true;
-    cv.hidden = false;
-    const recent = (d && d.recent) || [];
-    _usageDailySeries = (recent.length ? recent : (has ? [t] : [])).slice().reverse();
-    drawUsageDailyChart();
-    return;
-  }
-  cv.hidden = true;
-  box.hidden = false;
-  box.replaceChildren();
+  // ★ 2026-11-16：条形与折线同屏显示，不再用「条/线」按钮切换。
+  //   上面 canvas 画近 30 天（柱状 + 折线），下面保留最近 7 天明细条。
   const recent = (d && d.recent) || [];
+  _usageDailySeries = (recent.length ? recent : (has ? [t] : []))
+    .slice(0, 30)
+    .reverse();
+  cv.hidden = false;
+  box.hidden = false;
+  drawUsageDailyChart();
+  box.replaceChildren();
   const rows = (recent.length ? recent : (has ? [t] : [])).slice(0, 7);
   if (!rows.length) return;
   const max = Math.max(1, ...rows.map((r) => Number(r.total) || 0));
@@ -2146,23 +2142,14 @@ function renderUsageDaily(d) {
   });
 }
 
-/* ---------- 每日 Token 折线图（原生 Canvas）---------- */
-let _usageDailyMode = "bar";
+/* ---------- 每日 Token 图：柱状 + 折线叠加（原生 Canvas）---------- */
 let _usageDailySeries = [];
 let _usageDailyPts = [];
-
-function setUsageMode(mode) {
-  _usageDailyMode = mode === "line" ? "line" : "bar";
-  document.querySelectorAll(".usage-mode .mbtn").forEach((b) => {
-    b.classList.toggle("on", b.dataset.mode === _usageDailyMode);
-  });
-  renderUsageDaily(window.__usageDaily || {});
-}
 
 function drawUsageDailyChart() {
   const cv = document.getElementById("usageDailyChart");
   if (!cv) return;
-  const H = 120;
+  const H = 150;
   const dpr = window.devicePixelRatio || 1;
   const W = cv.clientWidth || 320;
   cv.hidden = false;
@@ -2184,7 +2171,7 @@ function drawUsageDailyChart() {
     g.fillStyle = cMut;
     g.font = "12px system-ui, sans-serif";
     g.textAlign = "center";
-    g.fillText("还没有每日数据 —— 出现带 usage 的请求后就会有曲线", W / 2, H / 2);
+    g.fillText("还没有每日数据 —— 出现带 usage 的请求后就会有图表", W / 2, H / 2);
     return;
   }
 
@@ -2193,6 +2180,8 @@ function drawUsageDailyChart() {
   const plotH = H - padT - padB;
   const vals = data.map((r) => Number(r.total) || 0);
   const yMax = Math.max(1, ...vals) * 1.1;
+  const baseY = padT + plotH;
+  const step = data.length > 1 ? plotW / (data.length - 1) : plotW;
   const x = (i) => padL + (data.length === 1 ? plotW / 2 : (i / (data.length - 1)) * plotW);
   const y = (v) => padT + plotH - (v / yMax) * plotH;
 
@@ -2211,7 +2200,19 @@ function drawUsageDailyChart() {
     g.fillText(fmtNum(Math.round(v)), padL - 6, yy + 3);
   }
 
-  // 面积
+  // ---- 柱状（每日总量）----
+  const barW = Math.max(2, Math.min(18, step * 0.62));
+  data.forEach((r, i) => {
+    const v = Number(r.total) || 0;
+    if (v <= 0) return;
+    const px = x(i) - barW / 2;
+    const py = y(v);
+    const h = Math.max(1, baseY - py);
+    g.fillStyle = i === data.length - 1 ? cAcc : "rgba(59,130,246,0.30)";
+    g.fillRect(px, py, barW, h);
+  });
+
+  // ---- 折线 + 面积 ----
   g.beginPath();
   data.forEach((r, i) => {
     const px = x(i);
@@ -2220,13 +2221,12 @@ function drawUsageDailyChart() {
     else g.lineTo(px, py);
     _usageDailyPts.push({ x: px, y: py, row: r });
   });
-  g.lineTo(x(data.length - 1), padT + plotH);
-  g.lineTo(x(0), padT + plotH);
+  g.lineTo(x(data.length - 1), baseY);
+  g.lineTo(x(0), baseY);
   g.closePath();
   g.fillStyle = "rgba(59,130,246,0.10)";
   g.fill();
 
-  // 折线
   g.beginPath();
   data.forEach((r, i) => {
     const px = x(i);
@@ -3829,7 +3829,7 @@ async function refreshChart() {
 window.addEventListener("resize", () => {
   drawChart();
   paintRes();   // 迷你趋势图也要按新宽度重画
-  if (_usageDailyMode === "line") drawUsageDailyChart();
+  drawUsageDailyChart();
 });
 
 /* ---------- 发给模型的完整上下文（纵向聊天形式）---------- */

@@ -53,6 +53,11 @@ from astrbot.api.web import json_response
 from astrbot.core.message.message_event_result import MessageChain
 from astrbot.core.star.filter.command import GreedyStr
 
+try:  # 本地绘图模块（插件目录可能不在 sys.path，两种方式都兜一下）
+    from . import status_render  # type: ignore
+except Exception:  # noqa: BLE001
+    import status_render  # type: ignore
+
 # 压缩摘要注入上下文时的特征前缀（见 astrbot/core/agent/context/compressor.py）
 SUMMARY_PREFIX = "Our previous history conversation summary:"
 SUMMARY_ACK = "Acknowledged the summary of our previous conversation history."
@@ -759,8 +764,44 @@ class Main(star.Star):
                 ["GET"],
                 "审核明细缩略图（被拦的小图）",
             )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/status-images",
+                self.api_status_images,
+                ["GET"],
+                "设备状态信息图预览（单张合成图 base64）",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/status-bg",
+                self.api_status_bg,
+                ["GET"],
+                "状态图背景：当前设置 + 可选列表",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/status-bg-save",
+                self.api_status_bg_save,
+                ["POST"],
+                "状态图背景：保存模式/当前图/模糊参数",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/status-bg-upload",
+                self.api_status_bg_upload,
+                ["POST"],
+                "状态图背景：上传图片（base64）",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/status-bg-delete",
+                self.api_status_bg_delete,
+                ["POST"],
+                "状态图背景：删除图片",
+            )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/status-bg-preview",
+                self.api_status_bg_preview,
+                ["GET"],
+                "状态图背景：缩略图预览（base64）",
+            )
             logger.info(
-                f"[ncd-monitor] 已注册 14 个 Web API，路由前缀 /{PLUGIN_DIR_NAME}/ncd-monitor/"
+                f"[ncd-monitor] 已注册 23 个 Web API，路由前缀 /{PLUGIN_DIR_NAME}/ncd-monitor/"
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[ncd-monitor] 注册 Web API 失败: {exc}")
@@ -1326,6 +1367,177 @@ class Main(star.Star):
         }
         self._host_stats_cache = (time.time(), result)
         return result
+
+    async def api_status_bg(self, **kwargs):
+        """状态图背景设置：当前设置 + 可选背景列表。"""
+        return json_response(
+            {
+                "ok": True,
+                "settings": self._status_bg_settings(),
+                "files": self._status_bg_files(),
+                "builtin": True,
+                "builtin_credit": "内置默认背景",
+            }
+        )
+
+    async def api_status_bg_save(self, **kwargs):
+        """保存背景设置：mode = builtin / single / random，current = 文件名。"""
+        from astrbot.api.web import request as _req
+
+        try:
+            body = await _req.json({}) or {}
+        except Exception:  # noqa: BLE001
+            body = {}
+        mode = str(body.get("mode") or "builtin").lower()
+        if mode not in ("builtin", "single", "random"):
+            mode = "builtin"
+        data: dict = {"mode": mode}
+        current = str(body.get("current") or "").strip()
+        if current and "/" not in current and "\\" not in current:
+            data["current"] = current
+        for key, low, high in (("blur", 1.0, 40.0), ("dim", 0.0, 0.75)):
+            if key in body:
+                try:
+                    val = float(body.get(key))
+                except (TypeError, ValueError):
+                    continue
+                data[key] = max(low, min(high, val))
+        self._status_bg_save(data)
+        logger.info(f"[ncd-monitor] 状态图背景设置已保存: {data}")
+        return json_response({"ok": True, "settings": data})
+
+    async def api_status_bg_upload(self, **kwargs):
+        """上传一张背景图（base64 JSON，限制 15MB）。"""
+        import base64 as _b64
+
+        from astrbot.api.web import request as _req
+
+        try:
+            body = await _req.json({}) or {}
+        except Exception:  # noqa: BLE001
+            body = {}
+        name = str(body.get("name") or "").strip()
+        b64 = str(body.get("b64") or "")
+        if not name or not b64:
+            return json_response({"ok": False, "error": "缺少文件名或内容"})
+        name = name.replace("\\", "/").split("/")[-1]
+        if not name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            name = name + ".jpg"
+        try:
+            blob = _b64.b64decode(b64)
+        except Exception:  # noqa: BLE001
+            return json_response({"ok": False, "error": "base64 解码失败"})
+        if len(blob) > 15 * 1024 * 1024:
+            return json_response({"ok": False, "error": "图片超过 15MB"})
+        # ★ 2026-11-18：只按字节完全相同去重（sha256），不再用感知哈希误删相似图
+        want = hashlib.sha256(blob).hexdigest()
+        try:
+            d0 = self._status_bg_dir()
+            for f in (d0.iterdir() if d0.is_dir() else []):
+                if not f.is_file() or f.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp"):
+                    continue
+                try:
+                    if hashlib.sha256(f.read_bytes()).hexdigest() == want:
+                        return json_response(
+                            {"ok": True, "duplicate": True, "name": f.name, "files": self._status_bg_files()}
+                        )
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        try:
+            d = self._status_bg_dir()
+            d.mkdir(parents=True, exist_ok=True)
+            (d / name).write_bytes(blob)
+        except OSError as exc:
+            return json_response({"ok": False, "error": f"写入失败: {exc}"})
+        logger.info(f"[ncd-monitor] 状态图背景已上传: {name}（{len(blob)} 字节）")
+        return json_response({"ok": True, "name": name, "files": self._status_bg_files()})
+
+    async def api_status_bg_delete(self, **kwargs):
+        """删除一张背景图。"""
+        from astrbot.api.web import request as _req
+
+        try:
+            body = await _req.json({}) or {}
+        except Exception:  # noqa: BLE001
+            body = {}
+        name = str(body.get("name") or "").strip()
+        if not name or "/" in name or "\\" in name or name.startswith("."):
+            return json_response({"ok": False, "error": "文件名不合法"})
+        try:
+            (self._status_bg_dir() / name).unlink(missing_ok=True)
+        except OSError as exc:
+            return json_response({"ok": False, "error": str(exc)})
+        return json_response({"ok": True, "files": self._status_bg_files()})
+
+    async def api_status_bg_preview(self, name: str = "", **kwargs):
+        """返回背景缩略图（宽 480，base64 data URL），用于设置页预览。"""
+        import base64 as _b64
+        import io as _io
+
+        from PIL import Image as _Image
+
+        # ★ AstrBot 只注入路径参数；查询参数 name 要从 request 里读
+        if not name:
+            try:
+                from astrbot.api.web import request as _req
+
+                qp = getattr(_req, "query", None)
+                if qp is not None:
+                    name = str(qp.get("name") or "")
+            except Exception:  # noqa: BLE001
+                pass
+        safe = str(name or "").strip()
+        builtin = Path(__file__).resolve().parent / "assets" / "status_bg.jpg"
+        if safe in ("", "builtin", "default", "内置", "内置默认"):
+            # ★ 2026-11-18：内置默认背景也要能预览（之前空 name 直接报「文件名不合法」→ 页面破图）
+            if not builtin.is_file():
+                return json_response({"ok": False, "error": "内置背景文件缺失"})
+            path = builtin
+        elif "/" in safe or "\\" in safe or safe.startswith("."):
+            return json_response({"ok": False, "error": "文件名不合法"})
+        else:
+            path = self._status_bg_dir() / safe
+            if not path.is_file():
+                return json_response({"ok": False, "error": f"图库里没有这个文件: {safe}"})
+        try:
+            im = _Image.open(path).convert("RGB")
+            im.thumbnail((480, 480), _Image.LANCZOS)
+            buf = _io.BytesIO()
+            im.save(buf, format="JPEG", quality=80)
+            url = "data:image/jpeg;base64," + _b64.b64encode(buf.getvalue()).decode()
+        except Exception as exc:  # noqa: BLE001
+            return json_response({"ok": False, "error": str(exc)[:200]})
+        return json_response({"ok": True, "name": path.name, "data_url": url})
+
+    async def api_status_images(self, preview: str = "", **kwargs):
+        """渲染 /设备状态 的图；preview=1 时返回 1200px 缩略（页面预览用）。"""
+        import base64 as _b64
+
+        try:
+            path = await asyncio.to_thread(self._render_status_image)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[ncd-monitor] 状态图预览失败: {exc}")
+            return json_response({"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]})
+        try:
+            raw = path.read_bytes()
+            name = path.name
+            if str(preview or "").strip().lower() in ("1", "true", "yes", "on"):
+                import io as _io
+
+                from PIL import Image as _Image
+
+                im = _Image.open(_io.BytesIO(raw)).convert("RGB")
+                im.thumbnail((1200, 1200), _Image.LANCZOS)
+                buf = _io.BytesIO()
+                im.save(buf, format="JPEG", quality=82)
+                raw = buf.getvalue()
+                name = path.stem + "_preview.jpg"
+            item = {"name": name, "b64": _b64.b64encode(raw).decode()}
+        except Exception as exc:  # noqa: BLE001
+            return json_response({"ok": False, "error": f"读取图片失败: {exc}"})
+        return json_response({"ok": True, "images": [item], "count": 1})
 
     async def api_temp_probe(self, **kwargs):
         """温度探针：返回手机 sysfs 实际能读到的所有传感器 + 笔记本侧温度来源。"""
@@ -5751,6 +5963,183 @@ class Main(star.Star):
             logger.warning(f"[ncd-monitor] 催促连接发送失败: {exc}")
             yield event.plain_result(f"催促发送失败：{type(exc).__name__}")
 
+    # ================================================================== #
+    #  /设备状态 的图片版：模型/AstrBot、宿主机资源、近 7 天
+    # ================================================================== #
+    def _status_images_enabled(self) -> bool:
+        try:
+            return self._conf_bool("status_images", True)
+        except Exception:  # noqa: BLE001
+            return True
+
+    def _status_img_dir(self) -> Path:
+        return (
+            Path(ASTRBOT_ROOT)
+            / "data"
+            / "plugin_data"
+            / "ncd_monitor"
+            / "status_img"
+        )
+
+    def _status_bg_dir(self) -> Path:
+        return (
+            Path(ASTRBOT_ROOT)
+            / "data"
+            / "plugin_data"
+            / "ncd_monitor"
+            / "status_bg"
+        )
+
+    def _status_bg_settings(self) -> dict:
+        try:
+            path = self._status_bg_dir() / "settings.json"
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def _status_bg_save(self, data: dict) -> None:
+        path = self._status_bg_dir() / "settings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(
+            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        tmp.replace(path)
+
+    def _status_bg_files(self) -> list[dict]:
+        d = self._status_bg_dir()
+        exts = (".jpg", ".jpeg", ".png", ".webp")
+        out: list[dict] = []
+        if not d.is_dir():
+            return out
+        for f in sorted(d.iterdir()):
+            if f.is_file() and f.suffix.lower() in exts:
+                try:
+                    st = f.stat()
+                except OSError:
+                    continue
+                out.append(
+                    {"name": f.name, "size": st.st_size, "mtime": st.st_mtime}
+                )
+        return out
+
+    def _status_image_payload(self) -> dict[str, Any]:
+        """整理 /设备状态 图片需要的全部数据（只读内存 + 7 天聚合）。"""
+        ab = self._astrbot_info()
+        extra: dict[str, Any] = {}
+        try:
+            cfg = self.context.get_config()
+            providers = [
+                p
+                for p in (cfg.get("provider") or [])
+                if isinstance(p, dict) and p.get("enable")
+            ]
+            prov = providers[0] if providers else {}
+            extra["base_url"] = str(
+                prov.get("base_url") or prov.get("api_base") or ""
+            ).strip()
+            extra["provider_type"] = str(prov.get("type") or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 状态图取 provider 信息失败: {exc}")
+
+        max_ctx = int(ab.get("max_context_tokens") or 0)
+        used = int(self.last_prompt_tokens or 0)
+        threshold = float(ab.get("compression_threshold") or 0.82)
+        context = {
+            "used": used,
+            "max": max_ctx,
+            "percent": round(used / max_ctx * 100, 1) if max_ctx else 0,
+            "threshold": threshold,
+            "threshold_tokens": int(max_ctx * threshold) if max_ctx else 0,
+        }
+        quota: dict = {}
+        try:
+            quota = self._comfy_state().get("quota_summary") or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 状态图读取额度摘要失败: {exc}")
+        latest = self.sys_samples[-1] if getattr(self, "sys_samples", None) else None
+        pc_series = [
+            {"t": r.get("t"), **(r.get("pc") or {})}
+            for r in list(self._host_recent)[-120:]
+            if r.get("pc")
+        ]
+        return {
+            "now": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "overview": {"astrbot": ab, "context": context},
+            "sysinfo": {
+                "latest": latest,
+                "pc": self._pc_sysinfo,
+                "pc_age": (
+                    round(time.time() - self._pc_sysinfo_at, 1)
+                    if self._pc_sysinfo_at
+                    else None
+                ),
+                "pc_series": pc_series,
+            },
+            "stats7d": self._aggregate_host_stats(7),
+            "astrbot_extra": extra,
+            "quota": quota,
+        }
+
+    def _render_status_image(self) -> Path:
+        payload = self._status_image_payload()
+        font = Path(__file__).resolve().parent / "assets" / "font_cjk.ttf"
+        try:
+            target_long = int(self._conf_int("status_image_long_side", 6000))
+        except Exception:  # noqa: BLE001
+            target_long = 6000
+        path = status_render.render_status_image(
+            payload,
+            self._status_img_dir(),
+            str(font) if font.is_file() else None,
+            str(self._status_bg_dir()),
+            target_long_side=max(0, target_long),
+        )
+        logger.info(f"[ncd-monitor] 状态图耗时 {status_render.LAST_TIMING}")
+        return path
+
+    def _make_send_image(self, path: Path) -> Path:
+        """渲染原图按最长边缩小成发送版（聊天发小图，原图留在磁盘）。"""
+        try:
+            long_side = int(self._conf_int("status_send_long_side", 2000))
+        except Exception:  # noqa: BLE001
+            long_side = 2000
+        long_side = max(600, min(4000, long_side))
+        try:
+            from PIL import Image as _Image
+
+            _Image.MAX_IMAGE_PIXELS = 400_000_000
+            im = _Image.open(path).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 状态图发送版生成失败（发原图）: {exc}")
+            return path
+        if max(im.size) <= long_side:
+            return path
+        im.thumbnail((long_side, long_side), _Image.LANCZOS)
+        out = path.with_name(path.stem + "_send.jpg")
+        try:
+            im.save(out, format="JPEG", quality=86, optimize=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(f"[ncd-monitor] 状态图发送版保存失败（发原图）: {exc}")
+            return path
+        return out
+
+    async def _status_images(self, event: AstrMessageEvent):
+        """渲染并逐张发送；任何失败都只记日志，不影响文字回复。"""
+        if not self._status_images_enabled():
+            return
+        try:
+            path = await asyncio.to_thread(self._render_status_image)
+            send_path = await asyncio.to_thread(self._make_send_image, path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[ncd-monitor] 状态图生成失败（忽略）: {exc}")
+            return
+        try:
+            yield event.image_result(str(send_path))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[ncd-monitor] 状态图发送失败（忽略）: {exc}")
+
     @filter.command("设备状态", alias={"设备运行状态"})
     async def device_status_cmd(self, event: AstrMessageEvent):
         """展示 CPU/内存/GPU/显存 + ComfyUI 在线状态、模型、队列与进度。"""
@@ -5863,6 +6252,8 @@ class Main(star.Star):
             lines.append("")
             lines.append("连不上电脑？发 /催促连接 [说明] 让 bot 催管理员开热点。")
             yield event.plain_result("\n".join(lines))
+            async for _img in self._status_images(event):
+                yield _img
             return
 
         lines = ["🖥 设备状态"]
@@ -5957,6 +6348,8 @@ class Main(star.Star):
             + f"{(uptime % 3600) // 60} 分"
         )
         yield event.plain_result("\n".join(lines))
+        async for _img in self._status_images(event):
+            yield _img
 
 
 # ===========================================================================

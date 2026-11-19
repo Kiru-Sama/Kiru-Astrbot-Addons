@@ -1,0 +1,7 @@
+name: astrbot_plugin_ncd_qzone
+display_name: QQ空间说说
+desc: 给 LLM 的 QQ 空间发布工具：先商量后发布、文本+配图审核、每人每天 1 条/全站每天 5 条/间隔 30 分钟、仅好友、发布记录可查。设置项全部可调。
+author: 本地自用
+version: 1.1.2
+repo: ""
+astrbot_version: ">=4.28.0,<4.31"

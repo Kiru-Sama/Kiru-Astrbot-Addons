@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>QQ空间说说</title>
+<script src="/api/plugin/page/bridge-sdk.js"></script>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f6f7f9; --card: #fff; --border: #e6e8ec; --text: #1f2328;
+    --muted: #6b7280; --accent: #3b82f6; --ok: #22c55e; --bad: #ef4444; --track: #eceef2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f1115; --card: #171a21; --border: #262b35; --text: #e6e8ec; --muted: #9aa3b2; --track: #232833; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--text); font: 14px/1.55 system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 14px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 14px; padding: 14px; margin-bottom: 14px; }
+  .card h2 { font-size: 15px; margin: 0 0 10px; }
+  .stats { display: flex; flex-wrap: wrap; gap: 10px; }
+  .stat { flex: 1 1 140px; border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px; background: var(--track); }
+  .stat .k { color: var(--muted); font-size: 12px; }
+  .stat .v { font-size: 22px; font-weight: 700; margin-top: 2px; }
+  .stat .n { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { color: var(--muted); font-size: 12px; }
+  .field input[type="text"], .field input[type="number"] {
+    border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px; background: transparent;
+    color: var(--text); font-size: 13px; width: 100%;
+  }
+  .check { display: flex; align-items: center; gap: 8px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; font-size: 13px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+  .btn { border: 1px solid var(--accent); background: var(--accent); color: #fff; border-radius: 10px; padding: 8px 16px; cursor: pointer; font-size: 13px; }
+  .btn.ghost { background: transparent; color: var(--accent); }
+  .btn.danger { border-color: var(--bad); background: transparent; color: var(--bad); }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .msg { font-size: 12px; margin-left: 6px; }
+  .msg.ok { color: var(--ok); } .msg.err { color: var(--bad); }
+  .list { display: flex; flex-direction: column; gap: 8px; }
+  .item { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--track); }
+  .item .top { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); }
+  .item .content { font-size: 13px; margin-top: 4px; white-space: pre-wrap; word-break: break-all; }
+  .item .meta { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .empty { color: var(--muted); font-size: 13px; padding: 14px 0; text-align: center; }
+  .badge { display: inline-block; border-radius: 999px; padding: 1px 8px; font-size: 11px; }
+  .badge.ok { background: rgba(34,197,94,.15); color: var(--ok); }
+  .badge.bad { background: rgba(239,68,68,.15); color: var(--bad); }
+  ul.tips { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+  <h1>QQ空间说说</h1>
+  <div class="sub">给 LLM 的发布工具：先商量 → 审核 → 发布；记录可查、设置可调</div>
+
+  <div class="card">
+    <h2>今日发布</h2>
+    <div class="stats" id="stats"></div>
+  </div>
+
+  <div class="card">
+    <h2>设置（保存后需重载插件生效）</h2>
+    <div class="grid" id="configGrid"></div>
+    <div class="row">
+      <button class="btn" id="saveBtn">保存设置</button>
+      <button class="btn ghost" id="reloadBtn">刷新数据</button>
+      <span class="msg" id="saveMsg"></span>
+    </div>
+    <div class="sub" style="margin:10px 0 0">重载：AstrBot 面板 → 插件 → QQ空间说说 → 重载（或重启 AstrBot）。</div>
+  </div>
+
+  <div class="card">
+    <h2>发布记录</h2>
+    <div class="row" style="margin:0 0 10px">
+      <button class="btn danger" id="clearBtn">清空记录</button>
+      <span class="msg" id="clearMsg"></span>
+    </div>
+    <div id="records" class="list"></div>
+  </div>
+
+  <div class="card">
+    <h2>怎么用</h2>
+    <ul class="tips">
+      <li>在聊天里说「帮我发个 QQ空间说说：今天天气不错…」，bot 会先拟草稿跟你商量</li>
+      <li>你提出修改意见，bot 改好后再发给你确认；你明确同意后 bot 才会调用发布</li>
+      <li>禁止内容：NSFW/色情、政治敏感、伦理争议、暴力血腥</li>
+      <li>配图会先走群聊审核（只看图片本身，不带聊天上下文）</li>
+      <li>权限：仅好友可用；频控：每人每天 1 条、全站每天 5 条、两条间隔 30 分钟（这里可改）</li>
+    </ul>
+  </div>
+
+<script>
+(function () {
+  const P = window.AstrBotPluginPage;
+  const $ = (id) => document.getElementById(id);
+  const state = { overview: null, config: {} };
+  const FIELDS = [
+    ["qzone_daily_per_user", "每人每天条数", "number"],
+    ["qzone_daily_total", "全站每天条数", "number"],
+    ["qzone_gap_minutes", "间隔（分钟）", "number"],
+    ["qzone_max_chars", "正文上限（字）", "number"],
+    ["qzone_max_images", "配图上限（张）", "number"],
+    ["qzone_friend_only", "只允许好友", "bool"],
+    ["qzone_text_audit", "正文审核", "bool"],
+    ["qzone_image_audit", "配图审核", "bool"],
+    ["qzone_audit_fail_close", "审核不了就拒绝", "bool"],
+    ["qzone_audit_provider", "审核 provider id（留空=当前模型）", "text"],
+  ];
+
+  function msg(el, text, ok) {
+    el.textContent = text || "";
+    el.className = "msg " + (ok ? "ok" : "err");
+    if (text) setTimeout(() => { el.textContent = ""; }, 5000);
+  }
+
+  function fmtTime(ts) {
+    if (!ts) return "-";
+    const d = new Date(ts * 1000);
+    const p = (n) => String(n).padStart(2, "0");
+    return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes());
+  }
+
+  function renderStats() {
+    const o = state.overview || {};
+    const lim = o.limits || {};
+    const t = o.today || {};
+    const used = Number(t.total || 0);
+    const total = Number(lim.total || 5);
+    const gap = Number(lim.gap_min || 30);
+    const last = Number(t.last_ts || 0);
+    let next = "现在可以发";
+    if (last && gap) {
+      const left = (gap * 60 - (Date.now() / 1000 - last)) / 60;
+      if (left > 0) next = Math.ceil(left) + " 分钟后";
+    }
+    const cards = [
+      ["今日已发", used + " / " + total, "全站合计"],
+      ["每人每天", String(lim.per_user || 1) + " 条", "当前参与 " + Number(t.users || 0) + " 人"],
+      ["两条间隔", gap + " 分钟", "下次可发：" + next],
+      ["审核", o.audit_ready ? "就绪" : "模块缺失", "配图走群聊审核"],
+    ];
+    $("stats").innerHTML = cards.map(([k, v, n]) =>
+      '<div class="stat"><div class="k">' + k + '</div><div class="v">' + v + '</div><div class="n">' + n + "</div></div>"
+    ).join("");
+  }
+
+  function renderConfig() {
+    const cfg = state.config || {};
+    $("configGrid").innerHTML = FIELDS.map(([key, label, kind]) => {
+      if (kind === "bool") {
+        return '<label class="check"><input type="checkbox" data-key="' + key + '"' +
+          (cfg[key] ? " checked" : "") + "> " + label + "</label>";
+      }
+      const val = cfg[key] == null ? "" : String(cfg[key]);
+      return '<div class="field"><label>' + label + "</label>" +
+        '<input type="' + (kind === "number" ? "number" : "text") + '" data-key="' + key + '" value="' + val.replace(/"/g, "&quot;") + '"></div>';
+    }).join("");
+  }
+
+  function renderRecords() {
+    const rows = (state.overview || {}).recent || [];
+    if (!rows.length) {
+      $("records").innerHTML = '<div class="empty">还没有发布记录</div>';
+      return;
+    }
+    $("records").innerHTML = rows.map((r) => {
+      const ok = !!r.ok;
+      const badge = ok ? '<span class="badge ok">成功</span>' : '<span class="badge bad">失败</span>';
+      const err = ok ? "" : ' · ' + (r.error || "未知错误");
+      return '<div class="item"><div class="top"><span>' + fmtTime(r.ts) + " · " + (r.sender || "?") + "</span><span>" + badge + "</span></div>" +
+        '<div class="content">' + String(r.content || "").replace(/[<>&]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c])) + "</div>" +
+        '<div class="meta">配图 ' + Number(r.images || 0) + " 张" + (r.tid ? " · tid=" + r.tid : "") + err + "</div></div>";
+    }).join("");
+  }
+
+  async function load() {
+    try {
+      const r = await P.apiGet("/ncd-qzone/overview");
+      const d = (r && r.data && r.data.limits) ? r.data : r;
+      state.overview = d || {};
+      state.config = (d && d.config) || {};
+      renderStats();
+      renderConfig();
+      renderRecords();
+    } catch (e) {
+      msg($("saveMsg"), "加载失败: " + e, false);
+    }
+  }
+
+  async function save() {
+    const cfg = {};
+    document.querySelectorAll("[data-key]").forEach((el) => {
+      const key = el.dataset.key;
+      if (el.type === "checkbox") cfg[key] = el.checked;
+      else if (el.type === "number") cfg[key] = parseInt(el.value || "0", 10);
+      else cfg[key] = el.value.trim();
+    });
+    try {
+      $("saveBtn").disabled = true;
+      const r = await P.apiPost("/ncd-qzone/config", { save: true, config: cfg });
+      if (r && r.ok) {
+        state.config = r.config || cfg;
+        msg($("saveMsg"), "已保存，重载插件后生效", true);
+      } else {
+        msg($("saveMsg"), (r && r.error) || "保存失败", false);
+      }
+    } catch (e) {
+      msg($("saveMsg"), "保存失败: " + e, false);
+    } finally {
+      $("saveBtn").disabled = false;
+    }
+  }
+
+  async function clearRecords() {
+    if (!confirm("清空全部发布记录？")) return;
+    try {
+      const r = await P.apiPost("/ncd-qzone/records-clear", {});
+      if (r && r.ok) {
+        msg($("clearMsg"), "已清空", true);
+        load();
+      } else {
+        msg($("clearMsg"), (r && r.error) || "清空失败", false);
+      }
+    } catch (e) {
+      msg($("clearMsg"), "清空失败: " + e, false);
+    }
+  }
+
+  $("saveBtn").addEventListener("click", save);
+  $("reloadBtn").addEventListener("click", load);
+  $("clearBtn").addEventListener("click", clearRecords);
+
+  let tries = 0;
+  function boot() {
+    if (window.AstrBotPluginPage && window.AstrBotPluginPage.apiGet) {
+      load();
+      return;
+    }
+    if (tries++ < 100) setTimeout(boot, 50);
+  }
+  boot();
+})();
+</script>
+</body>
+</html>

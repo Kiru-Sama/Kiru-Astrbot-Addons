@@ -24,6 +24,9 @@
     padding:7px 12px; background:var(--card); color:var(--text); cursor:pointer; }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   button.danger { color:var(--bad); border-color:#f0c4c4; background:#fff; }
+  /* 删除按钮的二次点击确认态：第一次点变红，3 秒内再点才真正删除 */
+  button.danger.armed { background:#fdecec; border-color:var(--bad); font-weight:600;
+    box-shadow:0 0 0 2px rgba(220,38,38,.12); }
   button:disabled { opacity:.5; cursor:default; }
   .layout { display:grid; grid-template-columns:240px minmax(0,1fr); gap:12px;
     align-items:start; }
@@ -46,6 +49,13 @@
   .ava img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
   .entry { border:1px solid var(--border); border-radius:10px;
     padding:10px; margin-bottom:10px; background:var(--card); }
+  /* 记忆条目：按 kind 分组的可折叠抽屉 */
+  .group { border:1px solid var(--border); border-radius:10px; background:#fbfcfe;
+    padding:10px 12px; margin-bottom:10px; }
+  .group > summary { cursor:pointer; font-weight:600; font-size:13px; }
+  .group > summary .n { color:var(--muted); font-weight:400; font-size:12px; }
+  .group-body { margin-top:10px; }
+  .group .entry:last-child { margin-bottom:0; }
   .entry .top { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
   .badge { font-size:11px; padding:1px 7px; border-radius:999px;
     background:var(--track); color:var(--muted); }
@@ -95,6 +105,7 @@
 <script>
 const P = window.AstrBotPluginPage;
 let currentUmo = "";
+let currentLabel = "";
 
 function $(id) { return document.getElementById(id); }
 function setStatus(text, cls) {
@@ -126,6 +137,133 @@ async function apiPost(path, body) {
   return r;
 }
 
+/* ---------- 记忆条目：按 kind 分组的可折叠抽屉 ----------
+   后端 kind 固定四种（KINDS = note / preference / fact / summary）。
+   抽屉顺序按需求：偏好 → 笔记 → 事实 → 压缩摘要；前三个默认展开，摘要默认收起。
+   ★ 抽屉开合状态单独记一份 groupOpenState：保存 / 删除后重绘条目时按它还原，
+     不把用户刚展开的抽屉收回去（这是 task-5 第 3 条要求）。
+   ★ 组内按 updated_ts || ts 倒序（改过的条目应浮到最上面）。 */
+const KIND_ORDER = [
+  { key: "preference", label: "偏好", open: true },
+  { key: "note", label: "笔记", open: true },
+  { key: "fact", label: "事实", open: true },
+  { key: "summary", label: "压缩摘要", open: false },
+];
+const KIND_LABELS = {};
+KIND_ORDER.forEach(function (k) { KIND_LABELS[k.key] = k.label; });
+const groupOpenState = {};
+
+function groupIsOpen(kind) {
+  if (Object.prototype.hasOwnProperty.call(groupOpenState, kind)) {
+    return groupOpenState[kind];
+  }
+  for (let i = 0; i < KIND_ORDER.length; i++) {
+    if (KIND_ORDER[i].key === kind) return KIND_ORDER[i].open;
+  }
+  return true;   /* 未知分类默认展开，别让数据显示成"没有" */
+}
+
+function entrySortTs(item) {
+  return Number(item.updated_ts || item.ts || 0) || 0;
+}
+
+function groupEntries(items) {
+  const buckets = {};
+  items.forEach(function (it) {
+    const kind = String((it && it.kind) || "note");
+    if (!buckets[kind]) buckets[kind] = [];
+    buckets[kind].push(it);
+  });
+  const groups = [];
+  KIND_ORDER.forEach(function (k) {
+    const rows = buckets[k.key];
+    if (!rows || !rows.length) return;   /* 空分类不显示 */
+    delete buckets[k.key];
+    rows.sort(function (a, b) { return entrySortTs(b) - entrySortTs(a); });
+    groups.push({ kind: k.key, label: k.label, items: rows });
+  });
+  /* 兜底：后端理论上只会给上面四种 kind；万一有历史脏数据也别把条目弄丢 */
+  Object.keys(buckets).forEach(function (kind) {
+    const rows = buckets[kind];
+    if (!rows.length) return;
+    rows.sort(function (a, b) { return entrySortTs(b) - entrySortTs(a); });
+    groups.push({ kind: kind, label: KIND_LABELS[kind] || kind, items: rows });
+  });
+  return groups;
+}
+
+function renderEntries(items) {
+  const box = $("entries");
+  box.innerHTML = "";
+  const groups = groupEntries(items);
+  if (!groups.length) {
+    box.innerHTML = '<div class="empty">这个会话还没有记忆。</div>';
+    return 0;
+  }
+  groups.forEach(function (g) {
+    const det = document.createElement("details");
+    det.className = "group";
+    /* 先设开合，再挂 toggle 监听：避免初始化写入覆盖用户偏好 */
+    det.open = groupIsOpen(g.kind);
+    const sum = document.createElement("summary");
+    sum.textContent = g.label;
+    const n = document.createElement("span");
+    n.className = "n";
+    n.textContent = " · " + g.items.length + " 条";
+    sum.appendChild(n);
+    const body = document.createElement("div");
+    body.className = "group-body";
+    g.items.forEach(function (it) { body.appendChild(entryCard(it)); });
+    det.appendChild(sum);
+    det.appendChild(body);
+    det.addEventListener("toggle", function () {
+      groupOpenState[g.kind] = det.open;
+    });
+    box.appendChild(det);
+  });
+  return groups.length;
+}
+
+/* ---------- 删除按钮：页面内二次点击确认 ----------
+   ★ 插件页 iframe 的 sandbox 没有 allow-modals，浏览器原生确认弹窗会被静默
+     忽略并返回 false —— 旧实现 `if (确认()) 删除` 等于永远不执行。
+   ★ 交互：第一次点变红并显示「再点一次删除」，3 秒内再点才真正删除；
+     超时 / 点页面别处 / 按 Esc 都会复原。 */
+let armedDeleteBtn = null;
+let armedDeleteTimer = null;
+
+function disarmDelete() {
+  if (!armedDeleteBtn) return;
+  const btn = armedDeleteBtn;
+  armedDeleteBtn = null;
+  if (armedDeleteTimer) {
+    clearTimeout(armedDeleteTimer);
+    armedDeleteTimer = null;
+  }
+  btn.textContent = "删除";
+  btn.classList.remove("armed");
+  btn.removeAttribute("aria-pressed");
+}
+
+function armDelete(btn) {
+  disarmDelete();   /* 同时只允许一个按钮处于确认态 */
+  armedDeleteBtn = btn;
+  btn.textContent = "再点一次删除";
+  btn.classList.add("armed");
+  btn.setAttribute("aria-pressed", "true");
+  armedDeleteTimer = setTimeout(disarmDelete, 3000);
+}
+
+/* 点页面别处 / 按 Esc = 取消确认 */
+document.addEventListener("click", function (ev) {
+  if (!armedDeleteBtn) return;
+  if (ev.target === armedDeleteBtn) return;
+  disarmDelete();
+});
+document.addEventListener("keydown", function (ev) {
+  if (armedDeleteBtn && ev.key === "Escape") disarmDelete();
+});
+
 function bindAvatars(root) {
   root.querySelectorAll(".ava img[data-av]").forEach((img) => {
     img.onerror = () => { img.style.display = "none"; };
@@ -138,6 +276,7 @@ function sessionButton(item) {
   const btn = document.createElement("button");
   btn.className = "sess" + (item.umo === currentUmo ? " on" : "");
   btn.type = "button";
+  btn.dataset.umo = item.umo;
   const ava = document.createElement("span");
   ava.className = "ava";
   const initial = (item.peer_name || item.label || "?").trim().slice(0, 1).toUpperCase();
@@ -218,12 +357,19 @@ function entryCard(item) {
   const del = document.createElement("button");
   del.className = "danger";
   del.textContent = "删除";
-  del.addEventListener("click", async () => {
-    if (!confirm(`删除 #${item.id}？不可恢复。`)) return;
+  del.addEventListener("click", async (ev) => {
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    if (armedDeleteBtn !== del) {
+      /* 第一次点：只进入确认态，不删除；3 秒内再点同一个按钮才真正删 */
+      armDelete(del);
+      return;
+    }
+    disarmDelete();
     try {
       await apiPost("/ncd-memory/delete", { umo: currentUmo, id: item.id });
       setStatus(`已删除 #${item.id}`, "ok");
-      await loadEntries(currentUmo, $("currentLabel").textContent || "");
+      /* 刷新条目并保持当前会话 + 各抽屉开合状态 */
+      await loadEntries(currentUmo, currentLabel);
       await loadSessions();
     } catch (e) {
       setStatus("删除失败：" + (e.message || e), "err");
@@ -240,7 +386,8 @@ function entryCard(item) {
         umo: currentUmo, id: item.id, content: text,
       });
       setStatus(`已保存 #${item.id}`, "ok");
-      await loadEntries(currentUmo, $("currentLabel").textContent || "");
+      /* 刷新条目并保持当前会话 + 各抽屉开合状态 */
+      await loadEntries(currentUmo, currentLabel);
     } catch (e) {
       setStatus("保存失败：" + (e.message || e), "err");
     }
@@ -254,20 +401,27 @@ function entryCard(item) {
 }
 
 async function loadEntries(umo, label) {
-  currentUmo = umo;
-  $("currentLabel").textContent = label || umo;
-  document.querySelectorAll(".sess").forEach((b) => b.classList.remove("on"));
+  if (umo) {
+    currentUmo = umo;
+    currentLabel = label || umo;
+  }
+  $("currentLabel").textContent = currentLabel;
+  disarmDelete();   /* 旧按钮节点马上会被替换，先清掉可能存在的确认态 */
+  /* 选中态按 umo 对齐：重绘会话列表 / 刷新条目后仍指向当前会话 */
+  document.querySelectorAll(".sess").forEach((b) => {
+    b.classList.toggle("on", Boolean(b.dataset) && b.dataset.umo === currentUmo);
+  });
   const box = $("entries");
   box.innerHTML = '<div class="empty">加载中…</div>';
   try {
-    const data = await apiPost("/ncd-memory/entries", { umo });
+    const data = await apiPost("/ncd-memory/entries", { umo: currentUmo });
     const items = data.items || [];
-    box.innerHTML = "";
     if (!items.length) {
       box.innerHTML = '<div class="empty">这个会话还没有记忆。</div>';
+      setStatus("共 0 条", "");
       return;
     }
-    items.forEach((it) => box.appendChild(entryCard(it)));
+    renderEntries(items);
     setStatus(`共 ${items.length} 条`, "");
   } catch (e) {
     box.innerHTML = '<div class="empty">拉取失败</div>';
@@ -278,7 +432,7 @@ async function loadEntries(umo, label) {
 if (P) {
   $("refreshBtn").addEventListener("click", () => {
     loadSessions();
-    if (currentUmo) loadEntries(currentUmo, $("currentLabel").textContent || "");
+    if (currentUmo) loadEntries(currentUmo, currentLabel);
   });
   loadSessions();
   P.ready().then(() => loadSessions()).catch(() => {});

@@ -269,12 +269,24 @@ class ComfyClient:
                 return list(old[1])
             return []
         try:
-            spec = data[node]["input"]["required"][field][0]
+            raw = data[node]["input"]["required"][field]
         except Exception:  # noqa: BLE001
             return []
-        if not isinstance(spec, list):
+        # ★ 2026-11-18：ComfyUI 0.42 起 object_info 的下拉选项有两种形态：
+        #   旧: ["a.safetensors", "b.safetensors", ...]
+        #   新: ["COMBO", {"options": ["a.safetensors", ...]}]
+        #   之前只认旧形态，新版 ComfyUI 下所有模型清单都拿到 []（误报“拿不到底模清单”）。
+        options = None
+        spec = raw[0] if isinstance(raw, list) and raw else raw
+        if isinstance(spec, list):
+            options = spec
+        elif isinstance(raw, list) and len(raw) > 1 and isinstance(raw[1], dict):
+            options = raw[1].get("options")
+        elif isinstance(spec, dict):
+            options = spec.get("options")
+        if not isinstance(options, list):
             return []
-        names = [str(x) for x in spec if isinstance(x, str)]
+        names = [str(x) for x in options if isinstance(x, str)]
         if names:
             self._obj_cache[(node, field)] = (time.time(), names)
         return names
@@ -284,6 +296,8 @@ class ComfyClient:
         node_field = {
             "checkpoints": ("CheckpointLoaderSimple", "ckpt_name"),
             "diffusion_models": ("UNETLoader", "unet_name"),
+            # ★ 千问编辑流用 ComfyUI-GGUF 的 UnetLoaderGGUF 加载 .gguf 底模
+            "diffusion_models_gguf": ("UnetLoaderGGUF", "unet_name"),
             "loras": ("LoraLoader", "lora_name"),
             # ★ 2026-10-30：放大模型（超分）。UpscaleModelLoader 的可选值就是
             #   models/upscale_models 里的文件名。

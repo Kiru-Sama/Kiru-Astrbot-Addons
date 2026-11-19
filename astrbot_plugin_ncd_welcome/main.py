@@ -14,6 +14,9 @@ from __future__ import annotations
 
 from typing import Any
 
+import random
+import re
+
 from astrbot.api import logger, star
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.event.filter import EventMessageType
@@ -42,6 +45,19 @@ class NcdWelcomePlugin(star.Star):
     def _conf_str(self, key: str, default: str = "") -> str:
         raw = self._conf.get(key, default)
         return str(raw).strip() if raw is not None else default
+
+    def _welcome_templates(self) -> list[str]:
+        """候选欢迎语：welcome_texts 多行优先，其次 welcome_text，最后内置默认。"""
+        raw = self._conf.get("welcome_texts", "")
+        if isinstance(raw, list):
+            lines = [str(x).strip() for x in raw]
+        else:
+            lines = [x.strip() for x in str(raw or "").splitlines()]
+        lines = [x for x in lines if x and not x.startswith("#")]
+        if lines:
+            return lines
+        single = self._conf_str("welcome_text", "")
+        return [single] if single else [DEFAULT_TEXT]
 
     # ------------------------------------------------------------------
     #  入群通知判定
@@ -139,14 +155,43 @@ class NcdWelcomePlugin(star.Star):
     # ------------------------------------------------------------------
     #  欢迎语
     # ------------------------------------------------------------------
-    def _welcome_text(self, name: str) -> str:
-        tpl = self._conf_str("welcome_text", "")
-        if not tpl:
-            tpl = DEFAULT_TEXT
+    def _welcome_text(self, name: str, at: bool = True) -> str:
+        """随机挑一条候选欢迎语，替换 {name}/{at}。
+
+        ★ @ 了新人时客户端会自动显示名字，再写一遍 {name} 会变成
+          「@ZTZ99A 欢迎 1776896946入群」这种又长又怪的文案。
+          所以 at=True 时把 {name} 直接抹掉，只留「欢迎入群喵」。
+          at=False（不 @）时才用名字/QQ号兜底。
+        """
+        tpl = random.choice(self._welcome_templates())
+        repl = "" if at else (name or "")
         try:
-            return tpl.replace("{name}", name)
+            out = tpl.replace("{name}", repl)
         except Exception:  # noqa: BLE001
-            return DEFAULT_TEXT.replace("{name}", name)
+            out = DEFAULT_TEXT.replace("{name}", repl)
+        # 抹掉 {name} 后可能留下多余空格/句首标点
+        out = re.sub(r"[ \t]{2,}", " ", out).strip()
+        return out
+
+    @staticmethod
+    def _build_message(text: str, uid: str, at: bool) -> str | list[dict]:
+        """按配置拼消息：需要 @ 时发消息链，{at} 占位把 @ 插到指定位置。"""
+        want_at = bool(at) and bool(uid) and str(uid).isdigit()
+        if not want_at:
+            return text.replace("{at}", "").strip() or text
+        at_seg = {"type": "at", "data": {"qq": str(uid)}}
+        if "{at}" in text:
+            parts = text.split("{at}")
+            segs: list[dict] = []
+            for i, part in enumerate(parts):
+                if i > 0:
+                    segs.append(at_seg)
+                if part:
+                    segs.append({"type": "text", "data": {"text": part}})
+            return segs or [at_seg]
+        # 默认：@ 在最前面，后面跟空格+欢迎语
+        body = text.strip()
+        return [at_seg, {"type": "text", "data": {"text": " " + body if body else ""}}]
 
     # ------------------------------------------------------------------
     #  入口：群消息类型（含被转成消息的 notice）
@@ -160,7 +205,9 @@ class NcdWelcomePlugin(star.Star):
 
         uid = self._newcomer_id(event)
         name = await self._newcomer_name(event, uid)
-        text = self._welcome_text(name)
+        want_at = self._conf_bool("welcome_at_newcomer", True)
+        text = self._welcome_text(name, at=want_at)
+        message = self._build_message(text, uid, want_at)
 
         group_id = ""
         try:
@@ -180,7 +227,7 @@ class NcdWelcomePlugin(star.Star):
                 await bot.call_action(
                     "send_group_msg",
                     group_id=int(group_id),
-                    message=text,
+                    message=message,
                 )
                 logger.info(f"[welcome] 已迎新 -> 群 {group_id} 新成员 {uid}({name})")
             except Exception as exc:  # noqa: BLE001

@@ -45,8 +45,9 @@ $plugins = @(
     'astrbot_plugin_ncd_catchup',
     'astrbot_plugin_ncd_inject',
     'astrbot_plugin_ncd_memory',
-    'astrbot_plugin_ncd_welcome'
-    'astrbot_plugin_ncd_feedback', 'astrbot_plugin_ncd_link', 'astrbot_plugin_ncd_persona'
+    'astrbot_plugin_ncd_welcome',
+    'astrbot_plugin_ncd_feedback', 'astrbot_plugin_ncd_link', 'astrbot_plugin_ncd_persona',
+    'astrbot_plugin_ncd_status', 'astrbot_plugin_ncd_qzone'
 )
 # 电脑接入版才带 comfy：它靠 comfy_host 把出图交给电脑的显卡。
 if ($WithComfy) { $plugins += 'astrbot_plugin_ncd_comfy' }

@@ -46,6 +46,15 @@ except Exception:
 LOG = _LOG_DIR / "linkd.log"
 HISTORY_MAX = 200
 
+# ★ 远程拉起程序白名单（只允许这些名字，不执行任意命令）
+_RUN_APPS = {
+    "sunlogin": r"E:\软件和游戏\向日葵\AweSun\AweSun.exe",
+}
+# 对应计划任务名（存在则优先 schtasks /run，避免 UAC 弹窗）
+_RUN_TASKS = {
+    "sunlogin": "NCD_AweSun",
+}
+
 _lock = threading.Lock()
 _state = {"pc_reachable": True, "comfy": None, "launcher": None, "hotspot_ip": None, "ts": 0.0, "detail": ""}
 _history: list[dict] = []
@@ -360,6 +369,65 @@ def _sysinfo() -> dict:
 
 
 
+def _run_app(name: str) -> dict:
+    """白名单启动程序；已运行则不重复启动。"""
+    key = str(name or "").strip().lower()
+    exe = _RUN_APPS.get(key)
+    if not exe:
+        return {"ok": False, "error": f"不在白名单: {key or '(空)'}"}
+    exe_path = Path(exe)
+    if not exe_path.is_file():
+        return {"ok": False, "error": f"程序不存在: {exe}"}
+    # 已运行？（按进程名匹配，避免重复开）
+    proc_name = exe_path.stem  # AweSun
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FI", f"IMAGENAME eq {proc_name}.exe", "/NH"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            creationflags=_NO_WINDOW,
+        ).stdout or ""
+        if proc_name.lower() in out.lower():
+            return {"ok": True, "already": True, "app": key}
+    except Exception:
+        pass
+    # ★ 优先用计划任务（最高权限）启动，避免 UAC 弹窗；无任务再直接 Popen
+    task_name = _RUN_TASKS.get(key, "")
+    if task_name:
+        try:
+            q = subprocess.run(
+                ["schtasks", "/Query", "/TN", task_name],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                creationflags=_NO_WINDOW,
+            )
+            if q.returncode == 0:
+                run = subprocess.run(
+                    ["schtasks", "/Run", "/TN", task_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    creationflags=_NO_WINDOW,
+                )
+                if run.returncode == 0:
+                    return {"ok": True, "started": True, "app": key, "via": "task"}
+        except Exception:
+            pass
+    try:
+        proc = subprocess.Popen(  # noqa: S603
+            [str(exe_path)],
+            cwd=str(exe_path.parent),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=_NO_WINDOW,
+        )
+        return {"ok": True, "started": True, "app": key, "pid": proc.pid}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"启动失败: {exc}"}
+
+
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, body: bytes, ctype: str = "application/json; charset=utf-8") -> None:
         self.send_response(code)
@@ -377,6 +445,21 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(_refresh(), ensure_ascii=False).encode())
             elif path == "/sysinfo":
                 self._send(200, json.dumps(_sysinfo(), ensure_ascii=False).encode())
+            elif path == "/run":
+                qs = {}
+                if "?" in self.path:
+                    for part in self.path.split("?", 1)[1].split("&"):
+                        if "=" in part:
+                            k, v = part.split("=", 1)
+                            qs[k] = v
+                app = qs.get("app", "")
+                try:
+                    from urllib.parse import unquote
+
+                    app = unquote(app)
+                except Exception:
+                    pass
+                self._send(200, json.dumps(_run_app(app), ensure_ascii=False).encode())
             elif path == "/link/history":
                 with _lock:
                     self._send(200, json.dumps(_history[-50:], ensure_ascii=False).encode())

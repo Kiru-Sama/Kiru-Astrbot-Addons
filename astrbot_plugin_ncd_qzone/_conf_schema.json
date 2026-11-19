@@ -1,0 +1,62 @@
+{
+  "qzone_daily_per_user": {
+    "type": "int",
+    "description": "每人每天最多发几条",
+    "hint": "默认 1 条。",
+    "default": 1
+  },
+  "qzone_daily_total": {
+    "type": "int",
+    "description": "全站每天最多发几条",
+    "hint": "默认 5 条（所有人合计）。",
+    "default": 5
+  },
+  "qzone_gap_minutes": {
+    "type": "int",
+    "description": "两条说说之间至少间隔几分钟",
+    "hint": "默认 30 分钟；0 = 不限制间隔。",
+    "default": 30
+  },
+  "qzone_max_chars": {
+    "type": "int",
+    "description": "正文最多多少字",
+    "hint": "默认 1000。",
+    "default": 1000
+  },
+  "qzone_max_images": {
+    "type": "int",
+    "description": "配图最多几张",
+    "hint": "默认 9（QQ空间上限）；0 = 不允许配图。",
+    "default": 9
+  },
+  "qzone_friend_only": {
+    "type": "bool",
+    "description": "只允许好友发布",
+    "hint": "开（默认）：非好友会被拒绝。",
+    "default": true
+  },
+  "qzone_text_audit": {
+    "type": "bool",
+    "description": "正文模型审核",
+    "hint": "开（默认）：正文会先给审核模型判断是否含禁发内容。",
+    "default": true
+  },
+  "qzone_image_audit": {
+    "type": "bool",
+    "description": "配图审核（群聊审核同一套）",
+    "hint": "开（默认）：只把图片交给视觉模型判，不带提示词/聊天上下文。",
+    "default": true
+  },
+  "qzone_audit_fail_close": {
+    "type": "bool",
+    "description": "审核判断不了时保守拒绝",
+    "hint": "开（默认）：模型回答含糊/调用失败时直接拒绝发布。",
+    "default": true
+  },
+  "qzone_audit_provider": {
+    "type": "string",
+    "description": "审核用 provider id",
+    "hint": "留空 = 用当前会话模型；建议填一个支持读图的 provider。",
+    "default": ""
+  }
+}

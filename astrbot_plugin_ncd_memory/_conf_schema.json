@@ -1,15 +1,15 @@
 {
   "max_entries": {
     "type": "int",
-    "description": "每个会话最多存几条记忆",
-    "hint": "默认 100。到上限后 memory_write 会提示先忘掉或合并；面板里也能删。",
-    "default": 100
+    "description": "主动记忆条数上限（bot 用 memory_write 写的）",
+    "hint": "默认 500。只统计 note/preference/fact；压缩摘要另有更小的独立上限。",
+    "default": 500
   },
   "max_total_kb": {
     "type": "int",
-    "description": "每个会话记忆正文最多多少 KB",
-    "hint": "默认 200。只算正文，不算索引；防止一个会话写爆磁盘。",
-    "default": 200
+    "description": "主动记忆总大小上限（KB）",
+    "hint": "默认 1024。只算主动笔记正文，不含压缩摘要。",
+    "default": 1024
   },
   "max_entry_chars": {
     "type": "int",
@@ -19,9 +19,9 @@
   },
   "max_writes_per_minute": {
     "type": "int",
-    "description": "每个会话每分钟最多写几次",
-    "hint": "默认 8。防止模型抽风循环写；压缩摘要入库不占这个额度。",
-    "default": 8
+    "description": "每分钟最多写入几次（0 = 不限）",
+    "hint": "默认 0（不限制 bot 主动记录）。填正数可防模型抽风循环写。",
+    "default": 0
   },
   "summary_capture": {
     "type": "bool",
@@ -34,5 +34,17 @@
     "description": "有新记忆时提示模型一轮",
     "hint": "默认开。每写入一条新记忆（手动 memory_write 或压缩摘要自动入库）后，下一轮对话追加一行短提示，告诉模型可以查记忆；注入一次就复位，不会每轮都发。\n★ 提示拼在最新 user 消息尾部，不动前缀，不影响 DeepSeek 缓存命中。\n★ 关掉后模型只能靠自己记得调 memory_search —— 实测很容易忘，一般不建议关。",
     "default": true
+  },
+  "summary_max_entries": {
+    "type": "int",
+    "description": "压缩摘要最多保留几条",
+    "hint": "默认 30。超出后自动删最旧的摘要（不占主动记忆额度）。",
+    "default": 30
+  },
+  "summary_max_total_kb": {
+    "type": "int",
+    "description": "压缩摘要总大小上限（KB）",
+    "hint": "默认 48。超出后自动淘汰最旧的摘要。",
+    "default": 48
   }
 }

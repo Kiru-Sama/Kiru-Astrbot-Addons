@@ -49,13 +49,25 @@
   .status { color:var(--muted); font-size:12px; margin-top:10px; min-height:16px; }
   .imodal { display:none; position:fixed; inset:0; background:rgba(0,0,0,.72);
     z-index:60; align-items:center; justify-content:center; padding:24px; }
-  .imodal .box { background:var(--card); border-radius:14px; max-width:94vw;
-    max-height:90vh; overflow:hidden; padding:12px; display:flex; gap:14px; }
-  .imodal img { max-width:60vw; max-height:84vh; display:block; border-radius:8px;
+  .imodal .box { background:var(--card); border-radius:14px; width:96vw; position:relative;
+    max-height:92vh; overflow:hidden; padding:12px; display:flex; gap:14px; }
+  .imodal .loadbar { position:absolute; left:0; right:0; top:0; height:4px;
+    display:none; overflow:hidden; background:rgba(0,0,0,.06); border-radius:14px 14px 0 0; }
+  .imodal .loadbar.on { display:block; }
+  .imodal .loadbar i { display:block; height:100%; width:38%;
+    background:linear-gradient(90deg,#3b82f6,#93c5fd,#3b82f6);
+    animation: ncdbar 1.1s linear infinite; }
+  @keyframes ncdbar { 0% { transform:translateX(-110%); } 100% { transform:translateX(300%); } }
+  .imodal img { max-width:52vw; max-height:86vh; display:block; border-radius:8px;
     object-fit:contain; background:#0b0e13; flex:0 0 auto; }
-  .imodal .meta { color:var(--muted); font-size:12.5px; padding:2px 0;
+  .imodal .meta { color:var(--text); font-size:13px; line-height:1.6; padding:2px 0;
     white-space:pre-wrap; word-break:break-word; overflow:auto; flex:1 1 auto;
-    min-width:260px; max-height:84vh; }
+    min-width:360px; max-height:86vh; user-select:text; }
+  @media (max-width:700px) {
+    .imodal .box { flex-direction:column; padding:8px; }
+    .imodal img { max-width:92vw; max-height:56vh; }
+    .imodal .meta { min-width:0; max-height:34vh; }
+  }
   /* ── 额度板块（quota 原样式，已加作用域） ── */
 .q-scope {
     --bg:#f6f7f9; --card:#fff; --border:#e5e8ee; --text:#1f2329;
@@ -250,6 +262,7 @@
 
 <div class="imodal" id="imodal">
   <div class="box">
+    <div class="loadbar" id="imodal-loadbar"><i></i></div>
     <img id="imodal-img" alt="" />
     <div class="meta" id="imodal-meta"></div>
   </div>
@@ -314,6 +327,7 @@ async function selectSession(s) {
   const grid = $("igrid");
   grid.innerHTML = "";
   setStatus(`加载 ${s.count} 张图…`);
+  const jobs = [];
   s.items.forEach((it) => {
     const cell = document.createElement("div");
     cell.className = "icell";
@@ -327,8 +341,9 @@ async function selectSession(s) {
     cell.appendChild(info);
     cell.addEventListener("click", () => openFull(it));
     grid.appendChild(cell);
-    loadThumb(cell, s, it);
+    jobs.push({ cell: cell, it: it });
   });
+  if (jobs.length) loadThumbsBatch(s, jobs);
   if (!s.items.length) {
     $("empty").style.display = "block";
     $("empty").textContent = "这个会话没有图";
@@ -336,35 +351,121 @@ async function selectSession(s) {
   setStatus(`已列出 ${s.count} 张（缩略图按需加载）`);
 }
 
-async function loadThumb(cell, s, it) {
-  try {
-    const r = await P.apiGet("/ncd-comfy/gallery/thumb", { dir: s.dir, file: it.file });
-    if (r && r.ok && r.thumb) {
-      const img = document.createElement("img");
-      img.src = r.thumb;
-      img.alt = it.file;
-      cell.replaceChild(img, cell.firstChild);
-    } else {
-      cell.firstChild.textContent = "无缩略图";
+
+async function loadThumbsBatch(s, jobs) {
+  const CHUNK = 24;
+  for (let i = 0; i < jobs.length; i += CHUNK) {
+    const chunk = jobs.slice(i, i + CHUNK);
+    const files = chunk.map((j) => j.it.file);
+    let thumbs = null;
+    try {
+      const r = await P.apiPost("/ncd-comfy/gallery/thumbs", { dir: s.dir, files: files });
+      thumbs = (r && (r.thumbs || (r.data && r.data.thumbs))) || null;
+    } catch (e) {
+      thumbs = null;
     }
-  } catch (e) {
-    cell.firstChild.textContent = "加载失败";
+    chunk.forEach((j) => {
+      let ph = null;
+      for (let k = 0; k < j.cell.childNodes.length; k++) {
+        const c = j.cell.childNodes[k];
+        if (c.classList && c.classList.contains("ph")) { ph = c; break; }
+      }
+      const b64 = thumbs ? thumbs[j.it.file] : "";
+      if (b64) {
+        const img = document.createElement("img");
+        img.src = b64;
+        img.alt = j.it.file;
+        img.loading = "lazy";
+        if (ph) j.cell.replaceChild(img, ph);
+        else j.cell.insertBefore(img, j.cell.firstChild);
+      } else if (ph) {
+        ph.textContent = "无缩略图";
+      }
+    });
   }
+}
+
+
+function galleryMetaText(it) {
+  const lines = [];
+  lines.push("文件：" + (it.file || "?"));
+  lines.push("时间：" + fmtTime(it.ts));
+  const kb = it.size ? (Number(it.size) / 1024).toFixed(1) + " KB" : "?";
+  const dims = it.width && it.height ? it.width + "×" + it.height : "";
+  let head = "尺寸：" + (dims || "（旧记录未存宽高）") + " · " + kb;
+  if (it.seconds) head += " · 耗时 " + it.seconds + "s";
+  lines.push(head);
+  const wf = [];
+  if (it.preset) wf.push("工作流：" + it.preset);
+  if (it.model) wf.push("底模：" + it.model);
+  if (wf.length) lines.push(wf.join(" · "));
+  const gen = [];
+  if (it.steps !== null && it.steps !== undefined) gen.push("步数：" + it.steps);
+  if (it.cfg !== null && it.cfg !== undefined) gen.push("CFG：" + it.cfg);
+  if (it.seed !== null && it.seed !== undefined) gen.push("种子：" + it.seed);
+  if (it.denoise) gen.push("降噪：" + it.denoise);
+  if (it.upscale) gen.push("放大：" + it.upscale);
+  if (gen.length) lines.push(gen.join(" · "));
+  const loras = Array.isArray(it.loras) ? it.loras : [];
+  if (loras.length) {
+    lines.push("LoRA（" + loras.length + " 个）：");
+    loras.forEach((l, i) => {
+      if (!l) return;
+      lines.push("  " + (i + 1) + ". " + (l.name || "") +
+        (l.strength !== null && l.strength !== undefined ? "：" + l.strength : ""));
+    });
+  }
+  lines.push("");
+  lines.push("提示词：");
+  lines.push(it.prompt || "（无）");
+  if (!dims && !it.negative && !it.steps && !loras.length) {
+    lines.push("（旧记录：当时只保存了前 300 字提示词，没有步数/种子等参数，无法补全）");
+  }
+  if (it.negative) {
+    lines.push("");
+    lines.push("负面提示词：");
+    lines.push(it.negative);
+  }
+  return lines.join("\n");
 }
 
 async function openFull(it) {
   if (!current) return;
+  const modal = $("imodal");
+  const img = $("imodal-img");
+  const meta = $("imodal-meta");
+  const base = galleryMetaText(it);
+  const promptCut = (it.prompt || "").length >= 200;
+  // 立即打开弹层，先给信息 + 加载提示；原图下载完再替换
+  const bar = $("imodal-loadbar");
+  if (bar) bar.classList.add("on");
+  const mb = it.size ? (Number(it.size) / 1024 / 1024).toFixed(1) + " MB" : "原图";
+  meta.textContent = base +
+    (promptCut ? "\n（完整提示词会随原图一起加载）" : "") +
+    "\n\n原图加载中…（" + mb + "）";
+  img.style.display = "none";
+  img.removeAttribute("src");
+  modal.style.display = "flex";
+  setStatus("加载原图…");
   try {
     const r = await P.apiGet("/ncd-comfy/gallery/full", { dir: current.dir, file: it.file });
-    if (!r || !r.ok) { setStatus("原图加载失败"); return; }
-    $("imodal-img").src = r.b64;
-    $("imodal-meta").textContent =
-      `${it.file}\n${fmtTime(it.ts)} · ${(it.size ? Math.round(it.size / 1024) : "?")} KB` +
-      `${it.preset ? " · " + it.preset : ""}${it.model ? " · " + it.model : ""}\n` +
-      `${it.prompt || ""}`;
-    $("imodal").style.display = "flex";
+    if (!r || !r.ok) {
+      if (bar) bar.classList.remove("on");
+      meta.textContent = base + "\n\n原图加载失败（文件可能已被清理）";
+      setStatus("原图加载失败");
+      return;
+    }
+    const info = (r && r.meta && Object.keys(r.meta).length)
+      ? Object.assign({}, it, r.meta) : it;
+    img.src = r.b64;
+    img.style.display = "block";
+    meta.textContent = galleryMetaText(info);
+    if (bar) bar.classList.remove("on");
+    setStatus("已加载 " + it.file);
   } catch (e) {
-    setStatus("原图加载失败：" + (e && e.message ? e.message : e));
+    if (bar) bar.classList.remove("on");
+    meta.textContent = base + "\n\n原图加载失败：" + (e && e.message ? e.message : e);
+    setStatus("原图加载失败");
   }
 }
 
@@ -387,6 +488,11 @@ $("refresh").addEventListener("click", () => {
 });
 $("imodal").addEventListener("click", (e) => {
   if (e.target === $("imodal")) $("imodal").style.display = "none";
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("imodal").style.display === "flex") {
+    $("imodal").style.display = "none";
+  }
 });
 
 load();

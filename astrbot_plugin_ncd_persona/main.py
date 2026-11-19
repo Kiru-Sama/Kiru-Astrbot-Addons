@@ -31,6 +31,23 @@ CONFIG_KEY = "session_service_config"
 RESET_WORDS = ("默认", "default", "自动", "auto", "清除", "重置", "clear", "reset")
 
 
+def _qq_list(raw) -> list[str]:
+    """把配置里的 QQ 名单解析成去重列表（保序）。
+
+    支持逗号、中文逗号、分号、空格和换行分隔：
+        "111,222" / "111，222" / "111\n222" / "111 222"
+    """
+    s = str(raw or "").strip()
+    if not s:
+        return []
+    out: list[str] = []
+    for part in re.split(r"[,，;；\s]+", s):
+        p = part.strip()
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
 class NcdPersonaPlugin(Star):
     def __init__(self, context: Context, config: dict | None = None) -> None:
         super().__init__(context)
@@ -57,9 +74,9 @@ class NcdPersonaPlugin(Star):
         if not sender:
             return False
         primary = self._conf_str("ncd_primary_admin")
-        deputy = self._conf_str("ncd_deputy_admin")
+        deputies = _qq_list(self._conf_str("ncd_deputy_admin"))
         return bool(
-            (primary and sender == primary) or (deputy and sender == deputy)
+            (primary and sender == primary) or (sender in deputies)
         )
 
     # ------------------------------------------------------------------

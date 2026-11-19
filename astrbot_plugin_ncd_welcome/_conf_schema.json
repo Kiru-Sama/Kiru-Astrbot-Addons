@@ -14,13 +14,19 @@
   "welcome_at_newcomer": {
     "type": "bool",
     "description": "欢迎语里 @ 一下新人",
-    "hint": "开：欢迎语末尾加 @新人。关（默认）：只发纯文本，不 @。",
-    "default": false
+    "hint": "开（默认）：会真正发 at 消息段，@ 到新人（客户端会自动显示名字）。关：只发纯文本。",
+    "default": true
   },
   "welcome_fetch_member_name": {
     "type": "bool",
     "description": "拿不到昵称时向协议端查询群成员名片",
     "hint": "开（默认）：用 get_group_member_info 补一次名片/昵称。关：只用事件里带的名字，QQ 号兜底。",
     "default": true
+  },
+  "welcome_texts": {
+    "type": "string",
+    "description": "候选欢迎语（每行一条，随机挑）",
+    "hint": "一行一条，随机挑一条发；支持 {name}（新成员昵称）和 {at}（@ 的位置）。留空则用上面的「欢迎语模板」。",
+    "default": ""
   }
 }
