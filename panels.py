@@ -315,7 +315,6 @@ PAGES = [
     ("监控面板", "astrbot_plugin_ncd_monitor", "monitor"),
     ("出图额度", "astrbot_plugin_ncd_comfy", "gallery"),
     ("提示注入", "astrbot_plugin_ncd_inject", "inject"),
-    ("记忆", "astrbot_plugin_ncd_memory", "memory"),
     ("防睡眠", "astrbot_plugin_ncd_awake", "awake"),
     ("反馈", "astrbot_plugin_ncd_feedback", "feedback"),
     ("状态图背景", "astrbot_plugin_ncd_monitor", "status"),
@@ -489,6 +488,57 @@ def refresh(force: bool = False) -> dict:
 
 
 # ── 页面 ────────────────────────────────────────────────────────────
+def build_shell_html() -> str:
+    """首页壳：默认直接加载手机 AstrBot 后台（9003），可一键切 NapCat 后台（9002）/旧面板。
+
+    ★ 2026-11-19：用户要求 9001 打开就是 AstrBot 后台，并保留 NapCat 切换；
+      旧的聚合页（监控/额度/提示注入/防睡眠/反馈/状态图背景）移到 /pages。
+    """
+    return """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>手机 AstrBot</title>
+<style>
+  html, body { margin:0; height:100%; background:#0f1115; color:#dfe3ea;
+               font:13px/1.5 system-ui, "Microsoft YaHei", sans-serif;
+               display:flex; flex-direction:column; }
+  header { flex:0 0 auto; display:flex; align-items:center; gap:8px;
+           padding:7px 12px; background:#161a22; border-bottom:1px solid #262c38; }
+  .brand { font-weight:600; letter-spacing:.3px; margin-right:4px; }
+  header button { background:#1a2330; color:#9fb2cc; border:1px solid #2a3648;
+                  border-radius:7px; padding:5px 12px; cursor:pointer; font-size:13px; }
+  header button:hover { color:#dfe3ea; }
+  header button.active { background:#23324a; color:#8fb6ff; border-color:#2f4468; }
+  .hint { margin-left:auto; color:#6b7688; font-size:12px; }
+  iframe { flex:1 1 auto; width:100%; border:0; background:#0f1115; }
+</style></head>
+<body>
+<header>
+  <span class="brand">手机 AstrBot</span>
+  <button id="b-astrbot" class="active" onclick="go('astrbot')">AstrBot 后台</button>
+  <button id="b-napcat" onclick="go('napcat')">NapCat 后台</button>
+  <button id="b-pages" onclick="go('pages')">旧面板</button>
+  <span class="hint">AstrBot 后台免登录 · NapCat 后台已带 token</span>
+</header>
+<iframe id="fr" src="http://127.0.0.1:9003/"></iframe>
+<script>
+  function go(who) {
+    document.querySelectorAll('header button').forEach(b => b.classList.remove('active'));
+    var btn = document.getElementById('b-' + who);
+    if (btn) btn.classList.add('active');
+    var fr = document.getElementById('fr');
+    if (who === 'napcat') fr.src = 'http://127.0.0.1:9002/';
+    else if (who === 'pages') fr.src = '/pages';
+    else fr.src = 'http://127.0.0.1:9003/';
+    try { localStorage.setItem('ncd-shell-tab', who); } catch (e) {}
+  }
+  try {
+    var saved = localStorage.getItem('ncd-shell-tab');
+    if (saved && saved !== 'astrbot') go(saved);
+  } catch (e) {}
+</script>
+</body></html>"""
+
+
 def build_html() -> str:
     try:
         data = refresh()
@@ -742,6 +792,9 @@ class Handler(BaseHTTPRequestHandler):
         raw = self.path
         path, _, query = raw.partition("?")
         if path in ("/", "/index.html"):
+            # ★ 2026-11-19：首页直接是手机 AstrBot 后台（可切 NapCat），旧聚合页移到 /pages
+            self._send(200, "text/html; charset=utf-8", build_shell_html().encode("utf-8"))
+        elif path in ("/pages", "/pages/"):
             self._send(200, "text/html; charset=utf-8", build_html().encode("utf-8"))
         elif path == "/awake":
             q = query
