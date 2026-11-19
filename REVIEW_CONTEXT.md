@@ -71,3 +71,31 @@
 - extra `/拉起向日葵` 别名（远程/向日葵）较宽，可能与普通对话冲突。
 - feedback 备份轮转只在清空成功后执行（低风险）。
 - status/monitor 背景图库没有数量上限/配额（可加）。
+
+## 6. 全量审查（17 插件）修复轮 · 2026-11-19 晚
+
+- H1 comfy：gallery/full|thumb|thumbs 的 dir 路径穿越已修（只允许 out 下单层目录 + 只服务图片后缀），实测 dir=../../.. 已返回 ok=false。
+- H2 session：群聊 /切换 /命名 /删除 加管理员校验（主/副管理员或平台管理员；私聊不限）。
+- H3 catchup：补台失败重试 3 次；心跳只在 _catchup_done 后推进处理点，停机窗口不再被吞。
+- M1 natural：数据目录修正为 data/plugin_data/ncd_natural，旧 data/data/... 启动时一次性迁移。
+- M2 memory：会话头像改为并发拉取（Semaphore 8 + 4s 总超时），冷启动不再 25s 超时。
+- M3 toolbox：PDF 读取改为手动逐跳跟随 + 每跳 public_url_error 复查（防 302 内网 SSRF），临时文件 finally 清理。
+- M4 toolbox：web_read_many 浏览器回退结果复查最终落点。
+- M5 extra：确认这只是上次快照误报（token 配置一直在）；新增 linkd 403 的明确提示。
+- M6 natural：多行回复不再只发前 4 行（超出部分合并一条），非文本组件（图/语音）补发。
+- M7 inject：同一念头最多注入 3 次后自动出队，修“请求失败反复重复注入”。
+- M8 inject：state.json 节流写盘（5s）+ 会话表保留最近 200 个。
+- M9 toolbox：4 个工具提示词 handler 补注册路由（/ncd-toolbox/tools/*），实测 tools/info 返回 ok。
+- M10 awake：非 Windows 平台初始化静默跳过；手机端配置 enabled=false。
+
+**已知未修（低危）**：comfy 调试写盘后门（仅登录面板可用）、linkd 无传感器时周期性 spawn PowerShell 探温、watchdog 外挂盘缺失日志、memory 上限默认值不一致、附件/PDF 临时文件（PDF 已修）、natural _prev 兼容层死代码、toolbox per_page_chars 强转、natural _ensure_all_pack 重算。
+
+## 7. 记忆插件替换（2026-11-19 晚）
+
+- 旧 strbot_plugin_ncd_memory（链路记忆 1.2.1）已**停用**（数据仍保留在 data/plugin_data/ncd_memory，97 条已备份到 _backup/20261119_pre_memory_companion/）。
+- 新 strbot_plugin_memory_companion（我会牢牢记住你 2.6.6，MIT，无运行期第三方依赖，SQLite 本地）已启用并接管记忆注入。
+- 配置要点：
+etrieval.embedding_enabled=false（AstrBot 里唯一 embedding provider 是 LM Studio 的 nomic-embed，电脑没开 → 走本地全文检索，不耗模型）；memory_summary.enabled=true（默认 provider，达 8 条事件/30 分钟触发一次总结）。
+- 已通过其页面 API（/page/conversation-import/qq/preview + /start，CSRF 头）对三个好友的最近 31 天私聊做了历史导入：2384440471 狐悠（2 条记忆）、2493543208 卡拉彼丘-APERTURE（6 条）、2984423598（4 条），批次均 completed。
+- 安装注意：插件运行期会读 docs/contracts/... 等资源，**不能精简 docs 目录**（之前裁掉导致 FileNotFoundError）。
+- 面板入口：AstrBot 插件页 → 我会牢牢记住你 → 记忆面板。
