@@ -615,20 +615,21 @@ def _draw_resources_block(img: Image.Image, payload: dict, top: int) -> None:
 
     # 温度 chips（4 个）
     cw = (x1 - x0 - 2 * PAD - 3 * 12) // 4
+    # ★ 2026-11-19 修 M4：颜色判断用原始数值（之前传 "45.2℃" 字符串，float() 失败→永远灰色）
     chips = [
-        ("手机 SoC", _temp(latest.get("temp")), "sysfs · 10 秒刷新"),
-        ("手机电池", _temp(latest.get("temp_ph_batt")), "power_supply"),
-        ("手机外壳", _temp(latest.get("temp_ph_shell")), "shell"),
-        ("笔记本 GPU", _temp(gpu.get("temp")), (gpu.get("name") or "linkd 未连接")),
+        ("手机 SoC", _temp(latest.get("temp")), "sysfs · 10 秒刷新", latest.get("temp")),
+        ("手机电池", _temp(latest.get("temp_ph_batt")), "power_supply", latest.get("temp_ph_batt")),
+        ("手机外壳", _temp(latest.get("temp_ph_shell")), "shell", latest.get("temp_ph_shell")),
+        ("笔记本 GPU", _temp(gpu.get("temp")), (gpu.get("name") or "linkd 未连接"), gpu.get("temp")),
     ]
-    for i, (t, v, note) in enumerate(chips):
+    for i, (t, v, note, raw) in enumerate(chips):
         _chip(
             d,
             (x0 + PAD + i * (cw + 12), y, x0 + PAD + i * (cw + 12) + cw, y + 92),
             t,
             v,
             note,
-            _temp_color(v.replace(" ", "")),
+            _temp_color(raw) if raw is not None else SUB2,
         )
     y += 104
 
@@ -911,7 +912,11 @@ def render_status_image(
     )
 
     _t_draw = _time.time()
-    stamp = time.strftime("%Y%m%d-%H%M%S")
+    # ★ 2026-11-19 修 M5：加微秒避免同秒并发写同一文件；
+    #   Windows 的 time.strftime 不支持 %f（会输出字面 %f），用 datetime。
+    from datetime import datetime as _dt
+
+    stamp = _dt.now().strftime("%Y%m%d-%H%M%S-%f")
     if img.width > 1600:
         p = out / f"status_{stamp}.jpg"
         img.save(p, format="JPEG", quality=88, optimize=True)

@@ -50,7 +50,11 @@ def _settings_load() -> dict:
 
 def _settings_save(data: dict) -> None:
     SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-    tmp = SETTINGS.with_name(SETTINGS.name + ".tmp")
+    # ★ 2026-11-19 修 M13：tmp 名带 pid/随机后缀，避免和 monitor 同时保存时互相踩
+    import os as _os
+    import uuid as _uuid
+
+    tmp = SETTINGS.with_name(SETTINGS.name + f".{_os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(SETTINGS)
 
@@ -151,13 +155,39 @@ def _extract_image_bytes(event: AstrMessageEvent) -> bytes | None:
     return None
 
 
+def _safe_bg_name(name: str) -> str:
+    """背景文件名清洗：只留安全字符 + 强制图片后缀。"""
+    import re as _re
+
+    base = str(name or "").replace("\\", "/").split("/")[-1].strip()
+    base = _re.sub(r"[^0-9A-Za-z_.\-()\uff08\uff09\u4e00-\u9fff]", "_", base)
+    if not base:
+        base = "bg.jpg"
+    if not base.lower().endswith(IMAGE_EXTS):
+        base += ".jpg"
+    return base
+
+
+def _is_real_image(blob: bytes) -> bool:
+    """字节是不是可解码图片（防非图片文件混进图库）。"""
+    try:
+        im = Image.open(io.BytesIO(blob))
+        im.verify()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _save_bg_from_bytes(blob: bytes) -> str:
     """把聊天图片转成背景图存进图库（最长边压到 2048，JPEG）。"""
     im = Image.open(io.BytesIO(blob)).convert("RGB")
     if max(im.size) > 2048:
         im.thumbnail((2048, 2048), Image.LANCZOS)
     BG_DIR.mkdir(parents=True, exist_ok=True)
-    name = "bg_" + time.strftime("%Y%m%d-%H%M%S") + ".jpg"
+    # ★ 2026-11-19：加微秒避免同秒两次上传互相覆盖（Windows strftime 不支持 %f，用 datetime）
+    from datetime import datetime as _dt
+
+    name = "bg_" + _dt.now().strftime("%Y%m%d-%H%M%S-%f") + ".jpg"
     im.save(BG_DIR / name, format="JPEG", quality=88, optimize=True)
     return name
 
@@ -289,13 +319,14 @@ class Main(star.Star):
         b64 = str(body.get("b64") or "")
         if not name or not b64:
             return json_response({"ok": False, "error": "缺少文件名或内容"})
-        name = name.replace("\\", "/").split("/")[-1]
-        if not name.lower().endswith(IMAGE_EXTS):
-            name += ".jpg"
+        # ★ 2026-11-19 修 M6：文件名清洗 + 白名单 + 图片内容校验
+        name = _safe_bg_name(name)
         try:
             blob = base64.b64decode(b64)
         except Exception:  # noqa: BLE001
             return json_response({"ok": False, "error": "base64 解码失败"})
+        if not _is_real_image(blob):
+            return json_response({"ok": False, "error": "不是有效图片文件"})
         if len(blob) > MAX_UPLOAD:
             return json_response({"ok": False, "error": "图片超过 15MB"})
         dup = _find_duplicate(blob)
@@ -321,6 +352,10 @@ class Main(star.Star):
         name = str(body.get("name") or "").strip()
         if not name or "/" in name or "\\" in name or name.startswith("."):
             return json_response({"ok": False, "error": "文件名不合法"})
+        # ★ 2026-11-19 修 M6：只允许删除图库里真实存在的图片（防止删 settings.json 等）
+        allowed = {f["name"] for f in _files_list()}
+        if name not in allowed:
+            return json_response({"ok": False, "error": "图库里没有这个文件"})
         try:
             (BG_DIR / name).unlink(missing_ok=True)
         except OSError as exc:
@@ -423,6 +458,12 @@ class Main(star.Star):
             yield event.plain_result(
                 f"图库（{len(files)} 张）：\n" + "\n".join(rows[:30]) + more
             )
+            return
+
+        # ★ 2026-11-19 修 H1：修改类操作（上传/去重/清空/内置/随机/指定/删除）必须管理员；
+        #   之前「去重/清空」在权限检查之前执行 → 普通成员可清空图库。
+        if not _admin():
+            yield event.plain_result("改背景只有管理员能用（查看状态不限）。")
             return
 
         if head in ("上传", "传", "添加", "add", "upload"):

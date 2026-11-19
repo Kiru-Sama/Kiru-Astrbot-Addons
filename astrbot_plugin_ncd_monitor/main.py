@@ -1420,13 +1420,14 @@ class Main(star.Star):
         b64 = str(body.get("b64") or "")
         if not name or not b64:
             return json_response({"ok": False, "error": "缺少文件名或内容"})
-        name = name.replace("\\", "/").split("/")[-1]
-        if not name.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
-            name = name + ".jpg"
+        # ★ 2026-11-19 修 M6：文件名清洗 + 白名单 + 图片内容校验
+        name = _safe_bg_name(name)
         try:
             blob = _b64.b64decode(b64)
         except Exception:  # noqa: BLE001
             return json_response({"ok": False, "error": "base64 解码失败"})
+        if not _is_real_image(blob):
+            return json_response({"ok": False, "error": "不是有效图片文件"})
         if len(blob) > 15 * 1024 * 1024:
             return json_response({"ok": False, "error": "图片超过 15MB"})
         # ★ 2026-11-18：只按字节完全相同去重（sha256），不再用感知哈希误删相似图
@@ -1465,6 +1466,10 @@ class Main(star.Star):
         name = str(body.get("name") or "").strip()
         if not name or "/" in name or "\\" in name or name.startswith("."):
             return json_response({"ok": False, "error": "文件名不合法"})
+        # ★ 2026-11-19 修 M6：只允许删除图库里真实存在的图片（防止删 settings.json 等）
+        allowed = {f["name"] for f in self._status_bg_files()}
+        if name not in allowed:
+            return json_response({"ok": False, "error": "图库里没有这个文件"})
         try:
             (self._status_bg_dir() / name).unlink(missing_ok=True)
         except OSError as exc:
@@ -1515,6 +1520,17 @@ class Main(star.Star):
         """渲染 /设备状态 的图；preview=1 时返回 1200px 缩略（页面预览用）。"""
         import base64 as _b64
 
+        # ★ 2026-11-19 修 H4：AstrBot 只注入路径参数，preview 从 query 读；
+        #   之前 preview 恒为空 → 页面预览每次渲染 6000px 原图（1.1MB JPEG）。
+        if not str(preview or "").strip():
+            try:
+                from astrbot.api.web import request as _req
+
+                qp = getattr(_req, "query", None)
+                if qp is not None:
+                    preview = str(qp.get("preview") or "")
+            except Exception:  # noqa: BLE001
+                pass
         try:
             path = await asyncio.to_thread(self._render_status_image)
         except Exception as exc:  # noqa: BLE001
@@ -5990,6 +6006,33 @@ class Main(star.Star):
             / "status_bg"
         )
 
+    @staticmethod
+    def _safe_bg_name(name: str) -> str:
+        """背景文件名清洗：只留安全字符 + 强制图片后缀。"""
+        import re as _re
+
+        base = str(name or "").replace("\\", "/").split("/")[-1].strip()
+        base = _re.sub(r"[^0-9A-Za-z_.\-()\uff08\uff09\u4e00-\u9fff]", "_", base)
+        if not base:
+            base = "bg.jpg"
+        if not base.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+            base += ".jpg"
+        return base
+
+    @staticmethod
+    def _is_real_image(blob: bytes) -> bool:
+        """字节是不是可解码图片（防非图片文件混进图库）。"""
+        import io as _io
+
+        from PIL import Image as _Image
+
+        try:
+            im = _Image.open(_io.BytesIO(blob))
+            im.verify()
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
     def _status_bg_settings(self) -> dict:
         try:
             path = self._status_bg_dir() / "settings.json"
@@ -6001,7 +6044,11 @@ class Main(star.Star):
     def _status_bg_save(self, data: dict) -> None:
         path = self._status_bg_dir() / "settings.json"
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(path.name + ".tmp")
+        # ★ 2026-11-19 修 M13：tmp 名带 pid/随机后缀，避免 status 插件同时保存时互相踩
+        import os as _os
+        import uuid as _uuid
+
+        tmp = path.with_name(path.name + f".{_os.getpid()}.{_uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(
             json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8"
         )
@@ -6083,6 +6130,18 @@ class Main(star.Star):
         }
 
     def _render_status_image(self) -> Path:
+        # ★ 2026-11-19 修 M5：status_render 的 _SCALE/_FONTS 是进程级全局，
+        #   并发渲染（/设备状态 与预览同时）会互相改缩放导致错位；这里串行化。
+        lock = getattr(self, "_status_render_lock", None)
+        if lock is None:
+            import threading
+
+            lock = threading.Lock()
+            self._status_render_lock = lock
+        with lock:
+            return self._render_status_image_locked()
+
+    def _render_status_image_locked(self) -> Path:
         payload = self._status_image_payload()
         font = Path(__file__).resolve().parent / "assets" / "font_cjk.ttf"
         try:

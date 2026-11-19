@@ -193,6 +193,15 @@ def _event_images(event: AstrMessageEvent) -> list[bytes]:
 
 
 def _image_from_spec(spec: str) -> bytes | None:
+    """解析配图参数。
+
+    ★ 2026-11-19 修 H6：LLM 传入的 images 参数原来接受任意本地路径/URL，
+    可以把本机任意图片（桌面、相册）或内网服务内容发到公开 QQ 空间。
+    现在只允许：
+      · base64://（模型自己编码的图）
+      · http(s) 公网 URL（拒绝 localhost/私网/回环/链路本地地址，防 SSRF）
+      · 本地路径（仅限 AstrBot data 目录或系统临时目录内的图片，即聊天图/出图缓存）
+    """
     spec = spec.strip()
     if not spec:
         return None
@@ -203,22 +212,58 @@ def _image_from_spec(spec: str) -> bytes | None:
             return None
     if spec.startswith(("http://", "https://")):
         try:
+            import ipaddress
+            import socket
             import urllib.request
+            from urllib.parse import urlparse as _urlparse
 
+            host = (_urlparse(spec).hostname or "").strip().lower()
+            if not host or host == "localhost" or host.endswith(".local"):
+                return None
+            for info in socket.getaddrinfo(host, None):
+                ip = ipaddress.ip_address(info[4][0])
+                if (
+                    ip.is_private
+                    or ip.is_loopback
+                    or ip.is_link_local
+                    or ip.is_reserved
+                    or ip.is_multicast
+                    or ip.is_unspecified
+                ):
+                    return None
             req = urllib.request.Request(spec, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=20) as resp:
                 return resp.read(12 * 1024 * 1024)
         except Exception:  # noqa: BLE001
             return None
+    # 本地路径：只允许 AstrBot data 目录 / 系统临时目录下的文件
     if spec.startswith("file://"):
-        spec = spec[7:]
-    p = Path(spec)
+        return None
     try:
-        if p.is_file():
-            return p.read_bytes()[: 12 * 1024 * 1024]
+        import tempfile as _tempfile
+
+        rp = Path(spec).expanduser()
+        if not rp.is_file():
+            return None
+        rp.resolve()
+        allowed_roots = [ASTRBOT_ROOT / "data", Path(_tempfile.gettempdir())]
+        if not any(_safe_relative_to(rp, root) for root in allowed_roots):
+            return None
+        return rp.read_bytes()[: 12 * 1024 * 1024]
     except OSError:
-        pass
-    return None
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _safe_relative_to(path: Path, root: Path) -> bool:
+    """判断 path 是否在 root 目录内（含 root 本身）。"""
+    try:
+        p = path.resolve()
+        r = root.resolve()
+        return p == r or r in p.parents
+    except OSError:
+        return False
 
 
 def _to_jpeg(blob: bytes, max_side: int = 1600) -> bytes | None:
@@ -259,6 +304,8 @@ class Main(star.Star):
         self._qzone_client_obj = None
         self._qzone_client_ts = 0.0
         self._qzone_lock = asyncio.Lock()
+        # ★ 2026-11-19 修 H5：额度检查+预占必须原子
+        self._quota_lock = asyncio.Lock()
         self._register_apis()
 
     # ---------- 配置 ----------
@@ -392,29 +439,42 @@ class Main(star.Star):
         return True, ""
 
     # ---------- 频控 ----------
-    def _quota_reject(self, sender: str) -> str:
+    async def _quota_reserve(self, sender: str) -> str:
+        """原子「检查+预占」额度（并发调用不会超发）；返回空串=成功，否则=拒绝原因。"""
         lim = self._limits()
-        st = _state_load()
-        if int(st.get("total") or 0) >= lim["total"]:
-            return f"今天全站已经发了 {lim['total']} 条，明天再来吧"
-        used = int((st.get("users") or {}).get(sender) or 0)
-        if used >= lim["per_user"]:
-            return f"你今天已经发过 {lim['per_user']} 条了，明天再来吧"
-        gap = lim["gap_min"] * 60
-        last = float(st.get("last_ts") or 0.0)
-        if gap and last and time.time() - last < gap:
-            wait = int((gap - (time.time() - last)) // 60) + 1
-            return f"刚发过一条，等 {wait} 分钟再发"
-        return ""
+        async with self._quota_lock:
+            st = _state_load()
+            if int(st.get("total") or 0) >= lim["total"]:
+                return f"今天全站已经发了 {lim['total']} 条，明天再来吧"
+            used = int((st.get("users") or {}).get(sender) or 0)
+            if used >= lim["per_user"]:
+                return f"你今天已经发过 {lim['per_user']} 条了，明天再来吧"
+            gap = lim["gap_min"] * 60
+            last = float(st.get("last_ts") or 0.0)
+            if gap and last and time.time() - last < gap:
+                wait = int((gap - (time.time() - last)) // 60) + 1
+                return f"刚发过一条，等 {wait} 分钟再发"
+            st["total"] = int(st.get("total") or 0) + 1
+            users = st.get("users") or {}
+            users[str(sender)] = int(users.get(str(sender)) or 0) + 1
+            st["users"] = users
+            st["last_ts"] = time.time()
+            _state_save(st)
+            return ""
 
-    def _quota_record(self, sender: str) -> None:
-        st = _state_load()
-        st["total"] = int(st.get("total") or 0) + 1
-        users = st.get("users") or {}
-        users[str(sender)] = int(users.get(str(sender)) or 0) + 1
-        st["users"] = users
-        st["last_ts"] = time.time()
-        _state_save(st)
+    async def _quota_rollback(self, sender: str) -> None:
+        """发布/审核失败时归还预占的额度。"""
+        async with self._quota_lock:
+            st = _state_load()
+            st["total"] = max(0, int(st.get("total") or 0) - 1)
+            users = st.get("users") or {}
+            left = int(users.get(str(sender)) or 0) - 1
+            if left > 0:
+                users[str(sender)] = left
+            else:
+                users.pop(str(sender), None)
+            st["users"] = users
+            _state_save(st)
 
     # ---------- 工具 ----------
     @filter.llm_tool(name="qzone_publish")
@@ -495,55 +555,98 @@ class Main(star.Star):
                 return "发布失败：有一张配图读不出来（格式不支持）。"
             prepared.append(j)
 
-        provider = await self._audit_provider(event, umo)
-        if provider is None:
-            return "发布失败：没有可用的审核模型，不能发布。"
-        if lim["text_audit"]:
-            tv = await self._text_audit(provider, text)
-            if tv is False:
-                return "发布失败：正文未通过审核。"
-            if tv is None and lim["fail_close"]:
-                return "发布失败：正文审核判断不了（保守拒绝）。"
-        if prepared and lim["image_audit"]:
-            ok, why = await self._image_audit(provider, prepared)
-            if not ok:
-                return f"发布失败：{why}。"
-
-        _vis = str(visibility or "").strip().lower()
-        # QQ 空间网页接口 ugc_right 只接受 1/4/16/64/128：
-        #   1=所有人、4=好友、16=部分好友、64=仅自己、128=部分好友不可见
-        # ★ 2026-11-19：之前把好友写成 3（非法值）→ QzoneRequestError 参数错误
-        vis_val = {
-            "public": 1, "公开": 1, "": 1,
-            "friends": 4, "好友": 4,
-            "private": 64, "仅自己": 64, "自己": 64,
-        }.get(_vis, 1)
-        if vis_val not in (1, 4, 16, 64, 128):
-            vis_val = 1
-        reject = self._quota_reject(sender)
+        # ★ 2026-11-19 修 H5/M3：先原子预占额度，再做审核/发布；失败回滚（之前先审核再检查，
+        #   并发可击穿每天上限，且被限流的请求也会先跑完昂贵审核）。
+        reject = await self._quota_reserve(sender)
         if reject:
             return f"发布失败：{reject}。"
-
-        photos = [
-            {
-                "source": "base64://" + base64.b64encode(b).decode(),
-                "name": f"qzone_{i}.jpg",
-                "mime_type": "image/jpeg",
-            }
-            for i, b in enumerate(prepared)
-        ]
+        published = False
         try:
-            client = await self._qzone_client(event)
-            resp = await asyncio.wait_for(
-                client.publish_mood(text, photos=photos or None, ugc_right=vis_val),
-                timeout=150,
-            )
-        except Exception as exc:  # noqa: BLE001
-            detail = getattr(exc, "detail", None)
-            short = f"{type(exc).__name__}: {exc}"[:300]
-            if detail:
-                short += f" | detail={str(detail)[:260]}"
-            logger.warning(f"[qzone] 发布失败: {short}")
+            provider = await self._audit_provider(event, umo)
+            if provider is None:
+                return "发布失败：没有可用的审核模型，不能发布。"
+            if lim["text_audit"]:
+                tv = await self._text_audit(provider, text)
+                if tv is False:
+                    return "发布失败：正文未通过审核。"
+                if tv is None and lim["fail_close"]:
+                    return "发布失败：正文审核判断不了（保守拒绝）。"
+            if prepared and lim["image_audit"]:
+                ok, why = await self._image_audit(provider, prepared)
+                if not ok:
+                    return f"发布失败：{why}。"
+
+            _vis = str(visibility or "").strip().lower()
+            # QQ 空间网页接口 ugc_right 只接受 1/4/16/64/128：
+            #   1=所有人、4=好友、16=部分好友、64=仅自己、128=部分好友不可见
+            # ★ 2026-11-19：之前把好友写成 3（非法值）→ QzoneRequestError 参数错误
+            vis_val = {
+                "public": 1, "公开": 1, "": 1,
+                "friends": 4, "好友": 4,
+                "private": 64, "仅自己": 64, "自己": 64,
+            }.get(_vis, 1)
+            if vis_val not in (1, 4, 16, 64, 128):
+                vis_val = 1
+
+            photos = [
+                {
+                    "source": "base64://" + base64.b64encode(b).decode(),
+                    "name": f"qzone_{i}.jpg",
+                    "mime_type": "image/jpeg",
+                }
+                for i, b in enumerate(prepared)
+            ]
+            try:
+                client = await self._qzone_client(event)
+                resp = await asyncio.wait_for(
+                    client.publish_mood(text, photos=photos or None, ugc_right=vis_val),
+                    timeout=150,
+                )
+            except Exception as exc:  # noqa: BLE001
+                detail = getattr(exc, "detail", None)
+                short = f"{type(exc).__name__}: {exc}"[:300]
+                if detail:
+                    short += f" | detail={str(detail)[:260]}"
+                logger.warning(f"[qzone] 发布失败: {short}")
+                low = short.lower()
+                auth_failed = (
+                    "auth" in low or "cookie" in low or "登录" in short or "1401" in short
+                )
+                if auth_failed:
+                    # ★ 2026-11-19 修 M1：登录态失效时清掉客户端缓存，重登后立即生效
+                    self._qzone_client_obj = None
+                    self._qzone_client_ts = 0.0
+                _append_post(
+                    {
+                        "ts": time.time(),
+                        "umo": umo,
+                        "sender": sender,
+                        "content": text[:300],
+                        "images": len(prepared),
+                        "ok": False,
+                        "error": short,
+                    }
+                )
+                _posts_compact()
+                hint = (
+                    "（空间登录态失效：请重新登录 QQ 或更新 Cookie）"
+                    if auth_failed
+                    else ""
+                )
+                return f"发布失败：{short}{hint}"
+            tid = ""
+            if isinstance(resp, dict):
+                data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
+                for key in ("tid", "fid", "post_id"):
+                    if resp.get(key):
+                        tid = str(resp.get(key))
+                        break
+                if not tid:
+                    for key in ("tid", "fid"):
+                        if data.get(key):
+                            tid = str(data.get(key))
+                            break
+            published = True
             _append_post(
                 {
                     "ts": time.time(),
@@ -551,43 +654,30 @@ class Main(star.Star):
                     "sender": sender,
                     "content": text[:300],
                     "images": len(prepared),
-                    "ok": False,
-                    "error": short,
+                    "image_hashes": [_sha(b) for b in prepared],
+                    "ok": True,
+                    "tid": tid,
                 }
             )
-            hint = ""
-            low = short.lower()
-            if "auth" in low or "cookie" in low or "登录" in short or "1401" in short:
-                hint = "（空间登录态失效：请重新登录 QQ 或更新 Cookie）"
-            return f"发布失败：{short}{hint}"
-        tid = ""
-        if isinstance(resp, dict):
-            data = resp.get("data") if isinstance(resp.get("data"), dict) else {}
-            for key in ("tid", "fid", "post_id"):
-                if resp.get(key):
-                    tid = str(resp.get(key))
-                    break
-            if not tid:
-                for key in ("tid", "fid"):
-                    if data.get(key):
-                        tid = str(data.get(key))
-                        break
-        self._quota_record(sender)
-        _append_post(
-            {
-                "ts": time.time(),
-                "umo": umo,
-                "sender": sender,
-                "content": text[:300],
-                "images": len(prepared),
-                "image_hashes": [_sha(b) for b in prepared],
-                "ok": True,
-                "tid": tid,
-            }
-        )
-        _posts_compact()
-        logger.info(f"[qzone] 已发布说说 sender={sender} images={len(prepared)} tid={tid}")
-        return f"已发布到 QQ 空间（配图 {len(prepared)} 张）" + (f"，tid={tid}" if tid else "") + "。"
+            _posts_compact()
+            logger.info(f"[qzone] 已发布说说 sender={sender} images={len(prepared)} tid={tid}")
+            return f"已发布到 QQ 空间（配图 {len(prepared)} 张）" + (
+                f"，tid={tid}" if tid else ""
+            ) + "。"
+        finally:
+            if not published:
+                await self._quota_rollback(sender)
+
+    async def terminate(self) -> None:  # noqa: D401
+        """★ 2026-11-19：插件卸载/重载时关闭 qzone_bridge 的 httpx 连接池。"""
+        client = self._qzone_client_obj
+        self._qzone_client_obj = None
+        self._qzone_client_ts = 0.0
+        if client is not None:
+            try:
+                await client.close()
+            except Exception:  # noqa: BLE001
+                pass
 
     # ---------- Web API（页面） ----------
     def _register_apis(self) -> None:

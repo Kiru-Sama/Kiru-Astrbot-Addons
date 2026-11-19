@@ -352,11 +352,12 @@
     $("previewBox").textContent = "渲染中…（约 1~2 秒）";
     try {
       const r = await P.apiGet("/ncd-monitor/status-images", { preview: "1" });
-      const data = r && r.data && r.data.images && r.data.images[0];
+      // ★ 2026-11-19 修 H4：插件 API 返回裸业务 JSON（{ok,images}），不是 {data:{...}}
+      const data = r && r.images && r.images[0];
       if (data && data.b64) {
         $("previewBox").className = "preview";
         $("previewBox").innerHTML =
-          '<img alt="状态图预览" src="data:image/png;base64,' + data.b64 + '">';
+          '<img alt="状态图预览" src="data:image/jpeg;base64,' + data.b64 + '">';
       } else {
         $("previewBox").className = "empty";
         $("previewBox").textContent = "预览失败（看服务器日志）";

@@ -365,11 +365,14 @@ window.addEventListener("message", async (ev) => {
     let data;
     try { data = JSON.parse(text); } catch (e) { data = text; }
     if (!r.ok) throw new Error("HTTP " + r.status);
-    // ★ 与 AstrBot 官方父窗口行为一致：把 {status, message, data} 的业务 data 解包后再回给页面
-    //   （之前直接回整包，页面按 r.ok / r.settings 取都是 undefined → 数据显示不出来）
+    // ★ 2026-11-19 修 M2：AstrBot 业务错误是 HTTP 200 + {status:"error"}，官方父窗口会 throw；
+    //   之前这里当成功解包成空对象 → 页面显示空数据而不是报错。
+    if (data && typeof data === "object" && !Array.isArray(data) && data.status === "error") {
+      throw new Error(String(data.message || "插件接口返回错误"));
+    }
+    // ★ 与 AstrBot 官方父窗口一致：有 data 键就优先取内层（r.data.data ?? r.data）
     let payload = data;
     if (data && typeof data === "object" && !Array.isArray(data)
-        && Object.prototype.hasOwnProperty.call(data, "status")
         && Object.prototype.hasOwnProperty.call(data, "data")) {
       payload = data.data;
     }

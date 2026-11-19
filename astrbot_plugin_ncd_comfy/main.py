@@ -6450,9 +6450,18 @@ class NcdComfyPlugin(star.Star):
             return
 
         if is_force:
+            # ★ 2026-11-19 修 H2：私聊里不允许“强制全部”，否则任意用户可清空所有主动开关
+            if not self._is_group_chat(event):
+                yield event.plain_result(
+                    "强制开关只能在群里用；私聊里请直接 /主动回复 开 或 /主动回复 关。"
+                )
+                return
             self._proactive_guard_load()
-            cleared = len(self._proactive_guard)
-            self._proactive_guard.clear()
+            # 只清群级设置，保留私聊主动开关
+            group_keys = [k for k in self._proactive_guard if ":GroupMessage:" in str(k)]
+            cleared = len(group_keys)
+            for _k in group_keys:
+                self._proactive_guard.pop(_k, None)
             self._proactive_guard_save()
             logger.info(f"[comfy] 强制所有群主动发言 → {'开' if target else '关'}")
             yield event.plain_result(
@@ -6464,13 +6473,16 @@ class NcdComfyPlugin(star.Star):
 
         if not self._is_group_chat(event):
             self._proactive_guard_load()
-            self._proactive_guard[umo] = target
-            self._proactive_guard_save()
+            # ★ 2026-11-19 修 H3：先校验白名单，再落盘开关（之前先写 guard=True 再拒绝 → 绕过）
             if target and not self._proactive_private_allowed(event):
+                self._proactive_guard.pop(umo, None)
+                self._proactive_guard_save()
                 yield event.plain_result(
                     "私聊主动消息目前只对白名单开放；找 bot 管理员把你的 QQ 加进白名单。"
                 )
                 return
+            self._proactive_guard[umo] = target
+            self._proactive_guard_save()
             if target:
                 low, high, _dm, _sg = self._proactive_private_limits()
                 st = self._proactive_private.setdefault(umo, {})
@@ -6563,6 +6575,22 @@ class NcdComfyPlugin(star.Star):
             os.replace(tmp, path)
         except Exception as exc:  # noqa: BLE001
             logger.debug(f"[comfy] 主动发言状态保存失败: {exc}")
+
+    def _proactive_private_umo_allowed(self, umo: str) -> bool:
+        """按 umo 后缀 QQ 号复核私聊主动白名单（空名单=所有人）。"""
+        try:
+            raw = str(self._conf.get("comfy_proactive_private_whitelist") or "")
+            allowed = {
+                w.strip()
+                for w in raw.replace("，", ",").replace("\n", ",").split(",")
+                if w.strip()
+            }
+            if not allowed:
+                return True
+            qq = str(umo or "").rsplit(":", 1)[-1].strip()
+            return qq in allowed
+        except Exception:  # noqa: BLE001
+            return False
 
     # ---- 私聊主动消息 ----------------------------------------------------
     @staticmethod
@@ -6716,6 +6744,9 @@ class NcdComfyPlugin(star.Star):
             if ":FriendMessage:" not in str(umo):
                 continue
             if not self._proactive_enabled_for(umo):
+                continue
+            # ★ 2026-11-19 修 H3：tick 时复核白名单（白名单可能后来改了）
+            if not self._proactive_private_umo_allowed(umo):
                 continue
             st = self._proactive_private.setdefault(umo, {})
             if str(st.get("day") or "") != today:
@@ -7788,6 +7819,8 @@ class NcdComfyPlugin(star.Star):
         force: bool = False,
     ) -> str:
         """按预设工作流画一张图并发到当前会话。★ 必须先调用 comfy_tools。
+        # ★ 2026-11-19 修 M7：每次工具调用重置模板名上下文，避免沿用上一次
+        _STYLE_NAMES.set(())
 
         ★ 写 prompt 前先查：
           · 角色/标签/皮肤/衣服 → comfy_tag_lookup(scope=character/profile/tag)
