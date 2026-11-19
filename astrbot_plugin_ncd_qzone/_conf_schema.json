@@ -58,5 +58,35 @@
     "description": "审核用 provider id",
     "hint": "留空 = 用当前会话模型；建议填一个支持读图的 provider。",
     "default": ""
+  },
+  "qzone_comment_watch": {
+    "type": "bool",
+    "description": "空间评论关注：自己的说说收到评论后，1 小时后自动统一回复",
+    "hint": "开（默认）：后台每 N 分钟看一次自己最近的说说；某条说说出现第一条评论后等 1 小时，再让模型看评论、写一条统一回复，发在你自己这条说说下面。每条说说只自动回一次。关掉即停止。",
+    "default": true
+  },
+  "qzone_comment_poll_minutes": {
+    "type": "int",
+    "description": "评论关注轮询间隔（分钟）",
+    "hint": "默认 10 分钟。低频只读，避免空间风控。",
+    "default": 10
+  },
+  "qzone_comment_delay_minutes": {
+    "type": "int",
+    "description": "首条评论后等多久再统一回复（分钟）",
+    "hint": "默认 60 分钟。从检测到第一条评论（或评论时间戳）开始计时。",
+    "default": 60
+  },
+  "qzone_comment_watch_posts": {
+    "type": "int",
+    "description": "每次检查最近几条说说",
+    "hint": "默认 10 条，上限 30。",
+    "default": 10
+  },
+  "qzone_comment_reply_chars": {
+    "type": "int",
+    "description": "自动回复评论的字数上限",
+    "hint": "默认 200 字。",
+    "default": 200
   }
 }

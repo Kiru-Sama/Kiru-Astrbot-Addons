@@ -40,6 +40,7 @@ POSTS_FILE = DATA_DIR / "posts.jsonl"
 CONFIG_FILE = ASTRBOT_ROOT / "data" / "config" / f"{PLUGIN_DIR_NAME}_config.json"
 
 MAX_RECORDS = 500
+COMMENT_WATCH_FILE = DATA_DIR / "comment_watch.json"
 # QQ 空间说说禁止词粗筛（模型审核之外的最后一道线）
 BANNED_HINTS = (
     "习近平", "共产党", "政治", "六四", "台独", "港独", "法轮功", "皇军", "靖国神社",
@@ -56,7 +57,12 @@ try:
     from qzone_bridge.client import QzoneClient  # noqa: E402
     from qzone_bridge.models import SessionState  # noqa: E402
     from qzone_bridge.onebot_cookie import fetch_cookie_text, fetch_login_uin  # noqa: E402
-    from qzone_bridge.parser import parse_cookie_text  # noqa: E402
+    from qzone_bridge.parser import (  # noqa: E402
+        extract_feed_page,
+        parse_cookie_text,
+        unwrap_payload,
+    )
+    from qzone_bridge.social import extract_comments  # noqa: E402
 
     QZONE_BRIDGE_OK = True
     QZONE_BRIDGE_ERR = ""
@@ -152,6 +158,24 @@ def _posts_compact() -> None:
         tmp.replace(POSTS_FILE)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _watch_state_load() -> dict:
+    try:
+        data = json.loads(COMMENT_WATCH_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _watch_state_save(state: dict) -> None:
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = COMMENT_WATCH_FILE.with_name(COMMENT_WATCH_FILE.name + ".tmp")
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(COMMENT_WATCH_FILE)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"[qzone] 评论关注状态保存失败: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +330,8 @@ class Main(star.Star):
         self._qzone_lock = asyncio.Lock()
         # ★ 2026-11-19 修 H5：额度检查+预占必须原子
         self._quota_lock = asyncio.Lock()
+        # ★ 2026-11-19：空间评论关注后台任务
+        self._comment_watch_task = None
         self._register_apis()
 
     # ---------- 配置 ----------
@@ -341,17 +367,16 @@ class Main(star.Star):
             return False, f"发布引擎不可用（qzone_bridge 导入失败：{QZONE_BRIDGE_ERR[:200]}）"
         return True, ""
 
-    async def _qzone_client(self, event: AstrMessageEvent):
-        """取/复用 qzone_bridge 客户端：OneBot get_cookies → QzoneClient。"""
+    async def _make_qzone_client(self, bot):
+        """用指定协议端 bot 的 Cookie 创建/复用 QzoneClient。"""
         if not QZONE_BRIDGE_OK:
             raise RuntimeError(f"qzone_bridge 未就绪: {QZONE_BRIDGE_ERR}")
+        if bot is None:
+            raise RuntimeError("找不到协议端 bot，无法获取空间 Cookie")
         async with self._qzone_lock:
             now = time.time()
             if self._qzone_client_obj is not None and now - self._qzone_client_ts < 900:
                 return self._qzone_client_obj
-            bot = getattr(event, "bot", None)
-            if bot is None:
-                raise RuntimeError("找不到协议端 bot，无法获取空间 Cookie")
             domain = str(self._conf.get("qzone_cookie_domain") or "qzone.qq.com")
             cookie_text = await fetch_cookie_text(bot, domain=domain)
             cookies = parse_cookie_text(cookie_text or "")
@@ -365,8 +390,12 @@ class Main(star.Star):
             client = QzoneClient(SessionState(uin=uin, cookies=cookies, source="onebot"))
             self._qzone_client_obj = client
             self._qzone_client_ts = now
-            logger.info(f"[qzone] 发布引擎就绪 uin={uin} cookies={len(cookies)}")
+            logger.info(f"[qzone] 空间客户端就绪 uin={uin} cookies={len(cookies)}")
             return client
+
+    async def _qzone_client(self, event: AstrMessageEvent):
+        """取/复用 qzone_bridge 客户端：OneBot get_cookies → QzoneClient。"""
+        return await self._make_qzone_client(getattr(event, "bot", None))
 
 
     # ---------- 好友 ----------
@@ -669,7 +698,17 @@ class Main(star.Star):
                 await self._quota_rollback(sender)
 
     async def terminate(self) -> None:  # noqa: D401
-        """★ 2026-11-19：插件卸载/重载时关闭 qzone_bridge 的 httpx 连接池。"""
+        """★ 2026-11-19：插件卸载/重载时停止评论关注任务并关闭连接池。"""
+        task = self._comment_watch_task
+        self._comment_watch_task = None
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[qzone] 评论关注任务收尾异常: {exc}")
         client = self._qzone_client_obj
         self._qzone_client_obj = None
         self._qzone_client_ts = 0.0
@@ -679,6 +718,283 @@ class Main(star.Star):
             except Exception:  # noqa: BLE001
                 pass
 
+    # ---------- 空间评论关注 ----------
+    async def initialize(self) -> None:
+        """插件启用后启动评论关注后台任务（开关在配置里）。"""
+        try:
+            if not self._c_bool("qzone_comment_watch", True):
+                logger.info("[qzone] 评论关注已关闭（qzone_comment_watch=false）")
+                return
+            if self._comment_watch_task is None or self._comment_watch_task.done():
+                self._comment_watch_task = asyncio.create_task(self._comment_watch_loop())
+                logger.info("[qzone] 评论关注任务已启动")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[qzone] 启动评论关注任务失败: {exc}")
+
+    def _comment_watch_limits(self) -> dict:
+        return {
+            "enabled": self._c_bool("qzone_comment_watch", True),
+            "poll_min": max(1, self._c_int("qzone_comment_poll_minutes", 10)),
+            "delay_min": max(1, self._c_int("qzone_comment_delay_minutes", 60)),
+            "posts": max(1, min(30, self._c_int("qzone_comment_watch_posts", 10))),
+            "reply_chars": max(50, min(1000, self._c_int("qzone_comment_reply_chars", 200))),
+            "fail_close": self._c_bool("qzone_audit_fail_close", True),
+        }
+
+    def _get_platform_bot(self):
+        try:
+            for inst in self.context.platform_manager.get_insts():
+                bot = getattr(inst, "bot", None)
+                if bot is not None and hasattr(bot, "call_action"):
+                    return bot
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    async def _comment_watch_loop(self) -> None:
+        await asyncio.sleep(60)  # 启动后先缓一分钟，避开插件重载高峰
+        while True:
+            try:
+                await self._comment_watch_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[qzone] 评论关注轮询失败: {type(exc).__name__}: {exc}")
+            try:
+                await asyncio.sleep(self._comment_watch_limits()["poll_min"] * 60)
+            except asyncio.CancelledError:
+                raise
+
+    async def _comment_watch_tick(self) -> None:
+        """拉最近说说，记录首评时间；到点后自动统一回复一条评论。"""
+        lim = self._comment_watch_limits()
+        if not lim["enabled"]:
+            return
+        bot = self._get_platform_bot()
+        if bot is None:
+            return
+        client = await self._make_qzone_client(bot)
+        login_uin = int(client.login_uin or 0)
+        payload = await client.legacy_feeds(login_uin, page=1, num=lim["posts"])
+        page = unwrap_payload(payload)
+        _feedpage, entries = extract_feed_page(page, default_hostuin=login_uin)
+        state = _watch_state_load()
+        now = time.time()
+        changed = False
+        candidates = []
+        for entry in entries:
+            try:
+                if int(entry.hostuin or 0) != login_uin:
+                    continue
+                fid = str(entry.fid or "")
+                if not fid:
+                    continue
+                info = state.get(fid) or {}
+                comments = []
+                try:
+                    comments = extract_comments(entry.raw or {})
+                except Exception:  # noqa: BLE001
+                    comments = []
+                count = int(entry.comment_count or 0) or len(comments)
+                if count <= 0:
+                    continue
+                # 首评时间：有评论时间戳就用最早的，否则用本次发现时间
+                first_ts = float(info.get("first_ts") or 0.0)
+                if not first_ts:
+                    stamps = []
+                    for c in comments:
+                        ts = int(getattr(c, "created_at", 0) or 0)
+                        if ts > 10**12:
+                            ts = ts // 1000
+                        if ts > 0:
+                            stamps.append(ts)
+                    first_ts = min(stamps) if stamps else now
+                    changed = True
+                info.update(
+                    {
+                        "first_ts": first_ts,
+                        "last_count": count,
+                        "summary": (entry.summary or "")[:200],
+                        "hostuin": int(entry.hostuin or 0),
+                        "appid": int(entry.appid or 311),
+                        "busi_param": entry.busi_param or {},
+                        "last_seen": now,
+                    }
+                )
+                state[fid] = info
+                if info.get("replied_ts"):
+                    continue
+                if now - first_ts >= lim["delay_min"] * 60:
+                    candidates.append((entry, info, comments))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug(f"[qzone] 单条说说评论检查失败: {exc}")
+                continue
+        if changed:
+            _watch_state_save(state)
+        if not candidates:
+            return
+        entry, info, comments = candidates[0]  # 每轮最多回一条，防风控
+        # 拉详情拿完整评论
+        if not comments:
+            try:
+                detail = await client.legacy_detail(
+                    int(entry.hostuin), entry.fid, num=30
+                )
+                comments = extract_comments(detail if isinstance(detail, dict) else {})
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"[qzone] 拉评论详情失败: {type(exc).__name__}: {exc}")
+        reply = await self._comment_watch_reply(
+            str(info.get("summary") or entry.summary or ""), comments, lim["reply_chars"]
+        )
+        if not reply:
+            logger.info(f"[qzone] 评论关注：{entry.fid} 生成回复为空，跳过")
+            return
+        provider = await self._audit_provider(None, "") if False else None
+        provider = await self._get_provider_for_watch()
+        if provider is not None and self._c_bool("qzone_text_audit", True):
+            verdict = await self._text_audit(provider, reply)
+            if verdict is False or (verdict is None and lim["fail_close"]):
+                logger.warning(f"[qzone] 评论关注：回复未过审，跳过 {entry.fid}")
+                info["skip_audit_ts"] = now
+                state[entry.fid] = info
+                _watch_state_save(state)
+                return
+        try:
+            await client.add_comment(
+                int(entry.hostuin),
+                entry.fid,
+                reply,
+                appid=int(entry.appid or 311),
+                busi_param=entry.busi_param or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[qzone] 评论关注：发表评论失败 {type(exc).__name__}: {exc}")
+            _append_post(
+                {
+                    "ts": now,
+                    "umo": "",
+                    "sender": "",
+                    "kind": "auto_comment_reply",
+                    "content": reply[:300],
+                    "images": 0,
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {exc}"[:300],
+                    "tid": entry.fid,
+                }
+            )
+            return
+        info["replied_ts"] = now
+        info["reply"] = reply[:500]
+        info["comment_count_at_reply"] = int(info.get("last_count") or 0)
+        state[entry.fid] = info
+        _watch_state_save(state)
+        _append_post(
+            {
+                "ts": now,
+                "umo": "",
+                "sender": "",
+                "kind": "auto_comment_reply",
+                "content": reply[:300],
+                "images": 0,
+                "ok": True,
+                "tid": entry.fid,
+                "comment_count": int(info.get("last_count") or 0),
+            }
+        )
+        _posts_compact()
+        logger.info(
+            f"[qzone] 评论关注：已在自己说说 {entry.fid} 下统一回复（{len(comments)} 条评论）"
+        )
+
+    async def _get_provider_for_watch(self):
+        try:
+            provider = await self.context.get_using_provider_async("")
+            if provider is not None:
+                return provider
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            pm = getattr(self.context, "provider_manager", None)
+            for cand in getattr(pm, "provider_insts", []) or []:
+                cfg = getattr(cand, "provider_config", {}) or {}
+                if isinstance(cfg, dict) and cfg.get("enable"):
+                    return cand
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    async def _comment_watch_reply(self, summary: str, comments: list, max_chars: int) -> str:
+        """让模型看评论写一条统一回复。"""
+        provider = await self._get_provider_for_watch()
+        if provider is None:
+            return ""
+        lines = []
+        for comment in (comments or [])[:30]:
+            text = str(getattr(comment, "content", "") or "").strip().replace("\n", " ")
+            name = str(getattr(comment, "nickname", "") or "访客").strip()
+            if text:
+                lines.append(f"{name}：{text[:120]}")
+        comment_text = "\n".join(lines) if lines else "（评论内容未取到，只按条数回复）"
+        prompt = (
+            "你在 QQ 空间发了一条说说，朋友们在下面评论了。现在用你自己的语气写一条统一回复，"
+            "发在你自己这条说说下面：自然、简短、回应大家的主要评论，不要提 AI 或系统，"
+            "不要透露隐私，不要包含 NSFW/政治/伦理/暴力内容。\n"
+            f"总字数不超过 {max_chars} 字，只输出回复正文。\n\n"
+            f"说说内容：{str(summary or '')[:300]}\n\n"
+            f"评论：\n{comment_text}"
+        )
+        try:
+            resp = await asyncio.wait_for(provider.text_chat(prompt=prompt), timeout=60)
+            text = str(getattr(resp, "completion_text", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"[qzone] 评论关注：生成回复失败 {type(exc).__name__}: {exc}")
+            return ""
+        text = text.strip().strip('"').strip("“”").strip()
+        text = "\n".join(line for line in text.splitlines() if line.strip())
+        return text[:max_chars]
+
+    async def api_comment_watch_probe(self, **kwargs):
+        """只读探测：拉最近说说与评论状态，验证评论关注链路。"""
+        lim = self._comment_watch_limits()
+        bot = self._get_platform_bot()
+        if bot is None:
+            return json_response({"ok": False, "error": "没有可用的协议端 bot"})
+        try:
+            client = await self._make_qzone_client(bot)
+            login_uin = int(client.login_uin or 0)
+            payload = await client.legacy_feeds(login_uin, page=1, num=lim["posts"])
+            page = unwrap_payload(payload)
+            _feedpage, entries = extract_feed_page(page, default_hostuin=login_uin)
+        except Exception as exc:  # noqa: BLE001
+            return json_response(
+                {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+            )
+        state = _watch_state_load()
+        rows = []
+        for entry in entries[: lim["posts"]]:
+            fid = str(entry.fid or "")
+            info = state.get(fid) or {}
+            comments = []
+            try:
+                comments = extract_comments(entry.raw or {})
+            except Exception:  # noqa: BLE001
+                comments = []
+            rows.append(
+                {
+                    "fid": fid,
+                    "hostuin": int(entry.hostuin or 0),
+                    "summary": (entry.summary or "")[:80],
+                    "comment_count": int(entry.comment_count or 0),
+                    "comments_parsed": len(comments),
+                    "first_ts": info.get("first_ts"),
+                    "replied": bool(info.get("replied_ts")),
+                    "created_at": int(entry.created_at or 0),
+                }
+            )
+        return json_response(
+            {"ok": True, "uin": login_uin, "limits": lim, "posts": rows}
+        )
+
     # ---------- Web API（页面） ----------
     def _register_apis(self) -> None:
         apis = (
@@ -687,6 +1003,7 @@ class Main(star.Star):
             ("records-clear", self.api_records_clear, ["POST"], "QQ空间：清空发布记录"),
             ("probe", self.api_probe, ["GET"], "QQ空间：探测协议端支持的动作（只读）"),
             ("vision-test", self.api_vision_test, ["GET"], "QQ空间：测试当前模型能否读图审核"),
+            ("comment-watch/probe", self.api_comment_watch_probe, ["GET"], "QQ空间：评论关注探测（只读）"),
         )
         for name, handler, methods, desc in apis:
             try:
@@ -801,6 +1118,11 @@ class Main(star.Star):
             "qzone_audit_fail_close": True,
             "qzone_audit_provider": "",
             "qzone_cookie_domain": "qzone.qq.com",
+            "qzone_comment_watch": True,
+            "qzone_comment_poll_minutes": 10,
+            "qzone_comment_delay_minutes": 60,
+            "qzone_comment_watch_posts": 10,
+            "qzone_comment_reply_chars": 200,
         }
 
     async def api_config(self, **kwargs):

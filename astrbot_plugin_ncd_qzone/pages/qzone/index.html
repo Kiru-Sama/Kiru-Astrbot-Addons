@@ -108,6 +108,11 @@
     ["qzone_image_audit", "配图审核", "bool"],
     ["qzone_audit_fail_close", "审核不了就拒绝", "bool"],
     ["qzone_audit_provider", "审核 provider id（留空=当前模型）", "text"],
+    ["qzone_comment_watch", "空间评论关注（自动回复）", "bool"],
+    ["qzone_comment_poll_minutes", "评论轮询间隔（分钟）", "number"],
+    ["qzone_comment_delay_minutes", "首评后延迟自动回复（分钟）", "number"],
+    ["qzone_comment_watch_posts", "检查最近几条说说", "number"],
+    ["qzone_comment_reply_chars", "自动回复字数上限", "number"],
   ];
 
   function msg(el, text, ok) {
