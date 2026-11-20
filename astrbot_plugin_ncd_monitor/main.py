@@ -4711,16 +4711,29 @@ class Main(star.Star):
         try:
             cfg = self.context.get_config()
             settings = cfg.get("provider_settings", {}) or {}
+            # ★ 2026-11-20：显示“实际默认模型”（agent_runner 指定优先），而不是列表里第一个启用的
+            default_model = (
+                (cfg.get("agent_runner", {}) or {}).get("config", {}) or {}
+            ).get("model", {}) or {}
+            provider_id = str(default_model.get("provider_id") or "").strip()
             provider_cfg = None
-            for p in cfg.get("provider", []) or []:
-                if p.get("enable"):
-                    provider_cfg = p
-                    break
+            if provider_id:
+                for p in cfg.get("provider", []) or []:
+                    if str(p.get("id") or "") == provider_id:
+                        provider_cfg = p
+                        break
+            if provider_cfg is None:
+                for p in cfg.get("provider", []) or []:
+                    if p.get("enable"):
+                        provider_cfg = p
+                        break
             if provider_cfg:
                 info["model"] = provider_cfg.get("id")
                 info["max_context_tokens"] = provider_cfg.get("max_context_tokens")
                 info["modalities"] = provider_cfg.get("modalities")
                 info["custom_extra_body"] = provider_cfg.get("custom_extra_body")
+            info["model_primary"] = provider_id or (provider_cfg or {}).get("id")
+            info["model_fallbacks"] = default_model.get("fallback_provider_ids") or []
 
             compression = (
                 cfg.get("agent_runner", {}).get("config", {}).get("compression", {})

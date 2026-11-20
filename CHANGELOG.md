@@ -1,3 +1,9 @@
+## 2026-11-20 深夜 · 济川AI 接入 + monitor 默认模型显示修正
+
+- 新增第三方 provider「济川AI」（source_id=jichuan，openai_chat_completion，api_base=https://api.jichuanai.com/v1，模型 deepseek-v4.1-flash-1017，modalities text/image/tool_use，max_context_tokens 128k）。
+- 默认模型切为 jichuan/deepseek-v4.1-flash-1017，fallback 保留 deepseek/deepseek-flash；chat/tool_use/vision 实测通过，provider test 返回 available。
+- monitor 1.7.89：_astrbot_info 优先显示 agent_runner 默认模型（之前只显示 provider 列表第一个），health/状态图不再误显示旧模型。
+
 ## 2026-11-20 · monitor 1.7.88：LLM API 余额接入
 
 - 状态查询新增 LLM 余额：从 AstrBot provider/provider_sources 读 DeepSeek api_base+key，调官方 /user/balance，5 分钟缓存；
