@@ -800,8 +800,14 @@ class Main(star.Star):
                 ["GET"],
                 "状态图背景：缩略图预览（base64）",
             )
+            self.context.register_web_api(
+                f"/{PLUGIN_DIR_NAME}/ncd-monitor/health",
+                self.api_health,
+                ["GET"],
+                "API/服务状态查询（ComfyUI/电脑/手机/AstrBot/最近错误）",
+            )
             logger.info(
-                f"[ncd-monitor] 已注册 23 个 Web API，路由前缀 /{PLUGIN_DIR_NAME}/ncd-monitor/"
+                f"[ncd-monitor] 已注册 24 个 Web API，路由前缀 /{PLUGIN_DIR_NAME}/ncd-monitor/"
             )
         except Exception as exc:  # noqa: BLE001
             logger.error(f"[ncd-monitor] 注册 Web API 失败: {exc}")
@@ -5991,6 +5997,296 @@ class Main(star.Star):
     # ================================================================== #
     #  /设备状态 的图片版：模型/AstrBot、宿主机资源、近 7 天
     # ================================================================== #
+    # ------------------------------------------------------------------
+    #  API / 服务状态查询（LLM 工具 + /api状态 指令 + Web API）
+    # ------------------------------------------------------------------
+    def _read_recent_errors(self, limit: int = 5) -> list[str]:
+        """读 AstrBot 日志尾部，挑最近几条 ERROR/Traceback（只读尾部，不整文件加载）。"""
+        path = os.path.join(ASTRBOT_ROOT, "data", "logs", "astrbot.log")
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                size = fh.tell()
+                fh.seek(max(0, size - 128 * 1024))
+                raw = fh.read().decode("utf-8", "replace")
+        except OSError:
+            return []
+        hits: list[str] = []
+        for line in reversed(raw.splitlines()):
+            s = line.strip()
+            if not s:
+                continue
+            is_err = (
+                " [ERROR] " in s or " [CRITICAL] " in s or "Traceback" in s
+                or re.search(r"(?:^|[^A-Za-z])(?:Error|Exception): ", s) is not None
+            )
+            # WARN 行不进「错误」列表，除非它真的带堆栈/异常
+            if is_err and (" [WARN] " not in s or "Traceback" in s):
+                hits.append(s[:220])
+                if len(hits) >= limit:
+                    break
+        return list(reversed(hits))
+
+    async def _api_status_snapshot(self, scope: str = "all") -> dict:
+        """汇总各 API / 服务状态；scope=all 或逗号分隔（comfy,pc,phone,astrbot,errors）。"""
+        scope = str(scope or "all").strip().lower()
+        want = {s.strip() for s in scope.replace("，", ",").split(",") if s.strip()}
+        if not want or "all" in want or "auto" in want:
+            want = {"comfy", "pc", "phone", "astrbot", "errors"}
+        now = time.time()
+        snap: dict = {"now": time.strftime("%Y-%m-%d %H:%M:%S"), "scope": sorted(want)}
+
+        if "comfy" in want:
+            state = self._comfy_state() or {}
+            st = state.get("status") or {}
+            link = state.get("link") or {}
+            recent = state.get("recent") or []
+            ts = float(state.get("ts") or 0.0)
+            last = recent[-1] if recent else {}
+            snap["comfy"] = {
+                "state_age_s": round(now - ts) if ts else None,
+                "running": bool(st.get("running")),
+                "model": st.get("model") or "",
+                "preset": st.get("preset") or "",
+                "queue_running": int(st.get("queue_running") or 0),
+                "queue_pending": int(st.get("queue_pending") or 0),
+                "host": link.get("host") or "",
+                "port": int(link.get("port") or 0),
+                "recent": len(recent),
+                "last_ok": last.get("ok"),
+                "last_age_s": (round(now - float(last.get("ts"))) if last.get("ts") else None),
+                "quota": state.get("quota_summary") or {},
+            }
+
+        if "pc" in want:
+            info = self._pc_sysinfo
+            age = (now - self._pc_sysinfo_at) if self._pc_sysinfo_at else None
+            if not info or age is None or age > 20:
+                try:
+                    info = await asyncio.to_thread(self._fetch_pc_sysinfo)
+                except Exception:  # noqa: BLE001
+                    info = None
+                age = (now - self._pc_sysinfo_at) if self._pc_sysinfo_at else None
+            pc: dict = {"ok": bool(info), "age_s": round(age) if age is not None else None}
+            if info:
+                gpu = info.get("gpu") or {}
+                pc.update(
+                    {
+                        "cpu": info.get("cpu"),
+                        "cpu_temp": info.get("cpu_temp"),
+                        "ram_pct": info.get("ram_pct"),
+                        "ram_used_gb": info.get("ram_used_gb"),
+                        "ram_total_gb": info.get("ram_total_gb"),
+                        "gpu": {
+                            "name": gpu.get("name") or "",
+                            "util": gpu.get("util"),
+                            "mem_used_mb": gpu.get("mem_used_mb"),
+                            "mem_total_mb": gpu.get("mem_total_mb"),
+                            "temp": gpu.get("temp"),
+                        } if gpu else {},
+                    }
+                )
+            snap["pc"] = pc
+
+        if "phone" in want:
+            phone: dict = {}
+            try:
+                info = self._system_info()
+                phone["cpu"] = (info.get("cpu") or {}).get("percent")
+                phone["mem"] = (info.get("memory") or {}).get("percent")
+                phone["mem_used_gb"] = (info.get("memory") or {}).get("used_gb")
+                phone["mem_total_gb"] = (info.get("memory") or {}).get("total_gb")
+            except Exception:  # noqa: BLE001
+                pass
+            therm = _thermal_snapshot()
+            phone["soc_temp"] = therm.get("cpu")
+            phone["battery_temp"] = therm.get("battery")
+            phone["shell_temp"] = therm.get("shell")
+            try:
+                phone["uptime_s"] = int(now - self.started_at)
+            except Exception:  # noqa: BLE001
+                phone["uptime_s"] = None
+            snap["phone"] = phone
+
+        if "astrbot" in want:
+            ab: dict = {}
+            try:
+                info = self._astrbot_info()
+                ab["model"] = info.get("model")
+                ab["max_context_tokens"] = info.get("max_context_tokens")
+                ab["compression"] = info.get("compression_config")
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                plugins_dir = Path(ASTRBOT_ROOT) / "data" / "plugins"
+                ab["plugins"] = sum(
+                    1 for d in plugins_dir.iterdir()
+                    if d.is_dir() and (d / "metadata.yaml").is_file()
+                )
+            except Exception:  # noqa: BLE001
+                ab["plugins"] = None
+            try:
+                from astrbot.core.star import command_management
+
+                cmds = await command_management.list_commands()
+                ab["commands"] = len(cmds or [])
+            except Exception:  # noqa: BLE001
+                ab["commands"] = None
+            snap["astrbot"] = ab
+
+        if "errors" in want:
+            snap["errors"] = self._read_recent_errors(5)
+
+        return snap
+
+    @staticmethod
+    def _api_status_text(snap: dict) -> str:
+        """把状态快照渲染成给模型/聊天的中文短文本。"""
+        now = snap.get("now") or time.strftime("%H:%M:%S")
+        lines = [f"📊 API/服务状态（{now}）"]
+
+        comfy = snap.get("comfy")
+        if comfy is not None:
+            age = comfy.get("state_age_s")
+            if age is None:
+                lines.append("· ComfyUI：没收到任何状态（comfy 插件可能没在跑）")
+            else:
+                q = f"队列 运行{comfy.get('queue_running', 0)}/等待{comfy.get('queue_pending', 0)}"
+                extra = f"，模型 {comfy.get('model')}" if comfy.get("model") else ""
+                last = ""
+                if comfy.get("last_age_s") is not None:
+                    last = f"，最近任务 {comfy['last_age_s']} 秒前{'成功' if comfy.get('last_ok') else '失败'}"
+                lines.append(
+                    f"· ComfyUI：{'运行中' if comfy.get('running') else '空闲'}"
+                    f"（{comfy.get('host') or '?'}:{comfy.get('port') or '?'}，{q}{extra}{last}；"
+                    f"状态 {age} 秒前更新）"
+                )
+                quota = comfy.get("quota") or {}
+                if quota:
+                    lines.append(
+                        f"· 出图额度：私聊 {quota.get('private_count', 0)}/{quota.get('private_limit', 0)}"
+                        f"，群聊累计 {quota.get('group_count', 0)}，累计出图 {quota.get('total_images', 0)} 张"
+                        + ("（私聊额度已触发限流）" if quota.get("private_triggered") else "")
+                    )
+
+        pc = snap.get("pc")
+        if pc is not None:
+            if not pc.get("ok"):
+                lines.append("· 电脑 linkd：连不上（手机可能没连电脑热点）")
+            else:
+                parts = []
+                if pc.get("cpu") is not None:
+                    parts.append(f"CPU {pc['cpu']}%")
+                if pc.get("ram_pct") is not None:
+                    parts.append(f"内存 {pc['ram_pct']}%（{pc.get('ram_used_gb')}/{pc.get('ram_total_gb')}GB）")
+                gpu = pc.get("gpu") or {}
+                if gpu:
+                    g = f"GPU {gpu.get('util')}%" if gpu.get("util") is not None else "GPU"
+                    if gpu.get("temp") is not None:
+                        g += f" {gpu['temp']}°C"
+                    if gpu.get("mem_used_mb") and gpu.get("mem_total_mb"):
+                        g += f" 显存 {int(gpu['mem_used_mb'])}/{int(gpu['mem_total_mb'])}MB"
+                    parts.append(g)
+                if pc.get("cpu_temp") is not None:
+                    parts.append(f"CPU温度 {pc['cpu_temp']}°C")
+                lines.append("· 电脑 linkd：在线（" + "，".join(parts) + "）")
+
+        phone = snap.get("phone")
+        if phone is not None:
+            parts = []
+            if phone.get("cpu") is not None:
+                parts.append(f"CPU {phone['cpu']}%")
+            if phone.get("mem") is not None:
+                parts.append(f"内存 {phone['mem']}%")
+            if phone.get("soc_temp") is not None:
+                parts.append(f"SoC {phone['soc_temp']}°C")
+            if phone.get("battery_temp") is not None:
+                parts.append(f"电池 {phone['battery_temp']}°C")
+            if phone.get("uptime_s"):
+                up = int(phone["uptime_s"])
+                parts.append(f"监控已跑 {up // 3600} 小时 {up % 3600 // 60} 分")
+            lines.append("· 手机：(" + "，".join(parts) + ")")
+
+        ab = snap.get("astrbot")
+        if ab is not None:
+            bits = []
+            if ab.get("model"):
+                bits.append(str(ab["model"]))
+            if ab.get("commands") is not None:
+                bits.append(f"命令 {ab['commands']} 条")
+            if ab.get("plugins") is not None:
+                bits.append(f"插件 {ab['plugins']} 个")
+            lines.append("· AstrBot：" + ("、".join(bits) if bits else "运行中"))
+
+        errs = snap.get("errors")
+        if errs is not None:
+            if errs:
+                lines.append("· 最近错误：")
+                for e in errs[-3:]:
+                    lines.append("  " + e)
+            else:
+                lines.append("· 最近错误：无")
+
+        lines.append("（数据来自 AstrBot 总线与实时探测；要更细可以看面板「监控面板」）")
+        return "\n".join(lines)
+
+    async def _api_status_for_event(self, event, scope: str) -> str:
+        snap = await self._api_status_snapshot(scope)
+        return self._api_status_text(snap)
+
+    @filter.llm_tool(name="ncd_api_status")
+    async def ncd_api_status(self, event: AstrMessageEvent, scope: str = "all") -> str:
+        """查 API/服务运行状态（ComfyUI 在不在、队列、电脑资源、手机资源、AstrBot 与最近错误）。
+
+        ★ 用户问「怎么出不了图 / 服务是不是挂了 / 卡不卡 / 电脑还连着吗 / API 正常吗 /
+        有没有报错」时，先调用本工具再回答，不要凭上下文猜。
+        scope: all（默认）/ comfy / pc / phone / astrbot / errors，可逗号组合。
+        """
+        try:
+            return await self._api_status_for_event(event, scope or "all")
+        except Exception as exc:  # noqa: BLE001
+            return f"状态查询失败：{type(exc).__name__}: {exc}"
+
+    @filter.command("api状态", alias={"服务状态", "链路状态", "健康检查"})
+    async def api_status_cmd(self, event: AstrMessageEvent, scope: str = ""):
+        """查 API/服务状态：/api状态 [all|comfy|pc|phone|astrbot]"""
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        now = time.time()
+        cd = getattr(self, "_api_status_cd", None)
+        if cd is None:
+            cd = {}
+            self._api_status_cd = cd
+        if now - float(cd.get(umo) or 0) < 20:
+            yield event.plain_result("刚查过啦，20 秒后再看～")
+            return
+        cd[umo] = now
+        if len(cd) > 300:
+            for k in list(cd)[:150]:
+                cd.pop(k, None)
+        try:
+            text = await self._api_status_for_event(event, str(scope or "all").strip())
+        except Exception as exc:  # noqa: BLE001
+            yield event.plain_result(f"状态查询失败：{type(exc).__name__}: {exc}")
+            return
+        yield event.plain_result(text)
+
+    async def api_health(self, **kwargs):
+        """Web API：返回 API/服务状态 JSON（供面板/测试）。"""
+        scope = "all"
+        try:
+            from astrbot.api.web import request as _req
+
+            qp = getattr(_req, "query", None)
+            if qp is not None:
+                scope = str(qp.get("scope") or "all")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            snap = await self._api_status_snapshot(scope)
+        except Exception as exc:  # noqa: BLE001
+            return json_response({"ok": False, "error": f"{type(exc).__name__}: {exc}"[:300]})
+        return json_response({"ok": True, "snapshot": snap, "text": self._api_status_text(snap)})
+
     def _status_images_enabled(self) -> bool:
         try:
             return self._conf_bool("status_images", True)

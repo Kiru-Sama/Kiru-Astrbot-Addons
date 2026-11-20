@@ -223,11 +223,13 @@ def main() -> int:
                 continue
 
             log("启动 ComfyUI …")
+            # ★ 2026-11-20：ComfyUI 输出落盘（原来丢 DEVNULL，崩溃时看不到原因）
+            _out_fh = open(Path(__file__).with_name("comfy_stdout.log"), "ab", buffering=0)
             proc = subprocess.Popen(  # noqa: S603
                 ARGS,
                 cwd=str(COMFY_DIR),
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=_out_fh,
+                stderr=_out_fh,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             log(f"已拉起 pid={proc.pid}")

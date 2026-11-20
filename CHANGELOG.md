@@ -1,3 +1,11 @@
+## 2026-11-20 · monitor 1.7.86：API/服务状态查询
+
+- 新增 LLM 工具 
+cd_api_status(scope=all)：汇总 ComfyUI（运行/模型/队列/最近任务/额度）、电脑 linkd（CPU/内存/GPU/显存）、手机（CPU/内存/温度/运行时长）、AstrBot（模型/命令数/插件数）与最近 ERROR 日志；用户问「出不了图 / 服务挂了吗 / 卡不卡 / API 正常吗」时由 bot 自主调用。
+- 新增聊天指令 /api状态（别名 /服务状态 /链路状态 /健康检查，20 秒会话冷却）。
+- 新增 Web API GET /ncd-monitor/health?scope=all（返回 snapshot JSON + 中文摘要文本，面板/排查可用）。
+- 错误日志过滤只收 [ERROR]/[CRITICAL]/Traceback/Error: 行，排除 WARN 噪音。
+
 ## 2026-11-19 深夜 · QQ空间评论关注（qzone 1.2.0）
 
 - 新增「空间评论关注」后台任务：每 10 分钟拉一次自己最近 10 条说说，
