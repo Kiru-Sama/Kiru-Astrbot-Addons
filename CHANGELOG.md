@@ -1,3 +1,8 @@
+## 2026-11-20 深夜 · monitor 1.7.91 状态文本修正
+
+- health//api状态 文本：最近任务不再把 recent 条目缺失的 ok 字段误报为「失败」，改为「完成（preset，用时 X 秒）」；额度行加窗口剩余时间；余额行标注 provider，并在默认模型无余额接口时提示。
+- 错误列表过滤检查更新产生的 release 解析噪音与裸 Traceback 行；PC CPU 百分比四舍五入。
+
 ## 2026-11-20 深夜 · 济川AI 接入 + monitor 默认模型显示修正
 
 - 新增第三方 provider「济川AI」（source_id=jichuan，openai_chat_completion，api_base=https://api.jichuanai.com/v1，模型 deepseek-v4.1-flash-1017，modalities text/image/tool_use，max_context_tokens 128k）。

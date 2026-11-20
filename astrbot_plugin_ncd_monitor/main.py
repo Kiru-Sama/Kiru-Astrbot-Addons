@@ -6029,6 +6029,11 @@ class Main(star.Star):
             s = line.strip()
             if not s:
                 continue
+            # ★ 2026-11-20：检查更新时的 release 解析异常不算服务错误；裸 Traceback 行也只留异常正文
+            if "Failed to parse release information" in s:
+                continue
+            if s in ("Traceback (most recent call last):", "Traceback (most recent call last)"):
+                continue
             is_err = (
                 " [ERROR] " in s or " [CRITICAL] " in s or "Traceback" in s
                 or re.search(r"(?:^|[^A-Za-z])(?:Error|Exception): ", s) is not None
@@ -6153,9 +6158,14 @@ class Main(star.Star):
             parts.append(
                 f"{cur}{total}" + (f"（{'/'.join(extra)}）" if extra else "")
             )
-        text = "· LLM 余额：" + ("、".join(parts) if parts else "接口没返回金额")
+        name = str(bal.get("provider") or "").strip()
+        text = "· LLM 余额" + (f"（{name}）" if name else "") + "：" + (
+            "、".join(parts) if parts else "接口没返回金额"
+        )
         if bal.get("is_available") is False:
             text += "（已不可用/欠费）"
+        if bal.get("note"):
+            text += "（" + str(bal["note"]) + "）"
         return text
 
     async def _api_status_snapshot(self, scope: str = "all") -> dict:
@@ -6184,8 +6194,12 @@ class Main(star.Star):
                 "host": link.get("host") or "",
                 "port": int(link.get("port") or 0),
                 "recent": len(recent),
-                "last_ok": last.get("ok"),
+                # ★ 2026-11-20：recent 条目没有 ok 字段，None 不能当失败
+                "last_ok": (last.get("ok") if "ok" in last else None),
                 "last_age_s": (round(now - float(last.get("ts"))) if last.get("ts") else None),
+                "last_preset": last.get("preset") or "",
+                "last_model": last.get("model") or "",
+                "last_seconds": last.get("seconds"),
                 "quota": state.get("quota_summary") or {},
             }
 
@@ -6292,7 +6306,15 @@ class Main(star.Star):
                 extra = f"，模型 {comfy.get('model')}" if comfy.get("model") else ""
                 last = ""
                 if comfy.get("last_age_s") is not None:
-                    last = f"，最近任务 {comfy['last_age_s']} 秒前{'成功' if comfy.get('last_ok') else '失败'}"
+                    lv = comfy.get("last_ok")
+                    mark = "成功" if lv is True else ("失败" if lv is False else "完成")
+                    bits = []
+                    if comfy.get("last_preset"):
+                        bits.append(str(comfy["last_preset"]))
+                    if comfy.get("last_seconds") is not None:
+                        bits.append("用时 " + str(comfy["last_seconds"]) + " 秒")
+                    detail = "（" + "，".join(bits) + "）" if bits else ""
+                    last = f"，最近任务 {comfy['last_age_s']} 秒前{mark}{detail}"
                 lines.append(
                     f"· ComfyUI：{'运行中' if comfy.get('running') else '空闲'}"
                     f"（{comfy.get('host') or '?'}:{comfy.get('port') or '?'}，{q}{extra}{last}；"
@@ -6300,10 +6322,18 @@ class Main(star.Star):
                 )
                 quota = comfy.get("quota") or {}
                 if quota:
+                    win = ""
+                    try:
+                        rem = int(quota.get("window_remaining") or 0)
+                        if rem > 0:
+                            win = f"（窗口 {quota.get('window_label') or '?'}，约 {rem // 3600} 小时后重置）"
+                    except Exception:  # noqa: BLE001
+                        win = ""
                     lines.append(
                         f"· 出图额度：私聊 {quota.get('private_count', 0)}/{quota.get('private_limit', 0)}"
                         f"，群聊累计 {quota.get('group_count', 0)}，累计出图 {quota.get('total_images', 0)} 张"
                         + ("（私聊额度已触发限流）" if quota.get("private_triggered") else "")
+                        + win
                     )
 
         pc = snap.get("pc")
@@ -6313,7 +6343,11 @@ class Main(star.Star):
             else:
                 parts = []
                 if pc.get("cpu") is not None:
-                    parts.append(f"CPU {pc['cpu']}%")
+                    try:
+                        cpu_val = round(float(pc["cpu"]), 1)
+                    except (TypeError, ValueError):
+                        cpu_val = pc["cpu"]
+                    parts.append(f"CPU {cpu_val}%")
                 if pc.get("ram_pct") is not None:
                     parts.append(f"内存 {pc['ram_pct']}%（{pc.get('ram_used_gb')}/{pc.get('ram_total_gb')}GB）")
                 gpu = pc.get("gpu") or {}
@@ -6357,7 +6391,12 @@ class Main(star.Star):
             bal = snap.get("llm")
             if bal is not None:
                 # _api_status_text 本身是 staticmethod，不能 self.；用类名调静态方法
-                lines.append(Main._llm_balance_text(bal))
+                line = Main._llm_balance_text(bal)
+                mp = str(ab.get("model_primary") or ab.get("model") or "")
+                bp = str(bal.get("provider") or "")
+                if mp and bp and mp != bp:
+                    line += f"（默认模型 {mp} 无余额查询接口）"
+                lines.append(line)
 
         errs = snap.get("errors")
         if errs is not None:
