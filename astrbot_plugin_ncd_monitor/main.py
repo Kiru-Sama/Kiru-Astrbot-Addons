@@ -6027,12 +6027,130 @@ class Main(star.Star):
                     break
         return list(reversed(hits))
 
+    async def _llm_balance(self) -> dict:
+        """查当前启用 LLM provider 的余额（目前支持 DeepSeek）；5 分钟缓存。
+
+        从 AstrBot 配置读 provider 实例与 provider_sources（api_base/key），
+        只有 DeepSeek 官方接口支持 /user/balance；其它 provider 返回「查不到」。
+        """
+        now = time.time()
+        cached = getattr(self, "_llm_balance_cache", None)
+        if isinstance(cached, dict) and now - float(cached.get("ts") or 0) < 300:
+            out = dict(cached)
+            out["age_s"] = round(now - float(cached.get("ts") or 0))
+            return out
+        info: dict = {
+            "ok": False,
+            "provider": "",
+            "model": "",
+            "is_available": None,
+            "infos": [],
+            "error": "",
+            "ts": now,
+        }
+        try:
+            cfg = self.context.get_config() or {}
+            insts = cfg.get("provider") or []
+            sources = {
+                str(s.get("id")): s
+                for s in (cfg.get("provider_sources") or [])
+                if isinstance(s, dict)
+            }
+            inst = None
+            for item in insts:
+                if not isinstance(item, dict) or not item.get("enable"):
+                    continue
+                mods = item.get("modalities") or []
+                if not mods or "text" in mods:
+                    inst = item
+                    break
+            if inst is None:
+                info["error"] = "没有启用的文本 provider"
+            else:
+                info["provider"] = str(inst.get("id") or "")
+                info["model"] = str(inst.get("model") or "")
+                src = sources.get(str(inst.get("provider_source_id") or "")) or {}
+                base = str(src.get("api_base") or "").strip()
+                keys = src.get("key") or []
+                key = str(keys[0]).strip() if isinstance(keys, list) and keys else ""
+                if not base or not key:
+                    info["error"] = "provider 缺少 api_base 或 key"
+                else:
+                    from urllib.parse import urlparse as _urlparse
+
+                    u = _urlparse(base)
+                    host = (u.hostname or "").lower()
+                    root = f"{u.scheme}://{u.netloc}" if u.scheme and u.netloc else base.rstrip("/")
+                    src_id = str(src.get("id") or "").lower()
+                    if "deepseek" not in host and "deepseek" not in src_id:
+                        info["error"] = "当前 provider 不是 DeepSeek，余额接口不适用"
+                    else:
+                        url = root.rstrip("/") + "/user/balance"
+                        req = urllib.request.Request(
+                            url, headers={"Authorization": f"Bearer {key}"}
+                        )
+
+                        def _fetch() -> dict:
+                            with urllib.request.urlopen(req, timeout=8) as resp:
+                                return json.loads(resp.read().decode("utf-8", "replace"))
+
+                        data = await asyncio.to_thread(_fetch)
+                        ins = []
+                        for b in data.get("balance_infos") or []:
+                            if not isinstance(b, dict):
+                                continue
+                            ins.append(
+                                {
+                                    "currency": str(b.get("currency") or ""),
+                                    "total": str(b.get("total_balance") or ""),
+                                    "granted": str(b.get("granted_balance") or ""),
+                                    "topped_up": str(b.get("topped_up_balance") or ""),
+                                }
+                            )
+                        info.update(
+                            {
+                                "ok": True,
+                                "is_available": bool(data.get("is_available")),
+                                "infos": ins,
+                            }
+                        )
+        except Exception as exc:  # noqa: BLE001
+            info["error"] = f"{type(exc).__name__}: {exc}"[:200]
+        self._llm_balance_cache = info
+        out = dict(info)
+        out["age_s"] = 0
+        return out
+
+    @staticmethod
+    def _llm_balance_text(bal: dict) -> str:
+        """余额快照 → 一行中文。"""
+        if not bal:
+            return "· LLM 余额：查不到"
+        if not bal.get("ok"):
+            return "· LLM 余额：查不到（" + str(bal.get("error") or "未知原因") + "）"
+        parts = []
+        for b in bal.get("infos") or []:
+            cur = str(b.get("currency") or "")
+            total = str(b.get("total") or "")
+            extra = []
+            if b.get("topped_up"):
+                extra.append("充值 " + str(b.get("topped_up")))
+            if b.get("granted"):
+                extra.append("赠送 " + str(b.get("granted")))
+            parts.append(
+                f"{cur}{total}" + (f"（{'/'.join(extra)}）" if extra else "")
+            )
+        text = "· LLM 余额：" + ("、".join(parts) if parts else "接口没返回金额")
+        if bal.get("is_available") is False:
+            text += "（已不可用/欠费）"
+        return text
+
     async def _api_status_snapshot(self, scope: str = "all") -> dict:
         """汇总各 API / 服务状态；scope=all 或逗号分隔（comfy,pc,phone,astrbot,errors）。"""
         scope = str(scope or "all").strip().lower()
         want = {s.strip() for s in scope.replace("，", ",").split(",") if s.strip()}
         if not want or "all" in want or "auto" in want:
-            want = {"comfy", "pc", "phone", "astrbot", "errors"}
+            want = {"comfy", "pc", "phone", "astrbot", "llm", "errors"}
         now = time.time()
         snap: dict = {"now": time.strftime("%Y-%m-%d %H:%M:%S"), "scope": sorted(want)}
 
@@ -6134,6 +6252,12 @@ class Main(star.Star):
                 ab["commands"] = None
             snap["astrbot"] = ab
 
+        if "llm" in want:
+            try:
+                snap["llm"] = await self._llm_balance()
+            except Exception as exc:  # noqa: BLE001
+                snap["llm"] = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
+
         if "errors" in want:
             snap["errors"] = self._read_recent_errors(5)
 
@@ -6217,6 +6341,10 @@ class Main(star.Star):
             if ab.get("plugins") is not None:
                 bits.append(f"插件 {ab['plugins']} 个")
             lines.append("· AstrBot：" + ("、".join(bits) if bits else "运行中"))
+            bal = snap.get("llm")
+            if bal is not None:
+                # _api_status_text 本身是 staticmethod，不能 self.；用类名调静态方法
+                lines.append(Main._llm_balance_text(bal))
 
         errs = snap.get("errors")
         if errs is not None:
@@ -6236,11 +6364,11 @@ class Main(star.Star):
 
     @filter.llm_tool(name="ncd_api_status")
     async def ncd_api_status(self, event: AstrMessageEvent, scope: str = "all") -> str:
-        """查 API/服务运行状态（ComfyUI 在不在、队列、电脑资源、手机资源、AstrBot 与最近错误）。
+        """查 API/服务运行状态（ComfyUI 在不在、队列、电脑资源、手机资源、AstrBot、LLM 余额与最近错误）。
 
         ★ 用户问「怎么出不了图 / 服务是不是挂了 / 卡不卡 / 电脑还连着吗 / API 正常吗 /
-        有没有报错」时，先调用本工具再回答，不要凭上下文猜。
-        scope: all（默认）/ comfy / pc / phone / astrbot / errors，可逗号组合。
+        有没有报错 / 余额还剩多少 / 费用」时，先调用本工具再回答，不要凭上下文猜。
+        scope: all（默认）/ comfy / pc / phone / astrbot / llm / errors，可逗号组合。
         """
         try:
             return await self._api_status_for_event(event, scope or "all")
@@ -6269,6 +6397,36 @@ class Main(star.Star):
             yield event.plain_result(f"状态查询失败：{type(exc).__name__}: {exc}")
             return
         yield event.plain_result(text)
+
+    @filter.command("余额", alias={"api余额", "llm余额", "查余额"})
+    async def llm_balance_cmd(self, event: AstrMessageEvent):
+        """查当前 LLM API（DeepSeek）余额：/余额"""
+        umo = str(getattr(event, "unified_msg_origin", "") or "")
+        now = time.time()
+        cd = getattr(self, "_llm_balance_cd", None)
+        if cd is None:
+            cd = {}
+            self._llm_balance_cd = cd
+        if now - float(cd.get(umo) or 0) < 15:
+            yield event.plain_result("刚查过啦，15 秒后再看～")
+            return
+        cd[umo] = now
+        if len(cd) > 300:
+            for k in list(cd)[:150]:
+                cd.pop(k, None)
+        try:
+            bal = await self._llm_balance()
+        except Exception as exc:  # noqa: BLE001
+            yield event.plain_result(f"余额查询失败：{type(exc).__name__}: {exc}")
+            return
+        lines = [self._llm_balance_text(bal)]
+        if bal.get("ok"):
+            lines.append(
+                "（" + str(bal.get("provider") or "") + "；DeepSeek 官方接口）"
+            )
+        else:
+            lines.append("（" + str(bal.get("provider") or "provider") + "）")
+        yield event.plain_result("\n".join(lines))
 
     async def api_health(self, **kwargs):
         """Web API：返回 API/服务状态 JSON（供面板/测试）。"""

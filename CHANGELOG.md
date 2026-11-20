@@ -1,3 +1,10 @@
+## 2026-11-20 · monitor 1.7.88：LLM API 余额接入
+
+- 状态查询新增 LLM 余额：从 AstrBot provider/provider_sources 读 DeepSeek api_base+key，调官方 /user/balance，5 分钟缓存；
+cd_api_status(scope=llm) 与 /api状态 文本里显示「CNY3.56（充值 3.56/赠送 0.00）」，欠费/不可用会标注。
+- 新增聊天指令 /余额（别名 /api余额 /llm余额 /查余额，15 秒会话冷却）。
+- 非 DeepSeek provider 明确返回「余额接口不适用」。
+
 ## 2026-11-20 · monitor 1.7.86：API/服务状态查询
 
 - 新增 LLM 工具 
